@@ -311,7 +311,16 @@ $allUsers = $conn->query(
      FROM users u
      JOIN roles r ON r.id = u.role_id
      LEFT JOIN faculties f ON f.id = u.faculty_id
-     ORDER BY r.name, u.full_name"
+     ORDER BY CASE r.name
+                WHEN 'system_admin' THEN 1
+                WHEN 'head_academic' THEN 2
+                WHEN 'registration' THEN 3
+                WHEN 'dean' THEN 4
+                WHEN 'lecturer' THEN 5
+                WHEN 'student' THEN 6
+                ELSE 7
+              END,
+              u.full_name"
 )->fetch_all(MYSQLI_ASSOC);
 ?>
 <!DOCTYPE html>

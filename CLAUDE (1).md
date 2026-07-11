@@ -1154,3 +1154,54 @@ under "Known Gaps / Things to Revisit" at the end of this section.
       temporary account and its `password_resets` rows were deleted
       afterward.
 
+### Registration Office Role Audit
+- [x] **Full audit of every page a Registration Office user can reach**
+      (`registration/dashboard.php`, and the real targets of the
+      "Students"/"Import Students"/"Reports" sidebar links), re-verifying
+      the RBAC fix already recorded above under "Done (continued 9)"
+      rather than assuming that log entry still matches the live code.
+      Checked live HTTP behavior first (not just the source) with a
+      temporary `registration`-role account: all four pages returned
+      `200` with no PHP errors/warnings and the correct
+      "All faculties — enrollment-focused" scope banner — no blank pages,
+      404s, or `unauthorized.php` redirects on any of them.
+      - **Dashboard** (`registration/dashboard.php`): loads cleanly;
+        "Recent Student Registrations" rendered 10 real rows from the
+        `students` table (not static markup); both quick links resolved
+        to `admin/students.php` and `admin/students_import.php` and both
+        returned `200`.
+      - **Students**: `includes/nav_items.php`'s "Students" entry already
+        carries the `path => 'admin/students.php'` override and lists
+        `registration`; `admin/students.php`'s `require_role()` already
+        includes `'registration'`. Confirmed live: the Faculty filter
+        renders as a real, enabled dropdown (5 faculties, not
+        locked/disabled the way Dean's is), and a full create → edit →
+        delete round-trip against a temporary student succeeded — created
+        under Faculty 4/Department 6, immediately visible in the
+        all-faculty list (`faculty_id=0`), edited (name/level/shift all
+        changed and persisted), then deleted (row removed from `students`,
+        linked `users` row correctly deactivated rather than deleted,
+        matching the existing Dean-audit-verified behavior).
+      - **Import Students**: nav entry already overrides to
+        `admin/students_import.php` and lists `registration`; that file's
+        `require_role()` already includes `'registration'`. Confirmed live:
+        `200`, a real file-upload form (not a placeholder), no errors.
+      - **Reports**: nav entry already overrides to `reports.php` and
+        lists `registration`; `reports.php`'s `require_role()` already
+        includes `'registration'`. Confirmed live: the Report Type control
+        offers exactly `department_summary`/`faculty_summary` (no Course
+        Attendance option, matching the "No access to Attendance" rule),
+        and Department Summary rendered a "Total Enrollments" column with
+        no "Avg Present %" column — enrollment-focused, not
+        attendance-focused, as specified.
+      - **Result: no bugs found, no code changes were necessary.** The
+        RBAC/nav fix recorded under "Done (continued 9)" was verified
+        still correct and complete for all four surfaces; this audit's
+        only contribution is confirming that against live behavior instead
+        of the code alone.
+      Temporary registration-role account and the temporary student (plus
+      its linked user account) created for the CRUD test were deleted
+      afterward; the two real Registration Office accounts already in the
+      database (`registrar01`, `ximtixanaadka`) were left untouched and
+      re-confirmed present throughout.
+
