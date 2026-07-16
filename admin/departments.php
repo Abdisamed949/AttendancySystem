@@ -61,8 +61,61 @@ if (!empty($_SESSION['flash_error'])) {
 $formMode = 'create';
 $formValues = ['id' => 0, 'code' => '', 'name' => '', 'faculty_id' => $deanFacultyId];
 
+/**
+ * Shared by both the single-row "Delete" button and the bulk "Delete
+ * Selected" action so the two can never drift on blocker/validation logic.
+ * Bulk delete is system_admin-only (see the bulk_delete action handler
+ * below), but this function itself still honors the Dean's own-faculty
+ * scoping so the single-row Delete button keeps working exactly as before.
+ */
+function delete_department_row(mysqli $conn, int $departmentId, string $role, int $deanFacultyId): array
+{
+    if ($role === 'dean') {
+        $ownCheckStmt = $conn->prepare('SELECT id, name FROM departments WHERE id = ? AND faculty_id = ?');
+        $ownCheckStmt->bind_param('ii', $departmentId, $deanFacultyId);
+        $ownCheckStmt->execute();
+        $deptRow = $ownCheckStmt->get_result()->fetch_assoc();
+        $ownCheckStmt->close();
+    } else {
+        $deptStmt = $conn->prepare('SELECT id, name FROM departments WHERE id = ?');
+        $deptStmt->bind_param('i', $departmentId);
+        $deptStmt->execute();
+        $deptRow = $deptStmt->get_result()->fetch_assoc();
+        $deptStmt->close();
+    }
+
+    if (!$deptRow) {
+        return ['ok' => false, 'message' => 'Department not found.'];
+    }
+
+    $label = (string) $deptRow['name'];
+
+    $blockers = [];
+    foreach (['courses' => 'course', 'students' => 'student', 'lecturers' => 'lecturer'] as $table => $blockerLabel) {
+        $countStmt = $conn->prepare("SELECT COUNT(*) AS c FROM {$table} WHERE department_id = ?");
+        $countStmt->bind_param('i', $departmentId);
+        $countStmt->execute();
+        $count = (int) ($countStmt->get_result()->fetch_assoc()['c'] ?? 0);
+        $countStmt->close();
+        if ($count > 0) {
+            $blockers[] = $count . ' ' . $blockerLabel . ($count === 1 ? '' : 's');
+        }
+    }
+
+    if (!empty($blockers)) {
+        return ['ok' => false, 'message' => $label . ': still has ' . implode(', ', $blockers) . '.'];
+    }
+
+    $deleteStmt = $conn->prepare('DELETE FROM departments WHERE id = ?');
+    $deleteStmt->bind_param('i', $departmentId);
+    $deleteStmt->execute();
+    $deleteStmt->close();
+
+    return ['ok' => true, 'message' => $label . ' deleted.'];
+}
+
 // ---------------------------------------------------------------------
-// Handle POST actions: create, update, delete
+// Handle POST actions: create, update, delete, bulk_delete (system_admin only)
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
@@ -145,45 +198,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errorMessage = $validationError;
     } elseif ($action === 'delete') {
         $departmentId = (int) ($_POST['department_id'] ?? 0);
-
-        // A Dean may only delete departments inside their own faculty.
-        if ($role === 'dean') {
-            $ownCheckStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
-            $ownCheckStmt->bind_param('ii', $departmentId, $deanFacultyId);
-            $ownCheckStmt->execute();
-            if (!$ownCheckStmt->get_result()->fetch_assoc()) {
-                $departmentId = 0;
-            }
-            $ownCheckStmt->close();
-        }
-
-        if ($departmentId <= 0) {
-            $errorMessage = 'Department not found.';
+        $result = delete_department_row($conn, $departmentId, $role, $deanFacultyId);
+        if ($result['ok']) {
+            $_SESSION['flash_success'] = 'Department deleted successfully.';
+            redirect_to('admin/departments.php');
         } else {
-            $blockers = [];
-            foreach (['courses' => 'course', 'students' => 'student', 'lecturers' => 'lecturer'] as $table => $label) {
-                $countStmt = $conn->prepare("SELECT COUNT(*) AS c FROM {$table} WHERE department_id = ?");
-                $countStmt->bind_param('i', $departmentId);
-                $countStmt->execute();
-                $count = (int) ($countStmt->get_result()->fetch_assoc()['c'] ?? 0);
-                $countStmt->close();
-                if ($count > 0) {
-                    $blockers[] = $count . ' ' . $label . ($count === 1 ? '' : 's');
+            $errorMessage = $result['message'];
+        }
+    } elseif ($action === 'bulk_delete') {
+        // Per this feature's scope, bulk delete is system_admin-only —
+        // Dean keeps single-row delete (above) but not the bulk UI/action.
+        if ($role !== 'system_admin') {
+            $_SESSION['flash_error'] = 'You are not permitted to bulk-delete departments.';
+        } else {
+            $ids = array_values(array_unique(array_filter(
+                array_map('intval', (array) ($_POST['department_ids'] ?? [])),
+                static fn ($id) => $id > 0
+            )));
+
+            if (empty($ids)) {
+                $_SESSION['flash_error'] = 'No departments were selected.';
+            } else {
+                $deletedCount = 0;
+                $skippedMessages = [];
+                foreach ($ids as $did) {
+                    $result = delete_department_row($conn, $did, $role, $deanFacultyId);
+                    if ($result['ok']) {
+                        $deletedCount++;
+                    } else {
+                        $skippedMessages[] = $result['message'];
+                    }
+                }
+
+                $summary = $deletedCount . ' of ' . count($ids) . ' selected department' . (count($ids) === 1 ? '' : 's') . ' deleted.';
+                if (!empty($skippedMessages)) {
+                    $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
+                }
+                if ($deletedCount > 0) {
+                    $_SESSION['flash_success'] = $summary;
+                } else {
+                    $_SESSION['flash_error'] = $summary;
                 }
             }
-
-            if (!empty($blockers)) {
-                $errorMessage = 'Cannot delete this department: it still has ' . implode(', ', $blockers) . ' linked to it.';
-            } else {
-                $deleteStmt = $conn->prepare('DELETE FROM departments WHERE id = ?');
-                $deleteStmt->bind_param('i', $departmentId);
-                $deleteStmt->execute();
-                $deleteStmt->close();
-
-                $_SESSION['flash_success'] = 'Department deleted successfully.';
-                redirect_to('admin/departments.php');
-            }
         }
+        redirect_to('admin/departments.php');
     }
 }
 
@@ -313,6 +371,7 @@ if ($role === 'dean') {
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Departments</h6>
                             <div class="d-flex gap-2">
                                 <?php if ($role === 'system_admin'): ?>
+                                    <button type="button" id="bulkDeleteDepartmentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments_import.php" class="btn btn-outline-secondary btn-sm">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
@@ -323,10 +382,20 @@ if ($role === 'dean') {
                             </div>
                         </div>
 
+                        <?php if ($role === 'system_admin'): ?>
+                            <form id="bulkDeleteDepartmentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/departments.php" class="d-none">
+                                <input type="hidden" name="action" value="bulk_delete">
+                                <div id="bulkDeleteDepartmentsIds"></div>
+                            </form>
+                        <?php endif; ?>
+
                         <div class="table-responsive">
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
+                                        <?php if ($role === 'system_admin'): ?>
+                                            <th><input type="checkbox" id="selectAllDepartments"></th>
+                                        <?php endif; ?>
                                         <th>Code</th>
                                         <th>Department Name</th>
                                         <th>Faculty</th>
@@ -337,11 +406,17 @@ if ($role === 'dean') {
                                 <tbody>
                                     <?php if (empty($departments)): ?>
                                         <tr>
-                                            <td colspan="5" class="text-center text-muted py-4">No departments have been created yet.</td>
+                                            <td colspan="<?= $role === 'system_admin' ? 6 : 5 ?>" class="text-center text-muted py-4">No departments have been created yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($departments as $d): ?>
                                             <tr>
+                                                <?php if ($role === 'system_admin'): ?>
+                                                    <td>
+                                                        <input type="checkbox" class="row-check-department" value="<?= (int) $d['id'] ?>"
+                                                               data-label="<?= htmlspecialchars($d['name'] . ' (' . $d['code'] . ')') ?>">
+                                                    </td>
+                                                <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($d['code']) ?></span></td>
                                                 <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($d['name']) ?></td>
                                                 <td><?= htmlspecialchars($d['faculty_name']) ?></td>
@@ -424,5 +499,22 @@ if ($role === 'dean') {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <?php if ($role === 'system_admin'): ?>
+        <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+        <script>
+            window.addEventListener('DOMContentLoaded', () => {
+                admasInitBulkDelete({
+                    checkboxSelector: '.row-check-department',
+                    selectAllSelector: '#selectAllDepartments',
+                    buttonSelector: '#bulkDeleteDepartmentsBtn',
+                    formSelector: '#bulkDeleteDepartmentsForm',
+                    hiddenContainerSelector: '#bulkDeleteDepartmentsIds',
+                    hiddenInputName: 'department_ids[]',
+                    entityLabel: 'department',
+                    entityLabelPlural: 'departments',
+                });
+            });
+        </script>
+    <?php endif; ?>
 </body>
 </html>

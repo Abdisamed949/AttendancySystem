@@ -1205,3 +1205,619 @@ under "Known Gaps / Things to Revisit" at the end of this section.
       database (`registrar01`, `ximtixanaadka`) were left untouched and
       re-confirmed present throughout.
 
+### Semester / Xiiso Restructuring
+- [x] **Replaced the raw-date attendance model with ADMAS's real Semester +
+      Xiiso (session) structure**, on branch `feature/semester-xiiso`
+      (checkpoint commit `bc5ab1e` on `main` beforehand: "Working system
+      before Semester/Xiiso restructuring - all 6 roles complete, tested").
+      A semester runs ~3 months and has exactly 12 numbered sessions
+      ("Xiiso"): 1-5 and 7-11 are regular teaching sessions, 6 is the
+      Midterm, 12 is the Final — matching the lecturer's real paper/Excel
+      tracking grid instead of a free-form date picker.
+      - **Schema**: new `semesters` table (`academic_year_id` FK, `name`,
+        `start_date`, `end_date`, `is_current` — same single-current-flag
+        pattern as `academic_years.is_current`) and `sessions` table
+        (`semester_id` FK, `session_number` 1-12, `type` ENUM
+        `regular`/`midterm`/`final`, `date` nullable until assigned).
+        `attendance` gained a nullable `session_id` FK; the old
+        `uq_attendance_once_per_day (student_id, course_id, attendance_date)`
+        unique key was replaced with
+        `uq_attendance_once_per_session (student_id, course_id, session_id)`
+        — old date-only rows keep `session_id = NULL` permanently (MySQL
+        treats NULL as distinct in a UNIQUE index, so they're never touched
+        or invalidated) rather than guessing which Xiiso they belonged to.
+        `attendance_date` stays `NOT NULL` and is auto-populated from the
+        selected session's `date` at save time (denormalized on purpose, so
+        every existing date-range report keeps working unmodified). Shipped
+        as both an update to the baseline `admas_attendance_schema.sql` and
+        a standalone `migrations/2026_07_semesters_sessions.sql`, applied
+        and verified against the live dev DB.
+      - **New `includes/semester_helpers.php`**: `get_current_semester()`,
+        `generate_sessions_for_semester()` (creates the 12 rows with the
+        1-5/6/7-11/12 type mapping above, idempotent via `INSERT IGNORE`
+        against the `(semester_id, session_number)` unique key),
+        `session_label()` (e.g. "Xiiso 3", "Midterm", "Final"),
+        `get_sessions_for_semester()`.
+      - **New `semesters.php`** (root-level, shared by `system_admin` and
+        `head_academic`, same lives-at-root-not-under-/admin pattern as
+        `attendance.php`/`reports.php`): create semesters per academic
+        year, one-click "Generate Sessions," inline per-session date
+        assignment, "Set as Current" (writes `semesters.is_current` +
+        `settings.current_semester_id`, transaction-wrapped like the
+        existing Academic Year "set current" flow). Nav entry added to
+        `includes/nav_items.php` for both roles.
+      - **`attendance.php`**: the old `<input type="date" name="attendance_date">`
+        picker was replaced with a read-only "Semester" field (locked to
+        whichever semester is current) plus a "Xiiso (Session)" dropdown.
+        Roster prefill and the save upsert now key off `session_id` instead
+        of `attendance_date`; saving is blocked with a clear error if the
+        chosen session has no calendar date assigned yet (can't populate
+        the denormalized `attendance_date` otherwise). Pages with no
+        current semester, or a current semester with no generated sessions
+        yet, show a guidance message instead of the marking form.
+      - **`reports.php`**: added a 4th report type, "Xiiso Attendance
+        Grid" (`system_admin`/`head_academic`/`dean`/`lecturer`, not
+        `registration` — no attendance access per §4) — one row per
+        enrolled student, one column per Xiiso 1-12 in the correct
+        1-5/Midterm/7-11/Final order, with auto-computed P/A/% trailing
+        columns ('1' present, '0' absent, 'L' late, 'E' excused, blank
+        unmarked; P/A/% use the same present-and-absent-only formula the
+        other 3 report types already use, so late/excused count toward the
+        denominator but neither column). Reuses the existing
+        PhpSpreadsheet `Spreadsheet`/`Writer\Xlsx` and Dompdf builders
+        already in the file rather than introducing a second export
+        pipeline. Student roster resolution mirrors `attendance.php`
+        exactly, including its `course_enrollments`-empty department
+        fallback (needed in practice: this dev DB's `course_enrollments`
+        table is currently empty).
+      - **Live end-to-end verification** (curl against the running XAMPP
+        instance, logged in as real seeded accounts, not just `php -l`):
+        created a semester as `admin01`, generated its 12 sessions and
+        confirmed the exact type mapping in the DB, assigned dates to
+        three sessions, loaded the `attendance.php` roster for a real
+        course (fallback path, since `course_enrollments` is empty),
+        marked 5 students Present/Absent/Late, confirmed
+        `attendance.attendance_date` was correctly derived from the
+        session's date, reloaded the roster and confirmed the marks
+        persisted (radio `checked` state round-tripped), pulled the Xiiso
+        grid on-screen and confirmed cell values/P/A/% matched exactly,
+        downloaded both the `.xlsx` (valid "Microsoft Excel 2007+" file)
+        and `.pdf` (valid 3-page PDF) exports, and re-ran the pre-existing
+        Course Attendance Summary report to confirm its present/absent %
+        for the same course matched the marks just entered (60%/20%,
+        i.e. 3 present + 1 absent out of 5 marks) — a regression check
+        that the old date-range reports still work unmodified against the
+        new session-based rows.
+      - **Result: no bugs found during verification beyond one fixed while
+        building** — `build_xiiso_grid_report()` initially only joined
+        through `course_enrollments` and rendered zero rows against this
+        dev DB (which has no enrollment rows yet); added the
+        `attendance.php`-style department fallback and re-verified all 60
+        department students (including the 5 just marked) render with
+        correct values.
+
+### Bug found: Grid View attendance invisible on student dashboard
+- [x] **Root cause investigation** (before any fix): a student's own
+      dashboard/attendance view wasn't showing attendance marked via the
+      new interactive Grid View (`attendance_grid.js` +
+      `ajax/save_attendance_cell.php`), even though the same records marked
+      via the classic single-session form showed up fine. Confirmed via
+      direct DB queries: the Grid View's save *was* reaching the database
+      correctly — `ajax/save_attendance_cell.php` derives `academic_year_id`
+      per-student from `students.academic_year_id` (e.g. students 41/36/31/26
+      got academic_year_id 2/3/4/1 respectively, correctly matching their own
+      records). The problem was on the read side:
+      `student/dashboard.php`/`student/courses.php` filter
+      `WHERE a.academic_year_id = ?` using
+      `settings.current_academic_year_id` — a single global value that had
+      drifted to `4` ("2022/2023") and had nothing to do with the actual
+      current semester (`semesters.is_current = 1`, academic_year_id `1`,
+      "2025/2026") after the Semester/Xiiso restructuring above. Only the
+      one student whose own `academic_year_id` happened to equal 4 ever saw
+      their Grid View attendance; everyone else's rows existed but were
+      silently filtered out. The classic form doesn't hit this because its
+      roster query already filters students by the same `academic_year_id`
+      the lecturer explicitly picks, so what it writes and what the
+      dashboard (mostly, coincidentally) expects tend to line up — the Grid
+      View has no such filter step, it just reads the truth off the
+      student's own row.
+      **This finding directly motivated the consolidated restructuring
+      below** — a narrow "keep `settings.current_academic_year_id` in sync"
+      fix was considered and explicitly rejected in favor of removing the
+      single global "current" concept entirely, once it became clear
+      different faculties need independent semester tracks anyway.
+
+### Consolidated Restructuring: Per-Faculty Semesters, Course Offerings, Student Semester Tracking
+- [ ] **Phase 0 — Schema (additive only)** — done, on branch
+      `feature/semester-xiiso`. Added:
+      - `semesters.faculty_id` (nullable FK -> `faculties`) — "current"
+        becomes a per-faculty concept instead of one global flag. Existing
+        3 semester rows keep `faculty_id = NULL` until assigned via an
+        updated `semesters.php` (Phase 1) — a NULL-faculty semester can
+        never be marked current going forward. Unique key changed from
+        `uq_semester_name_per_year (academic_year_id, name)` to
+        `uq_semester_name_per_faculty_year (faculty_id, academic_year_id,
+        name)`; hit and resolved a MySQL 1553 ("index needed in a foreign
+        key constraint") gotcha — `academic_year_id`'s FK needed its own
+        supporting `idx_semesters_academic_year` index added *before* the
+        old unique key could be dropped, since the new one leads with
+        `faculty_id` instead.
+      - New `course_offerings` table (`course_id`, `semester_id`,
+        `lecturer_id` nullable, unique per `(course_id, semester_id)`) —
+        replaces `courses.lecturer_id` as a permanent assignment.
+        `courses.lecturer_id` itself is untouched in this phase (still read
+        by not-yet-migrated code); it gets backfilled into
+        `course_offerings` and dropped only in later phases, once verified
+        unused.
+      - `students.semester_id` (nullable FK -> `semesters`) — replaces
+        `students.level` going forward. `level` stays in the schema,
+        unused after Phase 3, since there's no reliable formula mapping an
+        existing 1-5 value to a real semester row (confirmed: live `level`
+        values 1-4 don't correspond to any actual semester).
+      Shipped as `migrations/2026_07_faculty_scoped_semesters_and_offerings.sql`
+      (applied and verified against the live dev DB — final working
+      statement order captured in the file for future fresh installs) and
+      mirrored into `admas_attendance_schema.sql`. Verified via
+      `SHOW CREATE TABLE` on all three affected tables plus unchanged row
+      counts (`semesters` 3, `students` 301, `courses` 24) after the
+      migration.
+      Full plan (all phases, decisions D1-D7, file-by-file breakdown) is
+      recorded at the plan-mode approval stage for this session; Phases
+      2-4 (`course_offerings` backfill + write-authorization + course
+      management UI, the Level -> Semester student field, and final
+      UI-clarity/cleanup) are tracked as in-progress below, updated as
+      each phase completes and is verified.
+
+- [x] **Phase 1 — Per-faculty current semester, done and verified.**
+      `get_current_semester(mysqli $conn, int $facultyId)` in
+      `includes/semester_helpers.php` now requires a faculty and returns
+      null for `$facultyId <= 0`; every caller updated to resolve faculty
+      from the specific course/student/dean in scope, never from a
+      lecturer's own home department (rejected explicitly — a lecturer can
+      hold offerings across faculties once Phase 2 lands).
+      - `includes/attendance_helpers.php`: added `get_course_faculty_id()`.
+      - `semesters.php`: Faculty selector on Add Semester (required for new
+        rows), Faculty column + inline "Assign Faculty" action for the
+        legacy `faculty_id IS NULL` rows, `set_current_semester` now clears
+        `is_current` only `WHERE faculty_id = ?` (was unscoped/global)
+        and rejects setting a NULL-faculty semester current. Dropped the
+        dead `current_semester_id` settings write and the now-unused
+        `save_setting()` helper from this file.
+      - `ajax/save_attendance_cell.php`: resolves the course's faculty via
+        `get_course_faculty_id()` before calling `get_current_semester()`.
+      - `attendance.php`: the biggest structural change — semester/session
+        resolution used to run once, globally, before any course was even
+        selected; moved into a new `resolve_current_semester_for_course()`
+        helper called from both the POST and GET handlers right after
+        `course_id` is known. This surfaced a real chicken-and-egg bug
+        while building: the classic form's entire filter form (including
+        the Course dropdown itself) and the Grid View's course picker were
+        both gated behind `$currentSemester !== null`, which can now never
+        be true before a course is picked — fixed by ungating the picker
+        forms (only `empty($courses)` blocks them now) and moving the
+        Semester/Xiiso-session fields into their own conditional block
+        that only appears once a course is selected, plus a new
+        `admasReloadWithCourse()` JS helper so picking a course reloads
+        the page (mirroring the Grid View picker's existing reload
+        pattern) to re-resolve sessions for that course's faculty.
+      - `reports.php`: Xiiso course dropdown query gained `faculty_id`;
+        `$defaultXiisoSemesterId` now resolves from the selected course's
+        faculty (was a bare global call, would have fatal-errored);
+        added a guard that silently un-selects the semester if a
+        submitted course+semester pair belong to different faculties
+        (verified via a crafted mismatched request — degrades to no
+        semester selected, no error).
+      - Dashboards swapped from `settings.current_academic_year_id` to
+        per-faculty resolution: `dean/dashboard.php` (trivial, already had
+        `$deanFacultyId`), `student/dashboard.php` + `student/courses.php`
+        (resolve the viewing student's own `faculty_id`), `lecturer/
+        courses.php` (the "Last Session" stats default is now resolved
+        **per course row**, one query per distinct faculty represented in
+        that lecturer's own course list — not a single lecturer-home
+        default), `head_academic/dashboard.php`'s Attendance-by-Faculty
+        (genuinely cross-faculty — one small query per faculty, merged),
+        `notifications.php` (dean branch trivial; system_admin/
+        head_academic branch + the Notify POST handler's server-side
+        re-verify both do the same per-faculty loop-and-merge), `admin/
+        dashboard.php`'s fallback alerts query (same loop-and-merge
+        pattern, capped back to top 8 after merging).
+      - Retired the global "Set as Current Year" control entirely from
+        `admin/settings.php` and `head_academic/academic_settings.php`
+        (byte-for-byte duplicated logic in both) since nothing reads
+        `settings.current_academic_year_id` anymore — replaced with a note
+        pointing to the per-faculty control on `semesters.php`; kept "Add
+        New Academic Year" (still needed to populate the label dropdown
+        used when creating semesters).
+      - Confirmed via repo-wide grep that `current_academic_year_id` is
+        now read in exactly one place on purpose:
+        `attendance.php`'s `$defaultAcademicYearId`, a cosmetic
+        pre-selected dropdown default for the (unrelated, unchanged)
+        student-cohort Academic Year filter — left alone as documented
+        low-priority/cosmetic, not a scoping-correctness issue.
+      - **Verified end-to-end via real HTTP requests** against the live
+        XAMPP app (not just `php -l`, though every touched file was also
+        lint-checked clean): created a temporary `system_admin` test
+        account (explicit user approval obtained first, since the harness
+        blocked account creation as a sensitive action by default), logged
+        in via curl, and confirmed `admin/dashboard.php`, `notifications.php`,
+        `attendance.php`, `reports.php`, and `admin/settings.php` all
+        return 200 with zero PHP warnings/notices/fatals. Assigned the two
+        pre-existing legacy semesters to two different faculties (Semester
+        3 -> Engineering & IT, semester 1 -> Social Sciences) and set both
+        current *simultaneously* via the real `semesters.php` UI — confirmed
+        in the DB that both stayed `is_current = 1` at once (the actual
+        point of this phase: setting one faculty's current semester no
+        longer clears another's). Loaded `attendance.php?course_id=10`
+        (a Social Sciences course) and confirmed the Xiiso session dropdown
+        and read-only Semester field correctly showed *that faculty's* own
+        current semester ("semester 1", all 12 Xiiso sessions); loaded a
+        course in a faculty with no current semester set (`course_id=3`,
+        informatics) and confirmed a clean "No current semester is set for
+        informatics." message with no error, course/shift pickers still
+        usable. Verified the `reports.php` mismatch guard directly: a
+        matched course+semester query string showed "Semester: semester 1",
+        a deliberately mismatched one showed a blank semester with no
+        fatal error.
+        **Closed the original bug end-to-end**: created a temporary student
+        account in the Social Sciences faculty, marked one Xiiso session
+        Present via the real Grid View AJAX endpoint
+        (`ajax/save_attendance_cell.php`) as the admin, then logged in *as
+        that student* (separate session/cookie jar) and confirmed both
+        `student/dashboard.php` ("My Attendance %": 100.0%, course row
+        present) and `student/courses.php` (green 100.0% badge on that
+        course) now show it — the exact symptom from the original bug
+        report, now fixed as a consequence of the per-faculty restructuring
+        rather than a narrow patch. All temporary accounts and the one
+        temporary attendance row were deleted afterward (confirmed via row
+        counts back to the pre-test baseline: 301 students, 149 attendance
+        rows); the faculty-assignment/current-semester configuration and
+        the session dates/sessions generated for Social Sciences' semester
+        were deliberately left in place (real configuration needed for the
+        feature to work, not test pollution) — Engineering & IT, informatics,
+        and Business Administration still have no current semester set and
+        will show the "no current semester" guidance message everywhere
+        until an admin sets one.
+
+- [x] **Phase 2 — Course offerings, done and verified.** Replaced
+      `courses.lecturer_id` (a permanent, university-history-spanning
+      assignment) with per-semester `course_offerings` rows as the source
+      of "who teaches this course, when" — `courses.lecturer_id` itself is
+      left in the schema, unused after this phase, dropped only in a later
+      cleanup migration (Phase 4) once verified nothing reads it.
+      - **Backfill** (`migrations/2026_07_course_offerings_backfill.sql`):
+        a two-tier rule — courses whose attendance history maps to exactly
+        one semester *and that semester already belongs to the course's
+        own faculty* get that semester's offering; everything else falls
+        back to the course's own faculty's current semester (if set).
+        Running it against live data surfaced a real correctness trap the
+        tier-1-without-the-faculty-check version of this rule would have
+        hit silently: 3 courses' attendance history pointed at a semester
+        that Phase 1's own test setup had since assigned to a *different*
+        faculty than those courses actually belong to (an artifact of the
+        old single-global-semester model, where every course shared one
+        semester regardless of faculty) — the added faculty-match check
+        correctly skips tier 1 for those and falls through to tier 2
+        instead of creating a cross-faculty offering. Only the 4 courses
+        in a faculty that already had a current semester set (Social
+        Sciences) got auto-backfilled; the other 20 (informatics,
+        Business Administration — neither had a current semester at
+        backfill time) got no row and need manual assignment via the new
+        UI, exactly as designed — confirmed via the migration's own
+        verification `SELECT`.
+      - **Write-authorization**: `user_can_write_course_attendance()` in
+        `includes/attendance_helpers.php` now takes a `$semesterId` and,
+        for the `lecturer` role, checks `course_offerings` (course +
+        *current* semester + lecturer) instead of the permanent column —
+        a lecturer unassigned from a course for the next semester loses
+        write access automatically instead of retaining it forever. Same
+        current-offering scoping applied to `attendance.php`'s course
+        list (the lecturer branch's actual security boundary),
+        `lecturer/courses.php` (list + Faculty/Department filter option
+        queries), and `lecturer/dashboard.php`'s KPI counts + "My
+        Assigned Courses" table (each row's Academic Year now comes from
+        its own current offering's semester, not one shared global
+        label, since a lecturer's courses can span faculties on
+        different years at once — D1, never derived from the lecturer's
+        own home department).
+      - **Any-offering (historical) scoping**, per D2's other branch,
+        applied to `reports.php`'s lecturer report filter and Xiiso course
+        dropdown (a lecturer can still report on courses they no longer
+        currently teach), and `admin/lecturers.php` /
+        `head_academic/lecturers.php`'s course-count display badge
+        (lifetime distinct-course count via `course_offerings`).
+        `admin/lecturers.php`'s delete-blocker switched to
+        current-offering-only (a lecturer with only past assignments no
+        longer blocks deletion). `student/courses.php`'s displayed
+        lecturer name now resolves through the student's own course's
+        current offering (current-only, since it's a live "who teaches
+        this now" display).
+      - **`admin/courses.php` redesign**: Add/Edit form dropped the
+        "Assigned Lecturer" field and its department cross-check
+        validation entirely (course creation is now catalog-only: code,
+        name, department, credit hours). The course list's old
+        "Assigned Lecturer" column became "Current Offering" (lecturer +
+        semester + academic year, resolved per row via that row's own
+        faculty's current semester — "No current semester" vs
+        "Unassigned" are rendered as distinct states). Added a "Manage
+        Offerings" icon-link per row.
+      - **New `admin/course_offerings.php`** (`system_admin`/`dean`,
+        dean scoped to own-faculty courses same as admin/courses.php) —
+        reachable only via that per-row link, deliberately no standalone
+        sidebar entry (confirmed with the user before building: it's a
+        per-course contextual page, meaningless without a course already
+        picked). Lists all of one course's offerings across every
+        semester; the add/update form's Semester dropdown is restricted
+        to that course's own faculty's semesters (D1), Lecturer dropdown
+        restricted to that course's own department (the validation moved
+        here from the old admin/courses.php field), Academic Year shown
+        read-only and derived from the selected semester via a small JS
+        `data-academic-year` attribute lookup — never a separate input.
+        Save is an upsert (`ON DUPLICATE KEY UPDATE`) keyed on the
+        `(course_id, semester_id)` unique constraint, so re-saving an
+        already-offered semester updates the lecturer instead of
+        erroring as a duplicate.
+      - **`admin/courses_import.php`**: dropped the "Lecturer" column
+        entirely from the bulk-import template, header-matching, and
+        INSERT — lecturer assignment now happens exclusively through
+        "Manage Offerings" after import, per the same UX simplification
+        applied to the manual form.
+      - **Verified end-to-end via real HTTP requests**: created a fresh
+        temporary `system_admin` account (previous session's temp
+        accounts had already been deleted), confirmed
+        `admin/courses.php`, `admin/course_offerings.php` (both a course
+        with an offering and one in a faculty with no current semester —
+        "has no semesters yet" guidance, no error), `admin/lecturers.php`,
+        `head_academic/lecturers.php`, `reports.php`, and `attendance.php`
+        all return 200 with zero PHP warnings/notices/fatals. Exercised
+        the real Manage Offerings save flow (switched course 10's
+        semester-2 offering to a different in-department lecturer,
+        confirmed via DB; then confirmed a lecturer *outside* that
+        course's department was correctly rejected with the offering left
+        unchanged) and restored the original lecturer afterward.
+        **Directly verified the stale-access fix this phase exists for**:
+        created a temporary lecturer account, pointed course 10's current
+        offering at them, confirmed via a *separate lecturer login* that
+        `lecturer/courses.php`/`lecturer/dashboard.php` showed the course
+        and a real Grid View attendance save succeeded; then reassigned
+        that same offering back to the original lecturer (simulating a
+        semester-to-semester reassignment) and confirmed, still logged in
+        as the same temporary lecturer with no new login, that the course
+        immediately disappeared from their course list *and* a further
+        attendance-save attempt was rejected with `403` — under the old
+        permanent `courses.lecturer_id` model this access would have
+        persisted indefinitely. All temporary accounts and the one
+        temporary attendance row were deleted afterward (confirmed via
+        row counts back to baseline: 301 students, 330 users, 19
+        lecturers, 149 attendance rows); course 10's `course_offerings`
+        row was confirmed restored to its original lecturer (id 11).
+
+- [x] **Phase 3 — Level -> Semester on student registration, done and
+      verified.** `students.level` (a university-wide 1-5 scale,
+      incoherent once faculties run independent-length semester tracks)
+      replaced by `students.semester_id` on every write/read path — the
+      column itself stays in the schema, unused, since there's no
+      reliable formula to auto-backfill it from the old integer (D6);
+      existing students show "Not set" until an admin edits them.
+      - `admin/students.php`: the hardcoded 1-5 "Level" `<select>` became
+        a "Semester" `<select>`, cascaded from the Faculty selection via a
+        new `semestersByFacultyId` JS map (same rebuild-on-faculty-change
+        pattern already used for the Department cascade) — a student's
+        semester is a position within their own faculty's track, so the
+        options always come from `semesters WHERE faculty_id = ?`, never
+        a flat university-wide list. Added a server-side check that the
+        selected semester actually belongs to the selected faculty
+        (mirrors the existing department-belongs-to-faculty check).
+        List column "Level" -> "Semester" (`LEFT JOIN semesters`, "Not
+        set" for the NULL case).
+      - `admin/students_import.php`: template header + required column
+        "Level" -> "Semester"; validation switched from a 1-5 numeric
+        bound check to resolving the semester **name** against that row's
+        already-resolved Faculty (`faculty_id|lowercase(name)` lookup map,
+        same shape as the existing Department resolution in this file) —
+        an unrecognized semester name for that faculty is now a per-row
+        validation error ("Unknown semester...") instead of a numeric
+        range check.
+      - `notifications.php`: the alerts table's "Level" column became
+        "Semester" (`LEFT JOIN semesters` on the student's own
+        `semester_id`, "Not set" for NULL, both the SELECT and GROUP BY
+        updated).
+      - Confirmed via repo-wide grep that no other file reads
+        `students.level` — these three were the only readers, matching
+        the original audit.
+      - **Verified end-to-end via real HTTP requests**: fresh temporary
+        `system_admin` account, confirmed `admin/students.php` renders
+        the Semester select and "Not set" for existing (pre-migration)
+        students with no PHP warnings/errors; created a real student with
+        an explicit `semester_id` and confirmed it landed correctly in
+        the database; confirmed the faculty/semester mismatch guard
+        rejects a crafted request pairing a student's faculty with a
+        semester belonging to a *different* faculty (no row created);
+        confirmed `notifications.php` renders its new "Semester" column
+        cleanly; downloaded the real Excel import template and inspected
+        its actual XML contents (not just the HTTP response) to confirm
+        the header row says "Semester" with a "Semester 1" sample value.
+        Cleaned up afterward — including the `users` row auto-created
+        alongside the test student, which `DELETE FROM students` does
+        *not* cascade-delete (the FK cascades the other direction, user
+        -> student) and had to be removed explicitly — confirmed row
+        counts back to exact baseline (301 students, 330 users).
+
+- [x] **Phase 4 — UI clarity, done; one destructive step intentionally
+      NOT done.** Consolidated restructuring's final phase.
+      - **New shared breadcrumb helper** `render_scope_breadcrumb()` in
+        `includes/attendance_helpers.php` — renders "Course › Department ›
+        Faculty › Semester › Academic Year" (skipping any segment passed
+        as null/empty, so callers can omit whichever don't apply), so it's
+        never ambiguous which faculty's semester a given view is scoped
+        to. Wired into `attendance.php` (both the classic roster header
+        and the Grid View header), `reports.php`'s Xiiso grid report
+        header (kept separate from the plain-text `$reportMetaLine` used
+        by the Excel/PDF exports, which can't render HTML), and
+        `admin/course_offerings.php`'s page header (Course › Department ›
+        Faculty only there, since offerings span multiple semesters at
+        once — Academic Year is shown per-row in that page's table
+        instead of once at the top).
+      - **`semesters.php`'s Faculty column + grouping** — already done as
+        part of Phase 1's per-faculty rework (the listing query's
+        `ORDER BY (faculty_id IS NULL), faculty name, academic year desc,
+        start date desc` and the Faculty column were added then, not a
+        separate step here); re-confirmed still correct, no changes
+        needed in this phase.
+      - **Destructive `courses.lecturer_id` column drop — deliberately
+        NOT performed.** Re-ran the backfill migration's verification
+        query: 20 of the 24 courses (every course in the informatics and
+        Business Administration faculties) still have no
+        `course_offerings` row at all, because neither of those two
+        faculties has ever had a current semester set (confirmed
+        unchanged since Phase 2 — nobody has used `semesters.php` for
+        them yet). Dropping `courses.lecturer_id` now would permanently
+        lose those 20 courses' only remaining lecturer-assignment
+        history with no way to recover it, since D5's plan explicitly
+        makes this drop conditional on the verification query coming back
+        empty. **This is an outstanding manual step for the university
+        admin, not a bug**: once Engineering & IT (has no courses at all,
+        so not blocking), informatics, and Business Administration each
+        have a current semester set via `semesters.php`, either re-run
+        `migrations/2026_07_course_offerings_backfill.sql` (tier 2 will
+        then backfill the remaining courses automatically) or assign them
+        individually via each course's "Manage Offerings" screen — then
+        the drop migration below can be written and run safely.
+      - **Settings cleanup — deliberately skipped, not just deferred.**
+        `settings.current_academic_year_id` is still read once on
+        purpose (`attendance.php`'s cosmetic dropdown default, a Phase 1
+        decision to leave alone as low-priority/non-scoping) — deleting
+        the row would silently blank that one default. Left both
+        `current_academic_year_id` and the already-fully-dead
+        `current_semester_id` settings rows in place; harmless either way.
+      - **Verified end-to-end via real HTTP requests**: fresh temporary
+        `system_admin` account, confirmed the breadcrumb renders correctly
+        (with the exact expected Course/Semester/Academic Year text, not
+        just "no PHP error") on a loaded attendance roster, the Grid View,
+        the Xiiso grid report, and Manage Offerings — all 200, zero PHP
+        warnings/notices/fatals. Cleaned up the temporary account
+        afterward, confirmed row counts unchanged (301 students, 330
+        users) since this phase made no data-mutating requests.
+
+**Consolidated restructuring status: Phases 0-4 all complete.** The one
+remaining action item — assigning informatics and Business Administration
+each a current semester, then re-running the offerings backfill (or using
+Manage Offerings per course) before dropping `courses.lecturer_id` — is a
+data/configuration task for the university admin, not further code work.
+
+### Bulk Multi-Select Delete ("Delete Selected")
+- [x] Added checkbox-based bulk delete (`select-all` header checkbox + a
+      "Delete Selected (N)" button, disabled/hidden until at least one row
+      is checked, with a `confirm()` dialog listing the count and a
+      5-name sample before submitting) to six pages, scoped per-role
+      exactly as requested — no role's existing page access was widened:
+      - `admin/students.php` — system_admin, registration, dean (each
+        already-existing scope).
+      - `admin/lecturers.php` — system_admin, dean.
+      - `head_academic/lecturers.php` — **new capability**: this role
+        previously had view + "Register New Lecturer" only (CLAUDE.md §4);
+        bulk delete is now added, scoped to this role's existing
+        university-wide read scope (no faculty restriction, since the
+        role has none). No single-row delete button was added — bulk
+        delete is the only delete path on this page.
+      - `admin/courses.php` — system_admin, dean only. Confirmed
+        `head_academic` still has zero access to this page at all
+        (`require_role(['system_admin', 'dean'])` unchanged; a live
+        request as `head_academic` still redirects to
+        `unauthorized.php`).
+      - `admin/departments.php` — **system_admin only**. Dean's existing
+        single-row Delete button/action was left completely untouched;
+        the bulk checkboxes/button/hidden form are only rendered when
+        `$role === 'system_admin'`, and the `bulk_delete` POST handler
+        itself also rejects the action server-side for any other role
+        (defense in depth, not just hiding the UI) — verified a Dean
+        POSTing `action=bulk_delete` directly against a department with
+        children was rejected and nothing was deleted.
+      - `semesters.php`'s Xiiso sessions list — system_admin,
+        head_academic (this page's existing `require_role`). There was no
+        pre-existing single-row delete for sessions at all (sessions are
+        normally a fixed auto-generated set of 12 via "Generate
+        Sessions"), so bulk delete is the first and only delete path for
+        this entity — implemented as a new `delete_session_row()`
+        following the same shape as every other entity's blocker check
+        (blocked by any `attendance` row referencing that `session_id`).
+      - Shared JS: new `assets/js/bulk_delete.js` —
+        `admasInitBulkDelete(opts)` wires select-all/row checkboxes to a
+        "Delete Selected (N)" button, builds the confirm-dialog sample
+        text from each checkbox's `data-label`, and on confirm copies the
+        checked values into a separate hidden form (kept separate from
+        each row's own tiny Edit/Reset/Delete `<form>` — nesting one
+        `<form>` around the whole table would be invalid HTML) before
+        submitting it. One reusable file, instantiated per-page with
+        different selectors/labels — avoids duplicating the same ~50
+        lines of wiring six times.
+      - Backend: **every bulk_delete handler reuses the exact same
+        blocker/validation logic as the page's existing single-row
+        delete — no parallel delete logic was written.** Concretely, each
+        page's inline single-delete POST branch was refactored into a
+        named function (`delete_student_row()`, `delete_lecturer_row()`,
+        `delete_course_row()`, `delete_department_row()`,
+        `delete_session_row()`, plus a `head_academic`-specific
+        `delete_lecturer_row_head_academic()` since that page has no
+        `$role`/`$deanFacultyId` to thread through) that both the
+        single-row action and the new `bulk_delete` action call — for
+        the five pages that already had single-row delete, this was a
+        refactor, not new logic; the function's behavior is byte-for-byte
+        identical to what the inline code did before. Each bulk action
+        loops the submitted ids, deletes what passes its checks, skips
+        (does not abort the batch for) rows that fail, and flashes a
+        summary: "N of M selected \<entity\> deleted. Skipped: \<reason
+        per skipped row\>."
+      - **Verified end-to-end via real HTTP requests** with four
+        temporary accounts (system_admin, dean scoped to Engineering &
+        IT, registration, head_academic) and disposable test rows
+        (students/lecturers/courses/departments, plus attendance and
+        course_offerings rows used specifically to trigger blockers):
+        - Confirmed successful bulk deletion for each role on each page
+          listed above (login → bulk_delete POST → row gone + linked
+          `users` row deactivated for students/lecturers, same as the
+          existing single-delete behavior).
+        - Confirmed skip-not-abort: a batch containing one clean row and
+          one blocked row (attendance-blocked student/course/session,
+          course_offerings-blocked lecturer, lecturer-blocked department)
+          always deleted the clean row and left the blocked row
+          untouched, with the skip reason in the flash message.
+        - Confirmed a Dean's bulk request including a real student ID
+          from a different faculty skipped that row ("not found", the
+          same `WHERE faculty_id = ?` scoping the single-delete path
+          already had) — the foreign-faculty student was unaffected.
+        - Confirmed `head_academic` gets redirected to
+          `unauthorized.php` on `admin/courses.php` (still no access at
+          all), and that its `admin/departments.php` equivalent isn't
+          reachable either (role not in that page's `require_role`).
+        - **Test-methodology note for future sessions**: the Xiiso
+          session bulk-delete test was initially run against a real,
+          currently-in-use semester's sessions 1-3 without first checking
+          whether they already had attendance recorded — they did (this
+          is exactly what should block deletion, and correctly did), so
+          the "successful deletion" half of that test was re-run against
+          sessions 5-7 of the same semester instead (genuinely 0
+          attendance rows). Two of those three sessions (5, 6) were
+          deleted by the system_admin test call and one (7) by the
+          head_academic test call to prove both roles' access — all
+          three were **immediately restored** afterward via direct SQL
+          (`INSERT INTO sessions (semester_id, session_number, type)`)
+          once the mistake was noticed. Row existence and `type` are
+          exact; the `date` column could not be recovered and was
+          restored as `NULL` — consistent with sessions 4 and 8-12 on
+          that same semester, which were also still unscheduled, so this
+          is very likely a no-op in practice, but flagging it here in
+          case anyone notices Xiiso 5/6/7 dates looking unset on
+          Engineering & IT's "Semester 3". **Lesson: always check a
+          target row's real dependent/related data before using it as a
+          "should succeed" fixture, even for an ostensibly-safe
+          read-like row such as a session — prefer a dedicated disposable
+          semester for this kind of test in the future.**
+      - All temporary accounts and disposable rows removed after
+        verification; `users` count confirmed back to the 330 baseline.
+
+### Deferred Decisions
+- **Profile photo upload** (`users.photo_path`, upload on Profile &
+  Password page, camera icon + preview, topbar/profile display only,
+  admin list tables stay text-only) was scoped and ready to build but
+  deferred by the user — revisit when requested.
+

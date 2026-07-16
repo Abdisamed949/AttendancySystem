@@ -8,6 +8,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['dean']);
 
@@ -24,7 +25,6 @@ if ($settingsResult) {
         $settings[$row['key']] = $row['value'];
     }
 }
-$currentAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
 $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 
 // ---------------------------------------------------------------------
@@ -40,6 +40,12 @@ if ($deanFacultyId > 0) {
     $fStmt->close();
     $deanFacultyName = $fRow ? (string) $fRow['name'] : '';
 }
+
+// "Current academic year" is now resolved from this faculty's own current
+// semester, not a single global settings value — different faculties can
+// be on different semesters/years at once.
+$deanCurrentSemester = get_current_semester($conn, $deanFacultyId);
+$currentAcademicYearId = (int) ($deanCurrentSemester['academic_year_id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // KPI cards

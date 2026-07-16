@@ -12,23 +12,19 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['lecturer']);
 
 $conn = db();
 $currentUser = current_user();
 
-// ---------------------------------------------------------------------
-// University settings (drives the sky-blue top strip)
-// ---------------------------------------------------------------------
-$settings = [];
-$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
-if ($settingsResult) {
-    while ($row = $settingsResult->fetch_assoc()) {
-        $settings[$row['key']] = $row['value'];
-    }
-}
-$defaultAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
+// No single "current academic year" default here — a lecturer can have
+// courses across different faculties, each with its own current semester
+// (see the per-course-row resolution below), so there's nothing global to
+// default the Academic Year filter to. It starts as "All Academic Years"
+// (0) unless the user explicitly picks one.
+$filterAcademicYearIdExplicit = isset($_GET['academic_year_id']);
 
 // ---------------------------------------------------------------------
 // Own lecturers.id (never trusted from input)
@@ -45,7 +41,7 @@ $lecturerRecordId = $lecRow ? (int) $lecRow['id'] : 0;
 // ---------------------------------------------------------------------
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
 
-$filterAcademicYearId = isset($_GET['academic_year_id']) ? (int) $_GET['academic_year_id'] : $defaultAcademicYearId;
+$filterAcademicYearId = $filterAcademicYearIdExplicit ? (int) $_GET['academic_year_id'] : 0;
 $filterFacultyId = (int) ($_GET['faculty_id'] ?? 0);
 $filterDepartmentId = (int) ($_GET['department_id'] ?? 0);
 $filterSearch = trim((string) ($_GET['search'] ?? ''));
@@ -54,12 +50,23 @@ $filterSearch = trim((string) ($_GET['search'] ?? ''));
 // Faculty/Department options — only those actually present among this
 // lecturer's own courses (never the whole university's list).
 // ---------------------------------------------------------------------
+// A lecturer's "own courses" means current-offering-only (course_offerings
+// scoped to that course's own faculty's current semester), not the
+// deprecated permanent courses.lecturer_id — same EXISTS shape reused in
+// all three queries below so the option lists and the actual course list
+// can never drift apart on what "my courses" means.
+$currentOfferingExists = "EXISTS (
+    SELECT 1 FROM course_offerings co
+    JOIN semesters se ON se.id = co.semester_id
+    WHERE co.course_id = c.id AND co.lecturer_id = ? AND se.faculty_id = d.faculty_id AND se.is_current = 1
+)";
+
 $facultyOptStmt = $conn->prepare(
     "SELECT DISTINCT f.id, f.name
      FROM courses c
      JOIN departments d ON d.id = c.department_id
      JOIN faculties f ON f.id = d.faculty_id
-     WHERE c.lecturer_id = ?
+     WHERE {$currentOfferingExists}
      ORDER BY f.name"
 );
 $facultyOptStmt->bind_param('i', $lecturerRecordId);
@@ -71,7 +78,7 @@ $deptOptStmt = $conn->prepare(
     "SELECT DISTINCT d.id, d.name, d.faculty_id
      FROM courses c
      JOIN departments d ON d.id = c.department_id
-     WHERE c.lecturer_id = ?
+     WHERE {$currentOfferingExists}
      ORDER BY d.name"
 );
 $deptOptStmt->bind_param('i', $lecturerRecordId);
@@ -85,11 +92,11 @@ foreach ($departmentOptions as $dept) {
 }
 
 // ---------------------------------------------------------------------
-// Course list — the real security boundary is c.lecturer_id = ? here;
-// Faculty/Department/search are extra narrowing only, never a way to see
-// another lecturer's courses.
+// Course list — the real security boundary is the current-offering EXISTS
+// check here; Faculty/Department/search are extra narrowing only, never a
+// way to see another lecturer's courses.
 // ---------------------------------------------------------------------
-$conditions = ['c.lecturer_id = ?'];
+$conditions = [$currentOfferingExists];
 $params = [$lecturerRecordId];
 $types = 'i';
 
@@ -114,7 +121,7 @@ if ($filterSearch !== '') {
 $whereSql = implode(' AND ', $conditions);
 
 $coursesStmt = $conn->prepare(
-    "SELECT c.id, c.code, c.name, c.credit_hours, d.name AS department_name, f.name AS faculty_name,
+    "SELECT c.id, c.code, c.name, c.credit_hours, d.faculty_id, d.name AS department_name, f.name AS faculty_name,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
      FROM courses c
      JOIN departments d ON d.id = c.department_id
@@ -128,28 +135,64 @@ $courses = $coursesStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $coursesStmt->close();
 
 // ---------------------------------------------------------------------
-// Per-course session stats, scoped to the selected Academic Year (courses
-// themselves aren't year-scoped in the schema, so this only affects the
-// stats shown, not which courses appear in the list above).
+// Per-course session stats. If the user explicitly picked an Academic
+// Year, every course's stats are scoped to that one shared year (a single
+// query, same as before). Otherwise each course defaults to its OWN
+// faculty's current semester's academic year — never the lecturer's own
+// home faculty — since a lecturer can hold courses across faculties that
+// are on different semesters/years at once; that means one query per
+// distinct faculty represented among this lecturer's course list (small,
+// bounded by the number of faculties), merged by course_id.
 // ---------------------------------------------------------------------
 $sessionStatsByCourse = [];
-if (!empty($courses) && $filterAcademicYearId > 0) {
-    $courseIds = array_map(static fn ($c) => (int) $c['id'], $courses);
-    $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
-    $statsSql = "SELECT course_id, COUNT(DISTINCT attendance_date) AS total_sessions, MAX(attendance_date) AS last_session
+if (!empty($courses)) {
+    if ($filterAcademicYearId > 0) {
+        $courseIds = array_map(static fn ($c) => (int) $c['id'], $courses);
+        $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
+        $statsStmt = $conn->prepare(
+            "SELECT course_id, COUNT(DISTINCT attendance_date) AS total_sessions, MAX(attendance_date) AS last_session
+             FROM attendance
+             WHERE academic_year_id = ? AND course_id IN ({$placeholders})
+             GROUP BY course_id"
+        );
+        $statsTypes = 'i' . str_repeat('i', count($courseIds));
+        $statsParams = array_merge([$filterAcademicYearId], $courseIds);
+        $statsStmt->bind_param($statsTypes, ...$statsParams);
+        $statsStmt->execute();
+        $statsRes = $statsStmt->get_result();
+        while ($row = $statsRes->fetch_assoc()) {
+            $sessionStatsByCourse[(int) $row['course_id']] = $row;
+        }
+        $statsStmt->close();
+    } else {
+        $courseIdsByFacultyYear = [];
+        foreach ($courses as $c) {
+            $facultyId = (int) $c['faculty_id'];
+            $semester = get_current_semester($conn, $facultyId);
+            $ayId = (int) ($semester['academic_year_id'] ?? 0);
+            if ($ayId > 0) {
+                $courseIdsByFacultyYear[$ayId][] = (int) $c['id'];
+            }
+        }
+        foreach ($courseIdsByFacultyYear as $ayId => $courseIds) {
+            $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
+            $statsStmt = $conn->prepare(
+                "SELECT course_id, COUNT(DISTINCT attendance_date) AS total_sessions, MAX(attendance_date) AS last_session
                  FROM attendance
                  WHERE academic_year_id = ? AND course_id IN ({$placeholders})
-                 GROUP BY course_id";
-    $statsStmt = $conn->prepare($statsSql);
-    $statsTypes = 'i' . str_repeat('i', count($courseIds));
-    $statsParams = array_merge([$filterAcademicYearId], $courseIds);
-    $statsStmt->bind_param($statsTypes, ...$statsParams);
-    $statsStmt->execute();
-    $statsRes = $statsStmt->get_result();
-    while ($row = $statsRes->fetch_assoc()) {
-        $sessionStatsByCourse[(int) $row['course_id']] = $row;
+                 GROUP BY course_id"
+            );
+            $statsTypes = 'i' . str_repeat('i', count($courseIds));
+            $statsParams = array_merge([$ayId], $courseIds);
+            $statsStmt->bind_param($statsTypes, ...$statsParams);
+            $statsStmt->execute();
+            $statsRes = $statsStmt->get_result();
+            while ($row = $statsRes->fetch_assoc()) {
+                $sessionStatsByCourse[(int) $row['course_id']] = $row;
+            }
+            $statsStmt->close();
+        }
     }
-    $statsStmt->close();
 }
 
 $currentAcademicYearLabel = '';

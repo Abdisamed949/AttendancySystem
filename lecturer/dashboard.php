@@ -40,20 +40,34 @@ $lecRow = $lecStmt->get_result()->fetch_assoc();
 $lecStmt->close();
 $lecturerRecordId = $lecRow ? (int) $lecRow['id'] : 0;
 
+// "My courses" means current-offering-only (course_offerings scoped to
+// that course's own faculty's current semester), not the deprecated
+// permanent courses.lecturer_id — reused below for the KPI counts and the
+// course table so they can never drift on what "mine" means. Resolved per
+// course's own faculty, never the lecturer's home department (D1).
+$currentOfferingJoin = 'JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
+     JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1';
+
 // ---------------------------------------------------------------------
 // KPI cards
 // ---------------------------------------------------------------------
-$myCoursesStmt = $conn->prepare('SELECT COUNT(*) AS c FROM courses WHERE lecturer_id = ?');
+$myCoursesStmt = $conn->prepare(
+    "SELECT COUNT(DISTINCT c.id) AS c
+     FROM courses c
+     JOIN departments d ON d.id = c.department_id
+     {$currentOfferingJoin}"
+);
 $myCoursesStmt->bind_param('i', $lecturerRecordId);
 $myCoursesStmt->execute();
 $myCoursesCount = (int) ($myCoursesStmt->get_result()->fetch_assoc()['c'] ?? 0);
 $myCoursesStmt->close();
 
 $totalStudentsStmt = $conn->prepare(
-    'SELECT COUNT(DISTINCT ce.student_id) AS c
+    "SELECT COUNT(DISTINCT ce.student_id) AS c
      FROM course_enrollments ce
      JOIN courses c ON c.id = ce.course_id
-     WHERE c.lecturer_id = ?'
+     JOIN departments d ON d.id = c.department_id
+     {$currentOfferingJoin}"
 );
 $totalStudentsStmt->bind_param('i', $lecturerRecordId);
 $totalStudentsStmt->execute();
@@ -67,31 +81,28 @@ $sessionsRecorded = (int) ($sessionsStmt->get_result()->fetch_assoc()['c'] ?? 0)
 $sessionsStmt->close();
 
 // ---------------------------------------------------------------------
-// My Assigned Courses table
+// My Assigned Courses table — each row's own Academic Year comes from its
+// own current offering's semester, since different courses here can
+// belong to different faculties on different academic years at once;
+// there is no single shared "the current academic year" to show anymore.
 // ---------------------------------------------------------------------
 $myCoursesStmt2 = $conn->prepare(
-    "SELECT c.id, c.code, c.name,
+    "SELECT c.id, c.code, c.name, ay.label AS academic_year_label,
             MAX(a.attendance_date) AS last_session,
             (SELECT a2.shift FROM attendance a2 WHERE a2.course_id = c.id ORDER BY a2.attendance_date DESC LIMIT 1) AS last_shift,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
      FROM courses c
+     JOIN departments d ON d.id = c.department_id
+     {$currentOfferingJoin}
+     JOIN academic_years ay ON ay.id = se.academic_year_id
      LEFT JOIN attendance a ON a.course_id = c.id
-     WHERE c.lecturer_id = ?
-     GROUP BY c.id, c.code, c.name
+     GROUP BY c.id, c.code, c.name, ay.label
      ORDER BY c.code"
 );
 $myCoursesStmt2->bind_param('i', $lecturerRecordId);
 $myCoursesStmt2->execute();
 $myCourses = $myCoursesStmt2->get_result()->fetch_all(MYSQLI_ASSOC);
 $myCoursesStmt2->close();
-
-$currentAcademicYearLabel = '—';
-$ayResult = $conn->query(
-    'SELECT label FROM academic_years WHERE is_current = 1 LIMIT 1'
-);
-if ($ayResult && ($ayRow = $ayResult->fetch_assoc())) {
-    $currentAcademicYearLabel = (string) $ayRow['label'];
-}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -172,7 +183,7 @@ if ($ayResult && ($ayRow = $ayResult->fetch_assoc())) {
                                 <?php foreach ($myCourses as $c): ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
-                                        <td><?= htmlspecialchars($currentAcademicYearLabel) ?></td>
+                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
                                         <td>
                                             <?php if ($c['last_shift'] !== null && isset(SHIFT_LABELS[$c['last_shift']])): ?>
                                                 <?= htmlspecialchars(SHIFT_LABELS[$c['last_shift']]) ?>

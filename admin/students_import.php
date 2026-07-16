@@ -55,8 +55,8 @@ function normalize_shift_input(string $input): ?string
 if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->fromArray(['Full Name', 'Email', 'Academic Year', 'Faculty', 'Department', 'Level', 'Shift'], null, 'A1');
-    $sheet->fromArray(['Amina Hassan', 'amina.hassan@admas.edu.so', '2025/2026', 'Engineering & IT', 'Computer Science', 1, 'Morning Shift'], null, 'A2');
+    $sheet->fromArray(['Full Name', 'Email', 'Academic Year', 'Faculty', 'Department', 'Semester', 'Shift'], null, 'A1');
+    $sheet->fromArray(['Amina Hassan', 'amina.hassan@admas.edu.so', '2025/2026', 'Engineering & IT', 'Computer Science', 'Semester 1', 'Morning Shift'], null, 'A2');
     $sheet->getStyle('A1:G1')->getFont()->setBold(true);
     foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G'] as $col) {
         $sheet->getColumnDimension($col)->setAutoSize(true);
@@ -127,6 +127,16 @@ foreach ($existingDepartments as $dept) {
     $departmentByFacultyAndLowerName[$key] = (int) $dept['id'];
 }
 
+// Semesters are scoped to a faculty, same lookup shape as departments —
+// a "Semester 1" name only resolves within the row's already-resolved
+// Faculty, never globally.
+$existingSemesters = $conn->query('SELECT id, name, faculty_id FROM semesters ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$semesterByFacultyAndLowerName = [];
+foreach ($existingSemesters as $sem) {
+    $key = (int) $sem['faculty_id'] . '|' . mb_strtolower(trim((string) $sem['name']));
+    $semesterByFacultyAndLowerName[$key] = (int) $sem['id'];
+}
+
 // ---------------------------------------------------------------------
 // Handle POST actions: preview, confirm, cancel
 // ---------------------------------------------------------------------
@@ -134,8 +144,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
 
     if ($action === 'preview') {
-        if (empty($existingFaculties) || empty($existingDepartments) || empty($existingAcademicYears)) {
-            $errorMessage = 'At least one Academic Year, Faculty, and Department must exist before importing students.';
+        if (empty($existingFaculties) || empty($existingDepartments) || empty($existingAcademicYears) || empty($existingSemesters)) {
+            $errorMessage = 'At least one Academic Year, Faculty, Department, and Semester must exist before importing students.';
         } elseif (!isset($_FILES['import_file']) || $_FILES['import_file']['error'] !== UPLOAD_ERR_OK) {
             $errorMessage = 'Please choose a valid Excel or CSV file to upload.';
         } else {
@@ -168,12 +178,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $yearCol = array_search('academic year', $headerRow, true);
                         $facultyCol = array_search('faculty', $headerRow, true);
                         $departmentCol = array_search('department', $headerRow, true);
-                        $levelCol = array_search('level', $headerRow, true);
+                        $semesterCol = array_search('semester', $headerRow, true);
                         $shiftCol = array_search('shift', $headerRow, true);
 
                         if ($nameCol === false || $yearCol === false || $facultyCol === false
-                            || $departmentCol === false || $levelCol === false || $shiftCol === false) {
-                            $errorMessage = 'The file must have "Full Name", "Academic Year", "Faculty", "Department", "Level" and "Shift" column headers.';
+                            || $departmentCol === false || $semesterCol === false || $shiftCol === false) {
+                            $errorMessage = 'The file must have "Full Name", "Academic Year", "Faculty", "Department", "Semester" and "Shift" column headers.';
                         } else {
                             $rowNumber = 1;
 
@@ -184,7 +194,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $yearInput = trim((string) ($row[$yearCol] ?? ''));
                                 $facultyInput = trim((string) ($row[$facultyCol] ?? ''));
                                 $departmentInput = trim((string) ($row[$departmentCol] ?? ''));
-                                $levelInput = trim((string) ($row[$levelCol] ?? ''));
+                                $semesterInput = trim((string) ($row[$semesterCol] ?? ''));
                                 $shiftInput = trim((string) ($row[$shiftCol] ?? ''));
 
                                 if ($fullName === '' && $yearInput === '' && $facultyInput === '' && $departmentInput === '') {
@@ -196,7 +206,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $academicYearId = 0;
                                 $facultyId = 0;
                                 $departmentId = 0;
-                                $level = 0;
+                                $semesterId = 0;
                                 $shift = null;
 
                                 if ($fullName === '') {
@@ -211,9 +221,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 } elseif ($departmentInput === '') {
                                     $status = 'error';
                                     $message = 'Missing Department';
-                                } elseif ($levelInput === '') {
+                                } elseif ($semesterInput === '') {
                                     $status = 'error';
-                                    $message = 'Missing Level';
+                                    $message = 'Missing Semester';
                                 } elseif ($shiftInput === '') {
                                     $status = 'error';
                                     $message = 'Missing Shift';
@@ -243,11 +253,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 }
 
                                 if ($status === 'ok') {
-                                    if (!ctype_digit($levelInput) || (int) $levelInput < 1 || (int) $levelInput > 5) {
+                                    $semKey = $facultyId . '|' . mb_strtolower($semesterInput);
+                                    $semesterId = $semesterByFacultyAndLowerName[$semKey] ?? 0;
+                                    if ($semesterId === 0) {
                                         $status = 'error';
-                                        $message = 'Invalid Level (must be a number 1-5)';
-                                    } else {
-                                        $level = (int) $levelInput;
+                                        $message = 'Unknown semester "' . $semesterInput . '" in faculty "' . $facultyInput . '"';
                                     }
                                 }
 
@@ -285,7 +295,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     'faculty_id' => $facultyId,
                                     'department_input' => $departmentInput,
                                     'department_id' => $departmentId,
-                                    'level' => $level,
+                                    'semester_input' => $semesterInput,
+                                    'semester_id' => $semesterId,
                                     'shift_input' => $shiftInput,
                                     'shift' => $shift,
                                     'status' => $status,
@@ -342,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insertUserStmt->close();
 
                 $insertStudentStmt = $conn->prepare(
-                    'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, level, shift, status)
+                    'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, "active")'
                 );
                 $insertStudentStmt->bind_param(
@@ -353,7 +364,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $row['academic_year_id'],
                     $row['faculty_id'],
                     $row['department_id'],
-                    $row['level'],
+                    $row['semester_id'],
                     $row['shift']
                 );
                 $insertStudentStmt->execute();
@@ -435,7 +446,8 @@ $invalidCount = count($previewRows) - $validCount;
 
                     <div class="alert alert-light border small mb-3">
                         The file must have column headers: <strong>Full Name</strong>, <strong>Academic Year</strong>,
-                        <strong>Faculty</strong>, <strong>Department</strong>, <strong>Level</strong> (1-5), and
+                        <strong>Faculty</strong>, <strong>Department</strong>, <strong>Semester</strong> (must match
+                        an existing semester name within that Faculty), and
                         <strong>Shift</strong> (Morning Shift / Afternoon Shift / Weekend). <strong>Email</strong> is
                         optional. A student number, username, and temporary password will be generated automatically
                         for each imported student.
@@ -452,7 +464,7 @@ $invalidCount = count($previewRows) - $validCount;
                             <input type="file" class="form-control" id="importFileInput" name="import_file" accept=".xlsx,.xls,.csv" required>
                         </div>
                         <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;"
-                                <?= (empty($existingFaculties) || empty($existingDepartments) || empty($existingAcademicYears)) ? 'disabled' : '' ?>>
+                                <?= (empty($existingFaculties) || empty($existingDepartments) || empty($existingAcademicYears) || empty($existingSemesters)) ? 'disabled' : '' ?>>
                             <i class="bi bi-eye"></i> Preview Import
                         </button>
                     </form>
@@ -478,7 +490,7 @@ $invalidCount = count($previewRows) - $validCount;
                                     <th>Academic Year</th>
                                     <th>Faculty</th>
                                     <th>Department</th>
-                                    <th>Level</th>
+                                    <th>Semester</th>
                                     <th>Shift</th>
                                     <th>Status</th>
                                 </tr>
@@ -491,7 +503,7 @@ $invalidCount = count($previewRows) - $validCount;
                                         <td><?= htmlspecialchars($r['year_input']) ?></td>
                                         <td><?= htmlspecialchars($r['faculty_input']) ?></td>
                                         <td><?= htmlspecialchars($r['department_input']) ?></td>
-                                        <td><?= htmlspecialchars((string) $r['level']) ?></td>
+                                        <td><?= htmlspecialchars($r['semester_input']) ?></td>
                                         <td><?= htmlspecialchars($r['shift_input']) ?></td>
                                         <td>
                                             <?php if ($r['status'] === 'ok'): ?>

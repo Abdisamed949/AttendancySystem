@@ -10,23 +10,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['head_academic']);
 
 $conn = db();
 $currentUser = current_user();
-
-// ---------------------------------------------------------------------
-// University settings (drives the sky-blue top strip)
-// ---------------------------------------------------------------------
-$settings = [];
-$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
-if ($settingsResult) {
-    while ($row = $settingsResult->fetch_assoc()) {
-        $settings[$row['key']] = $row['value'];
-    }
-}
-$currentAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // KPI cards
@@ -42,25 +31,35 @@ $todayRow = $todayResult ? $todayResult->fetch_assoc() : null;
 $universityAvgAttendance = $todayRow && $todayRow['pct'] !== null ? (float) $todayRow['pct'] : null;
 
 // ---------------------------------------------------------------------
-// Attendance by Faculty (current academic year averages)
+// Attendance by Faculty — each faculty has its own current semester (and
+// therefore its own current academic year), so this is a genuine
+// cross-faculty aggregate: one small query per faculty against that
+// faculty's own current academic year, rather than one shared global year.
+// A faculty with no current semester set yet simply shows "—".
 // ---------------------------------------------------------------------
 $faculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 
 $avgAttendanceByFaculty = [];
-if ($currentAcademicYearId > 0) {
-    $facAttStmt = $conn->prepare(
-        "SELECT s.faculty_id, ROUND(100 * SUM(a.status = 'present') / COUNT(*), 1) AS pct
-         FROM attendance a JOIN students s ON s.id = a.student_id
-         WHERE a.academic_year_id = ?
-         GROUP BY s.faculty_id"
-    );
-    $facAttStmt->bind_param('i', $currentAcademicYearId);
-    $facAttStmt->execute();
-    $facAttRes = $facAttStmt->get_result();
-    while ($row = $facAttRes->fetch_assoc()) {
-        $avgAttendanceByFaculty[(int) $row['faculty_id']] = (float) $row['pct'];
+foreach ($faculties as $f) {
+    $facultyId = (int) $f['id'];
+    $facultyCurrentSemester = get_current_semester($conn, $facultyId);
+    $facultyAcademicYearId = (int) ($facultyCurrentSemester['academic_year_id'] ?? 0);
+    if ($facultyAcademicYearId <= 0) {
+        continue;
     }
+
+    $facAttStmt = $conn->prepare(
+        "SELECT ROUND(100 * SUM(a.status = 'present') / COUNT(*), 1) AS pct
+         FROM attendance a JOIN students s ON s.id = a.student_id
+         WHERE s.faculty_id = ? AND a.academic_year_id = ?"
+    );
+    $facAttStmt->bind_param('ii', $facultyId, $facultyAcademicYearId);
+    $facAttStmt->execute();
+    $facAttRow = $facAttStmt->get_result()->fetch_assoc();
     $facAttStmt->close();
+    if ($facAttRow && $facAttRow['pct'] !== null) {
+        $avgAttendanceByFaculty[$facultyId] = (float) $facAttRow['pct'];
+    }
 }
 
 $studentCountByFaculty = [];

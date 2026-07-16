@@ -10,6 +10,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
+require_once __DIR__ . '/includes/semester_helpers.php';
+require_once __DIR__ . '/includes/attendance_helpers.php';
 
 require_role(['system_admin', 'dean', 'lecturer']);
 
@@ -21,13 +23,6 @@ const SHIFT_LABELS = [
     'morning' => 'Morning Shift',
     'afternoon' => 'Afternoon Shift',
     'weekend' => 'Weekend',
-];
-
-const STATUS_LABELS = [
-    'present' => 'Present',
-    'absent' => 'Absent',
-    'late' => 'Late',
-    'excused' => 'Excused',
 ];
 
 // ---------------------------------------------------------------------
@@ -77,7 +72,7 @@ if ($role === 'lecturer') {
 $courses = [];
 if ($role === 'system_admin') {
     $courses = $conn->query(
-        "SELECT c.id, c.code, c.name, c.department_id, c.lecturer_id,
+        "SELECT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
          FROM courses c
          JOIN departments d ON d.id = c.department_id
@@ -86,7 +81,7 @@ if ($role === 'system_admin') {
     )->fetch_all(MYSQLI_ASSOC);
 } elseif ($role === 'dean') {
     $stmt = $conn->prepare(
-        "SELECT c.id, c.code, c.name, c.department_id, c.lecturer_id,
+        "SELECT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
          FROM courses c
          JOIN departments d ON d.id = c.department_id
@@ -99,13 +94,19 @@ if ($role === 'system_admin') {
     $courses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 } elseif ($role === 'lecturer') {
+    // Current-offering-only: a lecturer only sees courses they're
+    // currently assigned to teach (course_offerings, scoped to that
+    // course's OWN faculty's current semester) — not a lifetime list of
+    // every course they've ever been assigned, and never derived from
+    // the lecturer's own home department (D1: always resolved per course).
     $stmt = $conn->prepare(
-        "SELECT c.id, c.code, c.name, c.department_id, c.lecturer_id,
+        "SELECT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
-         WHERE c.lecturer_id = ?
+         JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
+         JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
          ORDER BY c.code"
     );
     $stmt->bind_param('i', $lecturerRecordId);
@@ -124,6 +125,41 @@ $faculties = $role === 'system_admin'
     : [];
 
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
+
+// ---------------------------------------------------------------------
+// Current semester + its 12 Xiiso sessions (marking is always scoped to
+// whichever semester is currently active for the selected course's own
+// faculty — "current" is a per-faculty concept, so this can only be
+// resolved once a course is known, not eagerly here at page-load; see
+// resolve_current_semester_for_course() below, called from both the POST
+// and GET handlers as soon as each has a course_id).
+// ---------------------------------------------------------------------
+$currentSemester = null;
+$currentSemesterSessions = [];
+$sessionById = [];
+
+/**
+ * Resolves the current semester (and its sessions) for whichever faculty
+ * the given course belongs to — never a single global "current semester",
+ * and never the lecturer's own home faculty (a lecturer can be assigned
+ * courses across faculties), always the specific course being marked.
+ */
+function resolve_current_semester_for_course(mysqli $conn, array $courseById, int $courseId): array
+{
+    $facultyId = $courseById[$courseId]['faculty_id'] ?? null;
+    if ($facultyId === null) {
+        return [null, [], []];
+    }
+
+    $semester = get_current_semester($conn, (int) $facultyId);
+    $sessions = $semester ? get_sessions_for_semester($conn, (int) $semester['id']) : [];
+    $byId = [];
+    foreach ($sessions as $s) {
+        $byId[(int) $s['id']] = $s;
+    }
+
+    return [$semester, $sessions, $byId];
+}
 
 // ---------------------------------------------------------------------
 // Flash messages (post-redirect-get, same pattern as the other admin pages)
@@ -145,7 +181,7 @@ if (!empty($_SESSION['flash_error'])) {
 $filterAcademicYearId = 0;
 $filterCourseId = 0;
 $filterShift = '';
-$filterDate = date('Y-m-d');
+$filterSessionId = 0;
 $showRoster = false;
 $statusOverride = [];
 
@@ -156,9 +192,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
     $filterAcademicYearId = (int) ($_POST['academic_year_id'] ?? 0);
     $filterCourseId = (int) ($_POST['course_id'] ?? 0);
     $filterShift = (string) ($_POST['shift'] ?? '');
-    $filterDate = (string) ($_POST['attendance_date'] ?? '');
+    $filterSessionId = (int) ($_POST['session_id'] ?? 0);
     $studentIds = array_map('intval', (array) ($_POST['student_ids'] ?? []));
     $statusInput = (array) ($_POST['status'] ?? []);
+
+    if (array_key_exists($filterCourseId, $courseById)) {
+        [$currentSemester, $currentSemesterSessions, $sessionById] = resolve_current_semester_for_course($conn, $courseById, $filterCourseId);
+    }
 
     $validationError = '';
     $academicYearValid = false;
@@ -169,16 +209,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
         }
     }
 
-    $dateValid = (bool) DateTime::createFromFormat('Y-m-d', $filterDate);
+    $sessionDate = array_key_exists($filterSessionId, $sessionById) ? (string) ($sessionById[$filterSessionId]['date'] ?? '') : '';
 
     if (!$academicYearValid) {
         $validationError = 'Please select a valid academic year.';
     } elseif (!array_key_exists($filterCourseId, $courseById)) {
         $validationError = 'Please select a valid course.';
+    } elseif ($currentSemester === null) {
+        $facultyName = (string) ($courseById[$filterCourseId]['faculty_name'] ?? "this course's faculty");
+        $validationError = 'No current semester is set for ' . $facultyName . '.';
     } elseif (!array_key_exists($filterShift, SHIFT_LABELS)) {
         $validationError = 'Please select a valid shift.';
-    } elseif (!$dateValid) {
-        $validationError = 'Please select a valid date.';
+    } elseif (!array_key_exists($filterSessionId, $sessionById)) {
+        $validationError = 'Please select a valid Xiiso session.';
+    } elseif ($sessionDate === '') {
+        $validationError = 'This Xiiso session has no calendar date assigned yet — ask an admin to assign one in Semesters.';
     } elseif (empty($studentIds)) {
         $validationError = 'No students to save — load the roster first.';
     }
@@ -198,18 +243,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
     if ($validationError === '') {
         $conn->begin_transaction();
         try {
-            $stmt = $conn->prepare(
-                'INSERT INTO attendance (student_id, course_id, academic_year_id, shift, attendance_date, status, recorded_by_user_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE status = VALUES(status), recorded_by_user_id = VALUES(recorded_by_user_id)'
-            );
             $recordedBy = (int) $currentUser['id'];
             foreach ($rows as $sid => $status) {
-                $sidInt = (int) $sid;
-                $stmt->bind_param('iiisssi', $sidInt, $filterCourseId, $filterAcademicYearId, $filterShift, $filterDate, $status, $recordedBy);
-                $stmt->execute();
+                save_attendance_record(
+                    $conn,
+                    (int) $sid,
+                    $filterCourseId,
+                    $filterSessionId,
+                    $filterAcademicYearId,
+                    $filterShift,
+                    $sessionDate,
+                    $status,
+                    $recordedBy
+                );
             }
-            $stmt->close();
             $conn->commit();
 
             $count = count($rows);
@@ -219,7 +266,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
                 'academic_year_id' => $filterAcademicYearId,
                 'course_id' => $filterCourseId,
                 'shift' => $filterShift,
-                'attendance_date' => $filterDate,
+                'session_id' => $filterSessionId,
                 'load' => 1,
             ]));
         } catch (\Throwable $e) {
@@ -231,7 +278,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
         $statusOverride = array_map('strval', $statusInput);
         $showRoster = array_key_exists($filterCourseId, $courseById)
             && array_key_exists($filterShift, SHIFT_LABELS)
-            && $dateValid;
+            && array_key_exists($filterSessionId, $sessionById);
     }
 }
 
@@ -242,7 +289,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     $filterAcademicYearId = (int) ($_GET['academic_year_id'] ?? $defaultAcademicYearId);
     $filterCourseId = (int) ($_GET['course_id'] ?? 0);
     $filterShift = (string) ($_GET['shift'] ?? '');
-    $filterDate = (string) ($_GET['attendance_date'] ?? date('Y-m-d'));
+    $filterSessionId = (int) ($_GET['session_id'] ?? 0);
+
+    if (array_key_exists($filterCourseId, $courseById)) {
+        [$currentSemester, $currentSemesterSessions, $sessionById] = resolve_current_semester_for_course($conn, $courseById, $filterCourseId);
+    }
 
     if (($_GET['load'] ?? '') === '1') {
         $academicYearValid = false;
@@ -252,16 +303,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 break;
             }
         }
-        $dateValid = (bool) DateTime::createFromFormat('Y-m-d', $filterDate);
 
         if (!$academicYearValid) {
             $errorMessage = $errorMessage ?: 'Please select a valid academic year.';
         } elseif (!array_key_exists($filterCourseId, $courseById)) {
             $errorMessage = $errorMessage ?: 'Please select a valid course.';
+        } elseif ($currentSemester === null) {
+            $facultyName = (string) ($courseById[$filterCourseId]['faculty_name'] ?? "this course's faculty");
+            $errorMessage = $errorMessage ?: ('No current semester is set for ' . $facultyName . '.');
         } elseif (!array_key_exists($filterShift, SHIFT_LABELS)) {
             $errorMessage = $errorMessage ?: 'Please select a valid shift.';
-        } elseif (!$dateValid) {
-            $errorMessage = $errorMessage ?: 'Please select a valid date.';
+        } elseif (!array_key_exists($filterSessionId, $sessionById)) {
+            $errorMessage = $errorMessage ?: 'Please select a valid Xiiso session.';
         } else {
             $showRoster = true;
         }
@@ -302,8 +355,8 @@ if ($showRoster) {
 
     $existing = [];
     if (!empty($roster)) {
-        $stmt = $conn->prepare('SELECT student_id, status FROM attendance WHERE course_id = ? AND attendance_date = ?');
-        $stmt->bind_param('is', $filterCourseId, $filterDate);
+        $stmt = $conn->prepare('SELECT student_id, status FROM attendance WHERE course_id = ? AND session_id = ?');
+        $stmt->bind_param('ii', $filterCourseId, $filterSessionId);
         $stmt->execute();
         $exResult = $stmt->get_result();
         while ($row = $exResult->fetch_assoc()) {
@@ -324,6 +377,43 @@ foreach ($roster as $r) {
     if ($r['status'] !== '' && isset($statusCounts[$r['status']])) {
         $statusCounts[$r['status']]++;
     }
+}
+
+// ---------------------------------------------------------------------
+// Link to the full-semester Xiiso grid (reports.php), pre-filtered to the
+// same course + semester. Only built once the course is confirmed to be
+// in this user's scope ($courseById is already role-scoped above), and
+// reports.php independently re-checks scope against the same course list
+// shape, so this is safe even if the query string were tampered with.
+// ---------------------------------------------------------------------
+$xiisoGridUrl = '';
+if ($currentSemester !== null && array_key_exists($filterCourseId, $courseById)) {
+    $xiisoGridUrl = BASE_URL . '/reports.php?' . http_build_query([
+        'report_type' => 'xiiso_grid',
+        'xiiso_course_id' => $filterCourseId,
+        'xiiso_semester_id' => (int) $currentSemester['id'],
+    ]);
+}
+
+// ---------------------------------------------------------------------
+// Grid View: an alternate, interactive way to mark attendance for the
+// whole current semester at once (all Xiiso sessions for one course,
+// grouped by month), toggled client-side against the classic form above.
+// Selecting a course in the Grid View's own picker reloads the page with
+// ?view=grid&course_id=X so the grid data (like the classic roster) is
+// always server-rendered; only the per-cell save itself is AJAX.
+// ---------------------------------------------------------------------
+$viewMode = ((string) ($_GET['view'] ?? '')) === 'grid' ? 'grid' : 'classic';
+$showGrid = $viewMode === 'grid'
+    && $currentSemester !== null
+    && !empty($currentSemesterSessions)
+    && array_key_exists($filterCourseId, $courseById);
+
+$gridData = ['sessions' => [], 'students' => [], 'marks' => []];
+$monthGroups = [];
+if ($showGrid) {
+    $gridData = get_xiiso_grid_data($conn, $filterCourseId, (int) $currentSemester['id']);
+    $monthGroups = build_month_groups($gridData['sessions']);
 }
 
 // ---------------------------------------------------------------------
@@ -392,6 +482,14 @@ $scopeBanner = match ($role) {
                     <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Attendance</h4>
                     <p class="text-muted mb-0">Select a course and date, load the roster, then mark each student's status.</p>
                 </div>
+                <div class="btn-group" role="group" aria-label="Attendance marking mode">
+                    <button type="button" id="viewToggleClassic" class="btn btn-sm view-toggle-btn<?= $viewMode !== 'grid' ? ' active' : '' ?>" onclick="admasSetAttendanceView('classic')">
+                        <i class="bi bi-list-check"></i> Single Session
+                    </button>
+                    <button type="button" id="viewToggleGrid" class="btn btn-sm view-toggle-btn<?= $viewMode === 'grid' ? ' active' : '' ?>" onclick="admasSetAttendanceView('grid')">
+                        <i class="bi bi-grid-3x3"></i> Grid View
+                    </button>
+                </div>
             </div>
 
             <?php if ($successMessage !== ''): ?>
@@ -406,6 +504,8 @@ $scopeBanner = match ($role) {
                     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                 </div>
             <?php endif; ?>
+
+            <div id="classicMarkingView"<?= $viewMode === 'grid' ? ' hidden' : '' ?>>
 
             <div class="admas-card p-4 mb-3">
                 <?php if (empty($courses)): ?>
@@ -446,7 +546,7 @@ $scopeBanner = match ($role) {
 
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Course</label>
-                            <select class="form-select form-select-sm" name="course_id" id="courseSelect" required>
+                            <select class="form-select form-select-sm" name="course_id" id="courseSelect" required onchange="admasReloadWithCourse(this.value)">
                                 <option value="">Select course</option>
                                 <?php if ($role === 'lecturer'): ?>
                                     <?php foreach ($courses as $c): ?>
@@ -489,17 +589,48 @@ $scopeBanner = match ($role) {
                             </select>
                         </div>
 
-                        <div class="col-sm-6 col-md-3">
-                            <label class="form-label small mb-1">Date</label>
-                            <input type="date" class="form-control form-control-sm" name="attendance_date"
-                                   value="<?= htmlspecialchars($filterDate) ?>" required>
-                        </div>
+                        <?php if (!array_key_exists($filterCourseId, $courseById)): ?>
+                            <div class="col-sm-6 col-md-6">
+                                <p class="text-muted small mb-0">Select a course above to see its faculty's current semester and Xiiso sessions.</p>
+                            </div>
+                        <?php elseif ($currentSemester === null): ?>
+                            <div class="col-sm-6 col-md-6">
+                                <p class="text-muted small mb-0">
+                                    No current semester is set for <?= htmlspecialchars((string) ($courseById[$filterCourseId]['faculty_name'] ?? '')) ?>.
+                                    <?= in_array($role, ['system_admin'], true) ? 'Create one and mark it current on the Semesters page.' : 'Ask an administrator to set one on the Semesters page.' ?>
+                                </p>
+                            </div>
+                        <?php elseif (empty($currentSemesterSessions)): ?>
+                            <div class="col-sm-6 col-md-6">
+                                <p class="text-muted small mb-0">
+                                    "<?= htmlspecialchars($currentSemester['name']) ?>" has no Xiiso sessions yet.
+                                    <?= in_array($role, ['system_admin'], true) ? 'Generate them on the Semesters page.' : 'Ask an administrator to generate them on the Semesters page.' ?>
+                                </p>
+                            </div>
+                        <?php else: ?>
+                            <div class="col-sm-6 col-md-3">
+                                <label class="form-label small mb-1">Semester</label>
+                                <input type="text" class="form-control form-control-sm" value="<?= htmlspecialchars($currentSemester['name']) ?>" disabled>
+                            </div>
 
-                        <div class="col-sm-6 col-md-3">
-                            <button type="submit" name="load" value="1" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
-                                <i class="bi bi-arrow-repeat"></i> Load Students
-                            </button>
-                        </div>
+                            <div class="col-sm-6 col-md-3">
+                                <label class="form-label small mb-1">Xiiso (Session)</label>
+                                <select class="form-select form-select-sm" name="session_id" required>
+                                    <option value="">Select Xiiso</option>
+                                    <?php foreach ($currentSemesterSessions as $s): ?>
+                                        <option value="<?= (int) $s['id'] ?>" <?= $filterSessionId === (int) $s['id'] ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($s['label']) ?><?= $s['date'] ? ' — ' . htmlspecialchars((string) $s['date']) : ' (no date yet)' ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="col-sm-6 col-md-3">
+                                <button type="submit" name="load" value="1" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                    <i class="bi bi-arrow-repeat"></i> Load Students
+                                </button>
+                            </div>
+                        <?php endif; ?>
                     </form>
                 <?php endif; ?>
             </div>
@@ -509,11 +640,23 @@ $scopeBanner = match ($role) {
                     <?php if (empty($roster)): ?>
                         <p class="text-muted mb-0">No students match this Academic Year / Course / Shift combination.</p>
                     <?php else: ?>
+                        <?= render_scope_breadcrumb([
+                            $courseById[$filterCourseId]['code'],
+                            $courseById[$filterCourseId]['department_name'],
+                            $courseById[$filterCourseId]['faculty_name'],
+                            $currentSemester['name'] ?? null,
+                            $currentSemester['academic_year_label'] ?? null,
+                        ]) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
                                 Roster — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
-                                <span class="text-muted fw-normal">(<?= htmlspecialchars(SHIFT_LABELS[$filterShift]) ?>, <?= htmlspecialchars($filterDate) ?>)</span>
+                                <span class="text-muted fw-normal">(<?= htmlspecialchars(SHIFT_LABELS[$filterShift]) ?>, <?= htmlspecialchars($sessionById[$filterSessionId]['label']) ?>)</span>
                             </h6>
+                            <?php if ($xiisoGridUrl !== ''): ?>
+                                <a href="<?= htmlspecialchars($xiisoGridUrl) ?>" target="_blank" rel="noopener" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-grid-3x3"></i> View Full Semester Grid
+                                </a>
+                            <?php endif; ?>
                         </div>
 
                         <div class="status-summary">
@@ -529,7 +672,7 @@ $scopeBanner = match ($role) {
                             <input type="hidden" name="academic_year_id" value="<?= (int) $filterAcademicYearId ?>">
                             <input type="hidden" name="course_id" value="<?= (int) $filterCourseId ?>">
                             <input type="hidden" name="shift" value="<?= htmlspecialchars($filterShift) ?>">
-                            <input type="hidden" name="attendance_date" value="<?= htmlspecialchars($filterDate) ?>">
+                            <input type="hidden" name="session_id" value="<?= (int) $filterSessionId ?>">
 
                             <div class="table-responsive">
                                 <table class="table admas-table align-middle">
@@ -571,10 +714,202 @@ $scopeBanner = match ($role) {
                     <?php endif; ?>
                 </div>
             <?php endif; ?>
+
+            </div>
+
+            <div id="gridMarkingView"<?= $viewMode === 'grid' ? '' : ' hidden' ?>>
+
+            <div class="admas-card p-4 mb-3">
+                <?php if (empty($courses)): ?>
+                    <p class="text-muted mb-0">
+                        <?= $role === 'lecturer' ? 'You have no assigned courses yet.' : 'No courses exist in your scope yet.' ?>
+                    </p>
+                <?php else: ?>
+                    <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/attendance.php" class="row g-2 align-items-end">
+                        <input type="hidden" name="view" value="grid">
+                        <div class="col-sm-8 col-md-6">
+                            <label class="form-label small mb-1">Course</label>
+                            <select class="form-select form-select-sm" name="course_id" required onchange="admasReloadWithCourse(this.value, 'grid')">
+                                <option value="">Select course</option>
+                                <?php if ($role === 'lecturer'): ?>
+                                    <?php foreach ($courses as $c): ?>
+                                        <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <?php
+                                    $gridGroupedCourses = [];
+                                    foreach ($courses as $c) {
+                                        $label = $role === 'system_admin'
+                                            ? $c['faculty_name'] . ' — ' . $c['department_name']
+                                            : $c['department_name'];
+                                        $gridGroupedCourses[$label][] = $c;
+                                    }
+                                    ?>
+                                    <?php foreach ($gridGroupedCourses as $label => $list): ?>
+                                        <optgroup label="<?= htmlspecialchars($label) ?>">
+                                            <?php foreach ($list as $c): ?>
+                                                <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                                    <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </optgroup>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </select>
+                        </div>
+                        <div class="col-sm-4 col-md-3">
+                            <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                <i class="bi bi-grid-3x3"></i> Load Grid
+                            </button>
+                        </div>
+                    </form>
+                    <?php if (array_key_exists($filterCourseId, $courseById) && $currentSemester === null): ?>
+                        <p class="text-muted small mb-0 mt-2">
+                            No current semester is set for <?= htmlspecialchars((string) ($courseById[$filterCourseId]['faculty_name'] ?? '')) ?>.
+                            <?= in_array($role, ['system_admin'], true) ? 'Create one and mark it current on the Semesters page.' : 'Ask an administrator to set one on the Semesters page.' ?>
+                        </p>
+                    <?php elseif (array_key_exists($filterCourseId, $courseById) && empty($currentSemesterSessions)): ?>
+                        <p class="text-muted small mb-0 mt-2">
+                            "<?= htmlspecialchars($currentSemester['name']) ?>" has no Xiiso sessions yet.
+                            <?= in_array($role, ['system_admin'], true) ? 'Generate them on the Semesters page.' : 'Ask an administrator to generate them on the Semesters page.' ?>
+                        </p>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </div>
+
+            <?php if ($showGrid): ?>
+                <div class="admas-card grid-card p-4">
+                    <?php if (empty($gridData['students'])): ?>
+                        <p class="text-muted mb-0">No students match this course yet.</p>
+                    <?php else: ?>
+                        <?= render_scope_breadcrumb([
+                            $courseById[$filterCourseId]['code'],
+                            $courseById[$filterCourseId]['department_name'],
+                            $courseById[$filterCourseId]['faculty_name'],
+                            $currentSemester['name'] ?? null,
+                            $currentSemester['academic_year_label'] ?? null,
+                        ]) ?>
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
+                                Xiiso Grid — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
+                                <span class="text-muted fw-normal">(<?= htmlspecialchars($currentSemester['name']) ?>)</span>
+                            </h6>
+                        </div>
+
+                        <div class="table-responsive">
+                            <table class="table admas-table align-middle" id="xiisoGridTable" data-course-id="<?= (int) $filterCourseId ?>">
+                                <thead>
+                                    <tr>
+                                        <th rowspan="2">Student No</th>
+                                        <th rowspan="2" class="col-group-end">Full Name</th>
+                                        <?php foreach ($monthGroups as $mgIndex => $mg): ?>
+                                            <th colspan="<?= (int) $mg['span'] ?>" class="grid-month-band<?= $mgIndex === count($monthGroups) - 1 ? ' col-group-end' : '' ?>"><?= htmlspecialchars($mg['month_label']) ?></th>
+                                        <?php endforeach; ?>
+                                        <th rowspan="2" class="text-center">P</th>
+                                        <th rowspan="2" class="text-center">A</th>
+                                        <th rowspan="2" class="text-center">%</th>
+                                    </tr>
+                                    <tr>
+                                        <?php foreach ($gridData['sessions'] as $sIndex => $s): ?>
+                                            <th class="text-center<?= $sIndex === count($gridData['sessions']) - 1 ? ' col-group-end' : '' ?>"><?= htmlspecialchars($s['label']) ?></th>
+                                        <?php endforeach; ?>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($gridData['students'] as $st): ?>
+                                        <?php
+                                        $gsid = (int) $st['id'];
+                                        $gPresentCount = 0;
+                                        $gAbsentCount = 0;
+                                        $gTotalMarks = 0;
+                                        foreach ($gridData['sessions'] as $s) {
+                                            $gStatus = $gridData['marks'][$gsid][(int) $s['id']] ?? null;
+                                            if ($gStatus !== null) {
+                                                $gTotalMarks++;
+                                                if ($gStatus === 'present') {
+                                                    $gPresentCount++;
+                                                } elseif ($gStatus === 'absent') {
+                                                    $gAbsentCount++;
+                                                }
+                                            }
+                                        }
+                                        $gPct = $gTotalMarks > 0 ? round(100 * $gPresentCount / $gTotalMarks, 1) : 0.0;
+                                        ?>
+                                        <tr data-student-row="<?= $gsid ?>">
+                                            <td><?= htmlspecialchars($st['student_no']) ?></td>
+                                            <td class="fw-semibold col-group-end" style="color: #0b1f3a;"><?= htmlspecialchars($st['full_name']) ?></td>
+                                            <?php foreach ($gridData['sessions'] as $sIndex => $s): ?>
+                                                <?php
+                                                $gSessId = (int) $s['id'];
+                                                $gCellStatus = $gridData['marks'][$gsid][$gSessId] ?? '';
+                                                $gHasDate = $s['date'] ? true : false;
+                                                $gCellGlyph = match ($gCellStatus) {
+                                                    'present' => 'P',
+                                                    'absent' => 'A',
+                                                    'late' => 'L',
+                                                    'excused' => 'E',
+                                                    default => '',
+                                                };
+                                                $gIsLastSession = $sIndex === count($gridData['sessions']) - 1;
+                                                ?>
+                                                <td class="text-center p-1<?= $gIsLastSession ? ' col-group-end' : '' ?>">
+                                                    <button type="button"
+                                                            class="grid-cell"
+                                                            data-student-id="<?= $gsid ?>"
+                                                            data-session-id="<?= $gSessId ?>"
+                                                            data-course-id="<?= (int) $filterCourseId ?>"
+                                                            data-status="<?= htmlspecialchars($gCellStatus) ?>"
+                                                            <?= $gHasDate ? '' : 'disabled title="No date assigned yet — ask an admin to assign one in Semesters."' ?>>
+                                                        <?= htmlspecialchars($gCellGlyph) ?>
+                                                    </button>
+                                                </td>
+                                            <?php endforeach; ?>
+                                            <td class="text-center" data-role="present-count"><?= $gPresentCount ?></td>
+                                            <td class="text-center" data-role="absent-count"><?= $gAbsentCount ?></td>
+                                            <td class="text-center" data-role="pct"><?= $gPct ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function admasSetAttendanceView(mode) {
+            document.getElementById('classicMarkingView').hidden = mode !== 'classic';
+            document.getElementById('gridMarkingView').hidden = mode !== 'grid';
+            document.getElementById('viewToggleClassic').classList.toggle('active', mode === 'classic');
+            document.getElementById('viewToggleGrid').classList.toggle('active', mode === 'grid');
+        }
+
+        // Which Xiiso sessions (and which semester) are valid depends on the
+        // selected course's own faculty, not one global "current semester" —
+        // so picking a different course reloads the page to re-resolve them
+        // server-side, the same way the Grid View's course picker already did.
+        function admasReloadWithCourse(courseId, viewMode) {
+            if (!courseId) {
+                return;
+            }
+            const params = new URLSearchParams();
+            params.set('course_id', courseId);
+            if (viewMode === 'grid') {
+                params.set('view', 'grid');
+            }
+            window.location = window.ADMAS_BASE_URL + '/attendance.php?' + params.toString();
+        }
+    </script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/attendance_grid.js" defer></script>
     <?php if ($role === 'system_admin'): ?>
         <script>
             const courseDataByFaculty = <?= json_encode($courseJsByFaculty, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;

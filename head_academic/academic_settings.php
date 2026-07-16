@@ -101,38 +101,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
-    } elseif ($action === 'set_current_year') {
-        $yearId = (int) ($_POST['academic_year_id'] ?? 0);
-
-        $yearStmt = $conn->prepare('SELECT label FROM academic_years WHERE id = ?');
-        $yearStmt->bind_param('i', $yearId);
-        $yearStmt->execute();
-        $yearRow = $yearStmt->get_result()->fetch_assoc();
-        $yearStmt->close();
-
-        if (!$yearRow) {
-            $errorMessage = 'Selected Academic Year does not exist.';
-        } else {
-            $conn->begin_transaction();
-            try {
-                $conn->query('UPDATE academic_years SET is_current = 0');
-
-                $updateStmt = $conn->prepare('UPDATE academic_years SET is_current = 1 WHERE id = ?');
-                $updateStmt->bind_param('i', $yearId);
-                $updateStmt->execute();
-                $updateStmt->close();
-
-                save_setting($conn, 'current_academic_year_id', (string) $yearId);
-
-                $conn->commit();
-                $_SESSION['flash_success'] = '"' . $yearRow['label'] . '" is now the current Academic Year.';
-            } catch (Throwable $e) {
-                $conn->rollback();
-                $_SESSION['flash_error'] = 'Could not update the current Academic Year. Please try again.';
-            }
-
-            redirect_to('head_academic/academic_settings.php');
-        }
     } elseif ($action === 'save_threshold') {
         $minAttendancePctInput = trim((string) ($_POST['min_attendance_pct'] ?? ''));
         $thresholdFormValues = ['min_attendance_pct' => $minAttendancePctInput];
@@ -205,40 +173,27 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
                 <div class="col-lg-6">
                     <div class="admas-card p-4 h-100">
                         <h6 class="small text-uppercase text-muted mb-2">Academic Years</h6>
+                        <p class="text-muted small">
+                            "Current" is now set per faculty, per semester, on the
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page — an academic
+                            year here is just a label used when creating a semester.
+                        </p>
                         <div class="table-responsive mb-3">
                             <table class="table admas-table align-middle mb-0">
                                 <thead>
                                     <tr>
                                         <th>Label</th>
-                                        <th>Current</th>
-                                        <th>Action</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (empty($academicYears)): ?>
                                         <tr>
-                                            <td colspan="3" class="text-center text-muted py-3">No academic years exist yet.</td>
+                                            <td class="text-center text-muted py-3">No academic years exist yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($academicYears as $ay): ?>
                                             <tr>
                                                 <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($ay['label']) ?></td>
-                                                <td>
-                                                    <?php if ((int) $ay['is_current'] === 1): ?>
-                                                        <span class="badge-pill badge-active">Current</span>
-                                                    <?php else: ?>
-                                                        <span class="badge-pill badge-inactive">—</span>
-                                                    <?php endif; ?>
-                                                </td>
-                                                <td>
-                                                    <?php if ((int) $ay['is_current'] !== 1): ?>
-                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/academic_settings.php" style="display:inline;">
-                                                            <input type="hidden" name="action" value="set_current_year">
-                                                            <input type="hidden" name="academic_year_id" value="<?= (int) $ay['id'] ?>">
-                                                            <button type="submit" class="btn btn-outline-secondary btn-sm">Set as Current</button>
-                                                        </form>
-                                                    <?php endif; ?>
-                                                </td>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php endif; ?>

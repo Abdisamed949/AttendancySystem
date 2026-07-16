@@ -57,6 +57,119 @@ if (!empty($_SESSION['flash_error'])) {
 // ---------------------------------------------------------------------
 $lecturerFormValues = ['staff_no' => '', 'full_name' => '', 'email' => '', 'department_id' => 0];
 
+/**
+ * Bulk delete only (this role has no single-row delete button — CLAUDE.md
+ * §4 previously granted only register/view here; this request adds delete,
+ * scoped to the same university-wide read scope this page already has, not
+ * limited to any one faculty). Same blocker rules as
+ * admin/lecturers.php::delete_lecturer_row() for the system_admin (no
+ * faculty restriction) case — kept as a separate function since this page
+ * has no $role/$deanFacultyId concept to thread through.
+ */
+function delete_lecturer_row_head_academic(mysqli $conn, int $lecturerId): array
+{
+    $lecturerStmt = $conn->prepare('SELECT user_id, full_name FROM lecturers WHERE id = ?');
+    $lecturerStmt->bind_param('i', $lecturerId);
+    $lecturerStmt->execute();
+    $lecturerRow = $lecturerStmt->get_result()->fetch_assoc();
+    $lecturerStmt->close();
+
+    if (!$lecturerRow) {
+        return ['ok' => false, 'message' => 'Lecturer not found.'];
+    }
+
+    $userId = (int) $lecturerRow['user_id'];
+    $label = (string) $lecturerRow['full_name'];
+
+    // Current-offering-only, same as admin/lecturers.php: a lecturer whose
+    // only assignments are past/historical semesters doesn't block deletion.
+    $courseCountStmt = $conn->prepare(
+        "SELECT COUNT(*) AS c
+         FROM course_offerings co
+         JOIN courses c ON c.id = co.course_id
+         JOIN departments d ON d.id = c.department_id
+         JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
+         WHERE co.lecturer_id = ?"
+    );
+    $courseCountStmt->bind_param('i', $lecturerId);
+    $courseCountStmt->execute();
+    $courseCount = (int) ($courseCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $courseCountStmt->close();
+
+    $attendanceCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE recorded_by_user_id = ?');
+    $attendanceCountStmt->bind_param('i', $userId);
+    $attendanceCountStmt->execute();
+    $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $attendanceCountStmt->close();
+
+    $blockers = [];
+    if ($courseCount > 0) {
+        $blockers[] = $courseCount . ' course' . ($courseCount === 1 ? '' : 's') . ' assigned';
+    }
+    if ($attendanceCount > 0) {
+        $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's') . ' recorded by them';
+    }
+
+    if (!empty($blockers)) {
+        return ['ok' => false, 'message' => $label . ': still has ' . implode(', ', $blockers) . '.'];
+    }
+
+    $conn->begin_transaction();
+    try {
+        $deleteStmt = $conn->prepare('DELETE FROM lecturers WHERE id = ?');
+        $deleteStmt->bind_param('i', $lecturerId);
+        $deleteStmt->execute();
+        $deleteStmt->close();
+
+        $deactivateStmt = $conn->prepare("UPDATE users SET status = 'inactive' WHERE id = ?");
+        $deactivateStmt->bind_param('i', $userId);
+        $deactivateStmt->execute();
+        $deactivateStmt->close();
+
+        $conn->commit();
+        return ['ok' => true, 'message' => $label . ' deleted.'];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return ['ok' => false, 'message' => $label . ': could not be deleted, please try again.'];
+    }
+}
+
+// ---------------------------------------------------------------------
+// Handle POST: register_lecturer, bulk_delete
+// ---------------------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') === 'bulk_delete') {
+    $ids = array_values(array_unique(array_filter(
+        array_map('intval', (array) ($_POST['lecturer_ids'] ?? [])),
+        static fn ($id) => $id > 0
+    )));
+
+    if (empty($ids)) {
+        $_SESSION['flash_error'] = 'No lecturers were selected.';
+    } else {
+        $deletedCount = 0;
+        $skippedMessages = [];
+        foreach ($ids as $lid) {
+            $result = delete_lecturer_row_head_academic($conn, $lid);
+            if ($result['ok']) {
+                $deletedCount++;
+            } else {
+                $skippedMessages[] = $result['message'];
+            }
+        }
+
+        $summary = $deletedCount . ' of ' . count($ids) . ' selected lecturer' . (count($ids) === 1 ? '' : 's') . ' deleted.';
+        if (!empty($skippedMessages)) {
+            $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
+        }
+        if ($deletedCount > 0) {
+            $_SESSION['flash_success'] = $summary;
+        } else {
+            $_SESSION['flash_error'] = $summary;
+        }
+    }
+    redirect_to('head_academic/lecturers.php');
+}
+
 // ---------------------------------------------------------------------
 // Handle POST: register_lecturer (same transaction shape as
 // admin/lecturers.php's create branch)
@@ -166,7 +279,7 @@ while ($row = $deptResult->fetch_assoc()) {
 $lecturers = $conn->query(
     "SELECT l.id, l.staff_no, l.full_name, d.name AS department_name, f.name AS faculty_name,
             u.username, u.status AS user_status,
-            (SELECT COUNT(*) FROM courses c WHERE c.lecturer_id = l.id) AS course_count
+            (SELECT COUNT(DISTINCT co.course_id) FROM course_offerings co WHERE co.lecturer_id = l.id) AS course_count
      FROM lecturers l
      JOIN departments d ON d.id = l.department_id
      JOIN faculties f ON f.id = d.faculty_id
@@ -219,11 +332,21 @@ $lecturers = $conn->query(
             <div class="row g-3">
                 <div class="col-lg-8">
                     <div class="admas-card p-4">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">All Lecturers</h6>
+                        <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">All Lecturers</h6>
+                            <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
+                        </div>
+
+                        <form id="bulkDeleteLecturersForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/lecturers.php" class="d-none">
+                            <input type="hidden" name="action" value="bulk_delete">
+                            <div id="bulkDeleteLecturersIds"></div>
+                        </form>
+
                         <div class="table-responsive">
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
+                                        <th><input type="checkbox" id="selectAllLecturers"></th>
                                         <th>Staff No</th>
                                         <th>Full Name</th>
                                         <th>Department</th>
@@ -235,11 +358,15 @@ $lecturers = $conn->query(
                                 <tbody>
                                     <?php if (empty($lecturers)): ?>
                                         <tr>
-                                            <td colspan="6" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
+                                            <td colspan="7" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($lecturers as $l): ?>
                                             <tr>
+                                                <td>
+                                                    <input type="checkbox" class="row-check-lecturer" value="<?= (int) $l['id'] ?>"
+                                                           data-label="<?= htmlspecialchars($l['full_name'] . ' (' . $l['staff_no'] . ')') ?>">
+                                                </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
                                                 <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($l['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
@@ -312,5 +439,20 @@ $lecturers = $conn->query(
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            admasInitBulkDelete({
+                checkboxSelector: '.row-check-lecturer',
+                selectAllSelector: '#selectAllLecturers',
+                buttonSelector: '#bulkDeleteLecturersBtn',
+                formSelector: '#bulkDeleteLecturersForm',
+                hiddenContainerSelector: '#bulkDeleteLecturersIds',
+                hiddenInputName: 'lecturer_ids[]',
+                entityLabel: 'lecturer',
+                entityLabelPlural: 'lecturers',
+            });
+        });
+    </script>
 </body>
 </html>

@@ -103,6 +103,47 @@ CREATE TABLE academic_years (
 -- logic (set all rows to 0, then set the chosen one to 1, inside a transaction).
 
 -- ---------------------------------------------------------------------
+-- 5b. SEMESTERS  (a 3-month term within an academic year)
+-- ---------------------------------------------------------------------
+CREATE TABLE semesters (
+  id                INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  academic_year_id  INT UNSIGNED NOT NULL,
+  faculty_id        INT UNSIGNED NULL,              -- NULL = not yet assigned to a faculty (must be set via semesters.php before it can be marked current)
+  name              VARCHAR(50) NOT NULL,           -- e.g. 'Semester 3'
+  start_date        DATE NOT NULL,
+  end_date          DATE NOT NULL,
+  is_current        TINYINT(1) NOT NULL DEFAULT 0,
+  created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_semesters_academic_year
+    FOREIGN KEY (academic_year_id) REFERENCES academic_years(id),
+  CONSTRAINT fk_semesters_faculty
+    FOREIGN KEY (faculty_id) REFERENCES faculties(id),
+  INDEX idx_semesters_academic_year (academic_year_id),
+  UNIQUE KEY uq_semester_name_per_faculty_year (faculty_id, academic_year_id, name)
+) ENGINE=InnoDB;
+
+-- "Current" is a per-faculty concept, not global: each faculty may have
+-- exactly one current semester at a time — enforce in application logic
+-- (set is_current = 0 for all semesters WHERE faculty_id = <target>, then
+-- set the chosen one to 1, inside a transaction). A semester with
+-- faculty_id IS NULL can never be marked current.
+
+-- ---------------------------------------------------------------------
+-- 5c. SESSIONS  ("Xiiso" — 12 numbered sessions per semester:
+--     10 regular teaching sessions + Midterm (6) + Final (12))
+-- ---------------------------------------------------------------------
+CREATE TABLE sessions (
+  id              INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  semester_id     INT UNSIGNED NOT NULL,
+  session_number  TINYINT UNSIGNED NOT NULL,        -- 1-12
+  type            ENUM('regular','midterm','final') NOT NULL DEFAULT 'regular',
+  date            DATE NULL,                        -- assigned later by admin/lecturer
+  CONSTRAINT fk_sessions_semester
+    FOREIGN KEY (semester_id) REFERENCES semesters(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_session_number_per_semester (semester_id, session_number)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
 -- 6. LECTURERS
 -- ---------------------------------------------------------------------
 CREATE TABLE lecturers (
@@ -127,7 +168,7 @@ CREATE TABLE courses (
   code           VARCHAR(20)  NOT NULL,
   name           VARCHAR(150) NOT NULL,
   department_id  INT UNSIGNED NOT NULL,
-  lecturer_id    INT UNSIGNED NULL,
+  lecturer_id    INT UNSIGNED NULL,               -- deprecated: who teaches a course is now per-semester, via course_offerings below. Kept unused after the Phase 2 migration/cleanup; not read by application code once course_offerings is live.
   credit_hours   TINYINT UNSIGNED NOT NULL DEFAULT 3,
   created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_courses_department
@@ -137,6 +178,27 @@ CREATE TABLE courses (
   -- Same course code can exist in different departments/faculties —
   -- uniqueness is enforced per department, not globally.
   UNIQUE KEY uq_course_code_per_department (department_id, code)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
+-- 7b. COURSE_OFFERINGS  (which lecturer teaches a course in a given
+--     semester — a course is a reusable catalog entry; who teaches it can
+--     change every semester, so this is tracked separately rather than as
+--     a permanent column on courses)
+-- ---------------------------------------------------------------------
+CREATE TABLE course_offerings (
+  id           INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  course_id    INT UNSIGNED NOT NULL,
+  semester_id  INT UNSIGNED NOT NULL,
+  lecturer_id  INT UNSIGNED NULL,                 -- NULL = unassigned for that semester
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_offerings_course
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_offerings_semester
+    FOREIGN KEY (semester_id) REFERENCES semesters(id) ON DELETE CASCADE,
+  CONSTRAINT fk_offerings_lecturer
+    FOREIGN KEY (lecturer_id) REFERENCES lecturers(id) ON DELETE SET NULL,
+  UNIQUE KEY uq_course_per_semester (course_id, semester_id)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -150,7 +212,8 @@ CREATE TABLE students (
   academic_year_id  INT UNSIGNED NOT NULL,
   faculty_id        INT UNSIGNED NOT NULL,
   department_id     INT UNSIGNED NOT NULL,
-  level             TINYINT UNSIGNED NOT NULL,      -- 1-5
+  level             TINYINT UNSIGNED NOT NULL,      -- deprecated: superseded by semester_id below. Kept unused (no reliable 1-5 -> semesters.id mapping exists to auto-backfill it); not read by application code once semester_id is live.
+  semester_id       INT UNSIGNED NULL,              -- which semester (of the student's own faculty's track) they're on; NULL = not yet assigned (pre-migration students, until an admin edits the record)
   shift             ENUM('morning','afternoon','weekend') NOT NULL,
   status            ENUM('active','inactive') NOT NULL DEFAULT 'active',
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -162,6 +225,8 @@ CREATE TABLE students (
     FOREIGN KEY (faculty_id) REFERENCES faculties(id),
   CONSTRAINT fk_students_department
     FOREIGN KEY (department_id) REFERENCES departments(id),
+  CONSTRAINT fk_students_semester
+    FOREIGN KEY (semester_id) REFERENCES semesters(id),
   INDEX idx_students_scope (faculty_id, department_id, academic_year_id)
 ) ENGINE=InnoDB;
 
@@ -185,9 +250,10 @@ CREATE TABLE attendance (
   id                  BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   student_id          INT UNSIGNED NOT NULL,
   course_id           INT UNSIGNED NOT NULL,
+  session_id          INT UNSIGNED NULL,       -- Xiiso this mark belongs to; NULL = legacy pre-semester row
   academic_year_id    INT UNSIGNED NOT NULL,
   shift               ENUM('morning','afternoon','weekend') NOT NULL,
-  attendance_date     DATE NOT NULL,
+  attendance_date     DATE NOT NULL,           -- denormalized from sessions.date at save time (see semester_helpers.php)
   status              ENUM('present','absent','late','excused') NOT NULL,
   recorded_by_user_id INT UNSIGNED NOT NULL,   -- the lecturer who marked it
   created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -195,12 +261,17 @@ CREATE TABLE attendance (
     FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   CONSTRAINT fk_attendance_course
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_attendance_session
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
   CONSTRAINT fk_attendance_academic_year
     FOREIGN KEY (academic_year_id) REFERENCES academic_years(id),
   CONSTRAINT fk_attendance_recorder
     FOREIGN KEY (recorded_by_user_id) REFERENCES users(id),
-  -- one attendance record per student, per course, per exact date
-  UNIQUE KEY uq_attendance_once_per_day (student_id, course_id, attendance_date)
+  -- one attendance record per student, per course, per Xiiso session
+  -- (legacy rows with session_id NULL are not covered by this constraint —
+  -- MySQL treats NULL as distinct in a UNIQUE index, so old date-only rows
+  -- remain valid history and are never touched by new session-based inserts)
+  UNIQUE KEY uq_attendance_once_per_session (student_id, course_id, session_id)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -234,7 +305,8 @@ INSERT INTO settings (`key`, `value`) VALUES
   ('contact_email', 'info@admas.edu.so'),
   ('contact_phone', '+252 90 555 0142'),
   ('current_academic_year_id', '1'),
-  ('min_attendance_pct', '75');
+  ('min_attendance_pct', '75'),
+  ('current_semester_id', '');
 
 -- ---------------------------------------------------------------------
 -- 12. ROLE ASSIGNMENTS  (audit trail of who appointed whom)

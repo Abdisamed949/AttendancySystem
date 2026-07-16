@@ -16,6 +16,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['student']);
 
@@ -32,19 +33,23 @@ if ($settingsResult) {
         $settings[$row['key']] = $row['value'];
     }
 }
-$currentAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
 $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 
 // ---------------------------------------------------------------------
-// Own students.id + department_id (never trusted from input)
+// Own students.id + department_id + faculty_id (never trusted from input)
 // ---------------------------------------------------------------------
-$ownStmt = $conn->prepare('SELECT id, department_id FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id FROM students WHERE user_id = ?');
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
 $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
 $ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
+
+// "Current academic year" is resolved from this student's own faculty's
+// current semester, not a single global settings value.
+$ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
+$currentAcademicYearId = (int) ($ownCurrentSemester['academic_year_id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // Course discovery: course_enrollments first, department fallback second.
@@ -87,11 +92,18 @@ if ($ownStudentId > 0) {
 $courses = [];
 if (!empty($courseIds)) {
     $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
+    // Lecturer shown is whoever currently holds this course's offering for
+    // ITS OWN faculty's current semester (not the deprecated permanent
+    // courses.lecturer_id) — "Unassigned" if there's no current offering
+    // or no current semester set for that faculty yet.
     $sql = "SELECT c.id, c.code, c.name, l.full_name AS lecturer_name,
                    SUM(a.status = 'present') AS present_count,
                    COUNT(a.id) AS total_marks
             FROM courses c
-            LEFT JOIN lecturers l ON l.id = c.lecturer_id
+            JOIN departments d ON d.id = c.department_id
+            LEFT JOIN semesters se ON se.faculty_id = d.faculty_id AND se.is_current = 1
+            LEFT JOIN course_offerings co ON co.course_id = c.id AND co.semester_id = se.id
+            LEFT JOIN lecturers l ON l.id = co.lecturer_id
             LEFT JOIN attendance a ON a.course_id = c.id AND a.student_id = ? AND a.academic_year_id = ?
             WHERE c.id IN ({$placeholders})
             GROUP BY c.id, c.code, c.name, l.full_name

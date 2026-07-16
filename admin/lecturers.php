@@ -76,8 +76,88 @@ if (!empty($_SESSION['flash_error'])) {
 $formMode = 'create';
 $formValues = ['id' => 0, 'staff_no' => '', 'full_name' => '', 'email' => '', 'department_id' => 0];
 
+/**
+ * Shared by both the single-row "Delete" button and the bulk "Delete
+ * Selected" action so the two can never drift on blocker/validation logic.
+ */
+function delete_lecturer_row(mysqli $conn, int $lecturerId, string $role, int $deanFacultyId): array
+{
+    if ($role === 'dean') {
+        $lecturerStmt = $conn->prepare(
+            'SELECT l.user_id, l.full_name FROM lecturers l JOIN departments d ON d.id = l.department_id WHERE l.id = ? AND d.faculty_id = ?'
+        );
+        $lecturerStmt->bind_param('ii', $lecturerId, $deanFacultyId);
+    } else {
+        $lecturerStmt = $conn->prepare('SELECT user_id, full_name FROM lecturers WHERE id = ?');
+        $lecturerStmt->bind_param('i', $lecturerId);
+    }
+    $lecturerStmt->execute();
+    $lecturerRow = $lecturerStmt->get_result()->fetch_assoc();
+    $lecturerStmt->close();
+
+    if (!$lecturerRow) {
+        return ['ok' => false, 'message' => 'Lecturer not found.'];
+    }
+
+    $userId = (int) $lecturerRow['user_id'];
+    $label = (string) $lecturerRow['full_name'];
+
+    // Current-offering-only: a lecturer whose only assignments are
+    // past/historical semesters doesn't block deletion — only an
+    // active, current-semester teaching assignment does.
+    $courseCountStmt = $conn->prepare(
+        "SELECT COUNT(*) AS c
+         FROM course_offerings co
+         JOIN courses c ON c.id = co.course_id
+         JOIN departments d ON d.id = c.department_id
+         JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
+         WHERE co.lecturer_id = ?"
+    );
+    $courseCountStmt->bind_param('i', $lecturerId);
+    $courseCountStmt->execute();
+    $courseCount = (int) ($courseCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $courseCountStmt->close();
+
+    $attendanceCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE recorded_by_user_id = ?');
+    $attendanceCountStmt->bind_param('i', $userId);
+    $attendanceCountStmt->execute();
+    $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $attendanceCountStmt->close();
+
+    $blockers = [];
+    if ($courseCount > 0) {
+        $blockers[] = $courseCount . ' course' . ($courseCount === 1 ? '' : 's') . ' assigned';
+    }
+    if ($attendanceCount > 0) {
+        $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's') . ' recorded by them';
+    }
+
+    if (!empty($blockers)) {
+        return ['ok' => false, 'message' => $label . ': still has ' . implode(', ', $blockers) . '.'];
+    }
+
+    $conn->begin_transaction();
+    try {
+        $deleteStmt = $conn->prepare('DELETE FROM lecturers WHERE id = ?');
+        $deleteStmt->bind_param('i', $lecturerId);
+        $deleteStmt->execute();
+        $deleteStmt->close();
+
+        $deactivateStmt = $conn->prepare("UPDATE users SET status = 'inactive' WHERE id = ?");
+        $deactivateStmt->bind_param('i', $userId);
+        $deactivateStmt->execute();
+        $deactivateStmt->close();
+
+        $conn->commit();
+        return ['ok' => true, 'message' => $label . ' deleted.'];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return ['ok' => false, 'message' => $label . ': could not be deleted, please try again.'];
+    }
+}
+
 // ---------------------------------------------------------------------
-// Handle POST actions: create, update, delete, reset_password
+// Handle POST actions: create, update, delete, bulk_delete, reset_password
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
@@ -237,72 +317,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errorMessage = $validationError;
     } elseif ($action === 'delete') {
         $lecturerId = (int) ($_POST['lecturer_id'] ?? 0);
-
-        if ($role === 'dean') {
-            $lecturerStmt = $conn->prepare(
-                'SELECT l.user_id FROM lecturers l JOIN departments d ON d.id = l.department_id WHERE l.id = ? AND d.faculty_id = ?'
-            );
-            $lecturerStmt->bind_param('ii', $lecturerId, $deanFacultyId);
+        $result = delete_lecturer_row($conn, $lecturerId, $role, $deanFacultyId);
+        if ($result['ok']) {
+            $_SESSION['flash_success'] = 'Lecturer deleted successfully. Their login account has been deactivated.';
+            redirect_to('admin/lecturers.php');
         } else {
-            $lecturerStmt = $conn->prepare('SELECT user_id FROM lecturers WHERE id = ?');
-            $lecturerStmt->bind_param('i', $lecturerId);
+            $errorMessage = $result['message'];
         }
-        $lecturerStmt->execute();
-        $lecturerRow = $lecturerStmt->get_result()->fetch_assoc();
-        $lecturerStmt->close();
+    } elseif ($action === 'bulk_delete') {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', (array) ($_POST['lecturer_ids'] ?? [])),
+            static fn ($id) => $id > 0
+        )));
 
-        if (!$lecturerRow) {
-            $errorMessage = 'Lecturer not found.';
+        if (empty($ids)) {
+            $_SESSION['flash_error'] = 'No lecturers were selected.';
         } else {
-            $userId = (int) $lecturerRow['user_id'];
-
-            $courseCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM courses WHERE lecturer_id = ?');
-            $courseCountStmt->bind_param('i', $lecturerId);
-            $courseCountStmt->execute();
-            $courseCount = (int) ($courseCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
-            $courseCountStmt->close();
-
-            $attendanceCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE recorded_by_user_id = ?');
-            $attendanceCountStmt->bind_param('i', $userId);
-            $attendanceCountStmt->execute();
-            $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
-            $attendanceCountStmt->close();
-
-            $blockers = [];
-            if ($courseCount > 0) {
-                $blockers[] = $courseCount . ' course' . ($courseCount === 1 ? '' : 's') . ' assigned';
-            }
-            if ($attendanceCount > 0) {
-                $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's') . ' recorded by them';
+            $deletedCount = 0;
+            $skippedMessages = [];
+            foreach ($ids as $lid) {
+                $result = delete_lecturer_row($conn, $lid, $role, $deanFacultyId);
+                if ($result['ok']) {
+                    $deletedCount++;
+                } else {
+                    $skippedMessages[] = $result['message'];
+                }
             }
 
-            if (!empty($blockers)) {
-                $errorMessage = 'Cannot delete this lecturer: they still have ' . implode(', ', $blockers) . '.';
+            $summary = $deletedCount . ' of ' . count($ids) . ' selected lecturer' . (count($ids) === 1 ? '' : 's') . ' deleted.';
+            if (!empty($skippedMessages)) {
+                $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
+            }
+            if ($deletedCount > 0) {
+                $_SESSION['flash_success'] = $summary;
             } else {
-                $conn->begin_transaction();
-                try {
-                    $deleteStmt = $conn->prepare('DELETE FROM lecturers WHERE id = ?');
-                    $deleteStmt->bind_param('i', $lecturerId);
-                    $deleteStmt->execute();
-                    $deleteStmt->close();
-
-                    $deactivateStmt = $conn->prepare("UPDATE users SET status = 'inactive' WHERE id = ?");
-                    $deactivateStmt->bind_param('i', $userId);
-                    $deactivateStmt->execute();
-                    $deactivateStmt->close();
-
-                    $conn->commit();
-                    $_SESSION['flash_success'] = 'Lecturer deleted successfully. Their login account has been deactivated.';
-                } catch (Throwable $e) {
-                    $conn->rollback();
-                    $errorMessage = 'Could not delete the lecturer. Please try again.';
-                }
-
-                if ($errorMessage === '') {
-                    redirect_to('admin/lecturers.php');
-                }
+                $_SESSION['flash_error'] = $summary;
             }
         }
+        redirect_to('admin/lecturers.php');
     } elseif ($action === 'reset_password') {
         $lecturerId = (int) ($_POST['lecturer_id'] ?? 0);
 
@@ -404,7 +456,7 @@ if ($role === 'dean') {
         "SELECT l.id, l.staff_no, l.full_name, l.department_id,
                 d.name AS department_name, f.name AS faculty_name,
                 u.username, u.status AS user_status,
-                (SELECT COUNT(*) FROM courses c WHERE c.lecturer_id = l.id) AS course_count
+                (SELECT COUNT(DISTINCT co.course_id) FROM course_offerings co WHERE co.lecturer_id = l.id) AS course_count
          FROM lecturers l
          JOIN departments d ON d.id = l.department_id
          JOIN faculties f ON f.id = d.faculty_id
@@ -428,7 +480,7 @@ if ($role === 'dean') {
         "SELECT l.id, l.staff_no, l.full_name, l.department_id,
                 d.name AS department_name, f.name AS faculty_name,
                 u.username, u.status AS user_status,
-                (SELECT COUNT(*) FROM courses c WHERE c.lecturer_id = l.id) AS course_count
+                (SELECT COUNT(DISTINCT co.course_id) FROM course_offerings co WHERE co.lecturer_id = l.id) AS course_count
          FROM lecturers l
          JOIN departments d ON d.id = l.department_id
          JOIN faculties f ON f.id = d.faculty_id
@@ -511,6 +563,7 @@ foreach ($departments as $dept) {
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Lecturers</h6>
                             <div class="d-flex gap-2">
+                                <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role === 'system_admin'): ?>
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers_import.php" class="btn btn-outline-secondary btn-sm">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
@@ -522,10 +575,16 @@ foreach ($departments as $dept) {
                             </div>
                         </div>
 
+                        <form id="bulkDeleteLecturersForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="d-none">
+                            <input type="hidden" name="action" value="bulk_delete">
+                            <div id="bulkDeleteLecturersIds"></div>
+                        </form>
+
                         <div class="table-responsive">
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
+                                        <th><input type="checkbox" id="selectAllLecturers"></th>
                                         <th>Staff No</th>
                                         <th>Full Name</th>
                                         <th>Department</th>
@@ -538,11 +597,15 @@ foreach ($departments as $dept) {
                                 <tbody>
                                     <?php if (empty($lecturers)): ?>
                                         <tr>
-                                            <td colspan="7" class="text-center text-muted py-4">No lecturers have been created yet.</td>
+                                            <td colspan="8" class="text-center text-muted py-4">No lecturers have been created yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($lecturers as $l): ?>
                                             <tr>
+                                                <td>
+                                                    <input type="checkbox" class="row-check-lecturer" value="<?= (int) $l['id'] ?>"
+                                                           data-label="<?= htmlspecialchars($l['full_name'] . ' (' . $l['staff_no'] . ')') ?>">
+                                                </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
                                                 <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($l['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
@@ -651,5 +714,20 @@ foreach ($departments as $dept) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            admasInitBulkDelete({
+                checkboxSelector: '.row-check-lecturer',
+                selectAllSelector: '#selectAllLecturers',
+                buttonSelector: '#bulkDeleteLecturersBtn',
+                formSelector: '#bulkDeleteLecturersForm',
+                hiddenContainerSelector: '#bulkDeleteLecturersIds',
+                hiddenInputName: 'lecturer_ids[]',
+                entityLabel: 'lecturer',
+                entityLabelPlural: 'lecturers',
+            });
+        });
+    </script>
 </body>
 </html>

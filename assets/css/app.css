@@ -370,6 +370,69 @@ table.admas-table thead th {
     border-bottom-width: 1px;
 }
 
+/* Xiiso interactive grid (attendance.php Grid View) */
+.admas-card.grid-card {
+    border: 2px solid var(--admas-sky);
+    border-radius: 14px;
+}
+
+table.admas-table thead th.grid-month-band {
+    background: var(--admas-sky);
+    color: #fff;
+    text-align: center;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* Marks the right-hand edge of a logical column group (identity columns /
+   session columns / summary columns) with a thicker accent border, so the
+   eye can separate the groups at a glance. Applied to specific <th>/<td>
+   elements server-side rather than via nth-child, since column counts vary
+   (Xiiso grid) or differ by report type (reports.php's shared renderer). */
+table.admas-table th.col-group-end,
+table.admas-table td.col-group-end {
+    border-right: 3px solid var(--admas-sky);
+}
+
+.view-toggle-btn {
+    background: #fff;
+    color: #0b1f3a;
+    border: 1px solid #cbd5e1;
+}
+
+.view-toggle-btn.active {
+    background: var(--admas-sky);
+    border-color: var(--admas-sky);
+    color: #fff;
+}
+
+.grid-cell {
+    width: 2.25rem;
+    height: 2.25rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1;
+}
+
+.grid-cell[data-status="present"] { background: rgba(34, 197, 94, 0.12); color: #16a34a; border-color: rgba(34, 197, 94, 0.35); }
+.grid-cell[data-status="absent"] { background: rgba(239, 68, 68, 0.12); color: #dc2626; border-color: rgba(239, 68, 68, 0.35); }
+.grid-cell[data-status="late"] { background: rgba(245, 158, 11, 0.12); color: #d97706; border-color: rgba(245, 158, 11, 0.35); }
+.grid-cell[data-status="excused"] { background: rgba(100, 116, 139, 0.12); color: #475569; border-color: rgba(100, 116, 139, 0.35); }
+
+.grid-cell:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.grid-cell.is-loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
 @media (max-width: 991.98px) {
     .sidebar {
         transform: translateX(-100%);

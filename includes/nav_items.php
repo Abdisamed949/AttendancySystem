@@ -30,6 +30,7 @@ function nav_items(): array
         ['label' => 'Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'path' => 'admin/courses.php', 'roles' => ['system_admin', 'dean']],
         // "My Courses" — Lecturer's own assigned courses and Student's own
         // enrolled courses are two different files under two different role
+        
         // folders, but share the 'courses.php' filename and resolve via the
         // default {roleFolder}/{file} convention (no path override needed,
         // same reasoning as the head_academic Lecturers entry above).
@@ -37,6 +38,8 @@ function nav_items(): array
         ['label' => 'My Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'roles' => ['student']],
         // Attendance lives at the app root (shared by all three roles below), not under any one role folder.
         ['label' => 'Attendance', 'icon' => 'bi-calendar2-check', 'file' => 'attendance.php', 'path' => 'attendance.php', 'roles' => ['system_admin', 'dean', 'lecturer']],
+        // Semester/Xiiso session management lives at the app root (shared by both roles), same pattern as Attendance above.
+        ['label' => 'Semesters', 'icon' => 'bi-calendar3-week', 'file' => 'semesters.php', 'path' => 'semesters.php', 'roles' => ['system_admin', 'head_academic']],
         ['label' => 'Import Students', 'icon' => 'bi-file-earmark-arrow-up', 'file' => 'students_import.php', 'path' => 'admin/students_import.php', 'roles' => ['system_admin', 'registration']],
         // Reports lives at the app root (shared by five roles), not under any one role folder — same pattern as Attendance above.
         ['label' => 'Reports', 'icon' => 'bi-bar-chart', 'file' => 'reports.php', 'path' => 'reports.php', 'roles' => ['system_admin', 'head_academic', 'registration', 'dean', 'lecturer']],

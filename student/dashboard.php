@@ -9,6 +9,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['student']);
 
@@ -25,18 +26,22 @@ if ($settingsResult) {
         $settings[$row['key']] = $row['value'];
     }
 }
-$currentAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
 $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 
 // ---------------------------------------------------------------------
 // Own students.id (never trusted from input)
 // ---------------------------------------------------------------------
-$ownStmt = $conn->prepare('SELECT id, full_name FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare('SELECT id, full_name, faculty_id FROM students WHERE user_id = ?');
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
 $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
+
+// "Current academic year" is resolved from this student's own faculty's
+// current semester, not a single global settings value.
+$ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
+$currentAcademicYearId = (int) ($ownCurrentSemester['academic_year_id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // My Course Attendance — per course, for the current academic year

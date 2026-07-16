@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
+require_once __DIR__ . '/includes/semester_helpers.php';
+require_once __DIR__ . '/includes/attendance_helpers.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 require_role(['system_admin', 'head_academic', 'dean', 'registration', 'lecturer']);
@@ -23,14 +25,15 @@ const REPORT_TYPE_LABELS = [
     'course_attendance' => 'Course Attendance Summary',
     'department_summary' => 'Department Summary',
     'faculty_summary' => 'Faculty Summary',
+    'xiiso_grid' => 'Xiiso Attendance Grid',
 ];
 
 const REPORT_TYPES_BY_ROLE = [
-    'system_admin' => ['course_attendance', 'department_summary', 'faculty_summary'],
-    'head_academic' => ['course_attendance', 'department_summary', 'faculty_summary'],
-    'dean' => ['course_attendance', 'department_summary'],
+    'system_admin' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
+    'head_academic' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
+    'dean' => ['course_attendance', 'department_summary', 'xiiso_grid'],
     'registration' => ['department_summary', 'faculty_summary'],
-    'lecturer' => ['course_attendance'],
+    'lecturer' => ['course_attendance', 'xiiso_grid'],
 ];
 
 // ---------------------------------------------------------------------
@@ -48,7 +51,10 @@ function build_course_attendance_report(mysqli $conn, string $role, int $faculty
     $types = 'ss';
 
     if ($role === 'lecturer') {
-        $conditions[] = 'c.lecturer_id = ?';
+        // Reports are historical — a lecturer can report on any course
+        // they've ever been assigned to teach (any offering, any
+        // semester), not just their current one.
+        $conditions[] = 'EXISTS (SELECT 1 FROM course_offerings co WHERE co.course_id = c.id AND co.lecturer_id = ?)';
         $params[] = $lecturerRecordId;
         $types .= 'i';
     } else {
@@ -335,6 +341,69 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
     return [$columns, $data];
 }
 
+/**
+ * Reproduces the lecturer's paper/Excel grid: one row per student enrolled
+ * in the course, one column per Xiiso (1-12) for the given semester, plus
+ * auto-computed P (present count) / A (absent count) / % trailing columns.
+ * Cell values: '1' present, '0' absent, 'L' late, 'E' excused, '' unmarked.
+ */
+function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): array
+{
+    $gridData = get_xiiso_grid_data($conn, $courseId, $semesterId);
+    $sessions = $gridData['sessions'];
+    $students = $gridData['students'];
+    $marksByStudentSession = $gridData['marks'];
+
+    $columns = [
+        ['key' => 'student_no', 'label' => 'Student No'],
+        ['key' => 'full_name', 'label' => 'Full Name', 'group_end' => true],
+    ];
+    foreach ($sessions as $s) {
+        $columns[] = ['key' => 'session_' . $s['id'], 'label' => $s['label']];
+    }
+    if (!empty($sessions)) {
+        $columns[count($columns) - 1]['group_end'] = true;
+    }
+    $columns[] = ['key' => 'present_count', 'label' => 'P'];
+    $columns[] = ['key' => 'absent_count', 'label' => 'A'];
+    $columns[] = ['key' => 'attendance_pct', 'label' => '%'];
+
+    $data = [];
+    foreach ($students as $st) {
+        $sid = (int) $st['id'];
+        $row = ['student_no' => $st['student_no'], 'full_name' => $st['full_name']];
+
+        $presentCount = 0;
+        $absentCount = 0;
+        $totalMarks = 0;
+        foreach ($sessions as $s) {
+            $status = $marksByStudentSession[$sid][(int) $s['id']] ?? null;
+            $row['session_' . $s['id']] = match ($status) {
+                'present' => '1',
+                'absent' => '0',
+                'late' => 'L',
+                'excused' => 'E',
+                default => '',
+            };
+            if ($status !== null) {
+                $totalMarks++;
+                if ($status === 'present') {
+                    $presentCount++;
+                } elseif ($status === 'absent') {
+                    $absentCount++;
+                }
+            }
+        }
+
+        $row['present_count'] = $presentCount;
+        $row['absent_count'] = $absentCount;
+        $row['attendance_pct'] = $totalMarks > 0 ? round(100 * $presentCount / $totalMarks, 1) : 0.0;
+        $data[] = $row;
+    }
+
+    return [$columns, $data];
+}
+
 function report_export_filename(string $reportType, string $dateFrom, string $dateTo): string
 {
     $slug = str_replace(' ', '_', strtolower(REPORT_TYPE_LABELS[$reportType] ?? 'report'));
@@ -346,7 +415,7 @@ function report_export_filename(string $reportType, string $dateFrom, string $da
  * Builds the PDF body as an HTML string dompdf can render, with the
  * university name/logo in the header above the report table.
  */
-function render_report_pdf_html(string $universityName, string $campusLine, string $reportTitle, string $dateFrom, string $dateTo, array $columns, array $rows, string $logoBase64): string
+function render_report_pdf_html(string $universityName, string $campusLine, string $reportTitle, string $metaLine, array $columns, array $rows, string $logoBase64): string
 {
     ob_start();
     ?>
@@ -379,7 +448,7 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
     </div>
     <h2><?= htmlspecialchars($reportTitle) ?></h2>
     <div class="meta-line">
-        Period: <?= htmlspecialchars($dateFrom) ?> to <?= htmlspecialchars($dateTo) ?>
+        <?= htmlspecialchars($metaLine) ?>
         &nbsp;|&nbsp; Generated: <?= htmlspecialchars(date('Y-m-d H:i')) ?>
     </div>
     <table>
@@ -496,6 +565,95 @@ if ($filterDateFrom > $filterDateTo) {
 }
 
 // ---------------------------------------------------------------------
+// Course + Semester lists for the Xiiso Attendance Grid report (scoped by
+// role the same way as attendance.php's course dropdown).
+// ---------------------------------------------------------------------
+$xiisoCourses = [];
+if (in_array('xiiso_grid', $allowedReportTypes, true)) {
+    if ($role === 'lecturer') {
+        // Same any-offering, historical scoping as the report filter above
+        // — the Xiiso grid report already lets the semester be picked
+        // independently, so a lecturer can pull a past semester's grid for
+        // a course they no longer currently teach.
+        $stmt = $conn->prepare(
+            "SELECT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
+             FROM courses c
+             JOIN departments d ON d.id = c.department_id
+             JOIN faculties f ON f.id = d.faculty_id
+             WHERE EXISTS (SELECT 1 FROM course_offerings co WHERE co.course_id = c.id AND co.lecturer_id = ?)
+             ORDER BY c.code"
+        );
+        $stmt->bind_param('i', $lecturerRecordId);
+    } elseif ($role === 'dean') {
+        $stmt = $conn->prepare(
+            "SELECT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
+             FROM courses c
+             JOIN departments d ON d.id = c.department_id
+             JOIN faculties f ON f.id = d.faculty_id
+             WHERE d.faculty_id = ?
+             ORDER BY d.name, c.code"
+        );
+        $stmt->bind_param('i', $deanFacultyId);
+    } else {
+        $stmt = $conn->prepare(
+            "SELECT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
+             FROM courses c
+             JOIN departments d ON d.id = c.department_id
+             JOIN faculties f ON f.id = d.faculty_id
+             ORDER BY f.name, d.name, c.code"
+        );
+    }
+    $stmt->execute();
+    $xiisoCourses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+}
+$xiisoCourseById = [];
+foreach ($xiisoCourses as $c) {
+    $xiisoCourseById[(int) $c['id']] = $c;
+}
+
+// Every semester across every faculty is listed here (not just one
+// faculty's) — the Xiiso grid report is a historical/reporting surface, so
+// a lecturer/dean/admin can pull a past semester's grid for a course they
+// no longer teach, not just the current one. faculty_id is still selected
+// so the mismatch guard below can catch a course+semester pair that don't
+// belong to the same faculty.
+$xiisoSemesters = in_array('xiiso_grid', $allowedReportTypes, true)
+    ? $conn->query(
+        "SELECT s.id, s.faculty_id, s.name, ay.label AS academic_year_label
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         ORDER BY s.start_date DESC"
+    )->fetch_all(MYSQLI_ASSOC)
+    : [];
+$xiisoSemesterById = [];
+foreach ($xiisoSemesters as $s) {
+    $xiisoSemesterById[(int) $s['id']] = $s;
+}
+
+$filterXiisoCourseId = isset($_GET['xiiso_course_id']) ? (int) $_GET['xiiso_course_id'] : 0;
+
+// Default the semester dropdown to the selected course's own faculty's
+// current semester — there's no single "the" current semester to default
+// to before a course is chosen, so no default applies yet in that case.
+$defaultXiisoSemesterId = 0;
+if (array_key_exists($filterXiisoCourseId, $xiisoCourseById)) {
+    $defaultXiisoSemesterId = (int) (get_current_semester($conn, (int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id'])['id'] ?? 0);
+}
+$filterXiisoSemesterId = isset($_GET['xiiso_semester_id']) ? (int) $_GET['xiiso_semester_id'] : $defaultXiisoSemesterId;
+
+// Guard against a course + semester pair from different faculties (e.g. a
+// tampered query string) — silently building a cross-faculty grid would be
+// wrong, so treat the semester choice as unset instead.
+if (
+    array_key_exists($filterXiisoCourseId, $xiisoCourseById)
+    && array_key_exists($filterXiisoSemesterId, $xiisoSemesterById)
+    && (int) $xiisoSemesterById[$filterXiisoSemesterId]['faculty_id'] !== (int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id']
+) {
+    $filterXiisoSemesterId = 0;
+}
+
+// ---------------------------------------------------------------------
 // Faculty / Department lists for the filter dropdowns
 // ---------------------------------------------------------------------
 $faculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
@@ -523,10 +681,20 @@ $deanDepartments = $role === 'dean'
     'course_attendance' => build_course_attendance_report($conn, $role, $filterFacultyId, $filterDepartmentId, $lecturerRecordId, $filterDateFrom, $filterDateTo),
     'department_summary' => build_department_summary_report($conn, $role, $filterFacultyId, $filterDepartmentId, $filterDateFrom, $filterDateTo),
     'faculty_summary' => build_faculty_summary_report($conn, $role, $filterFacultyId, $filterDateFrom, $filterDateTo),
+    'xiiso_grid' => (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
+        ? build_xiiso_grid_report($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
+        : [[], []],
     default => [[], []],
 };
 
 $reportTitle = REPORT_TYPE_LABELS[$filterReportType] ?? 'Report';
+
+if ($filterReportType === 'xiiso_grid') {
+    $reportMetaLine = 'Course: ' . ($xiisoCourseById[$filterXiisoCourseId]['code'] ?? '') . ' — ' . ($xiisoCourseById[$filterXiisoCourseId]['name'] ?? '')
+        . '   |   Semester: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? '');
+} else {
+    $reportMetaLine = 'Period: ' . $filterDateFrom . ' to ' . $filterDateTo;
+}
 
 $currentQuery = [
     'report_type' => $filterReportType,
@@ -534,6 +702,8 @@ $currentQuery = [
     'department_id' => $filterDepartmentId,
     'date_from' => $filterDateFrom,
     'date_to' => $filterDateTo,
+    'xiiso_course_id' => $filterXiisoCourseId,
+    'xiiso_semester_id' => $filterXiisoSemesterId,
 ];
 $exportExcelUrl = BASE_URL . '/reports.php?' . http_build_query($currentQuery + ['export' => 'excel']);
 $exportPdfUrl = BASE_URL . '/reports.php?' . http_build_query($currentQuery + ['export' => 'pdf']);
@@ -544,7 +714,15 @@ $exportPdfUrl = BASE_URL . '/reports.php?' . http_build_query($currentQuery + ['
 $exportFormat = (string) ($_GET['export'] ?? '');
 if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
     $universityName = $settings['university_name'] ?? 'ADMAS University';
-    $filename = report_export_filename($filterReportType, $filterDateFrom, $filterDateTo);
+
+    if ($filterReportType === 'xiiso_grid') {
+        $xiisoCourseLabel = $xiisoCourseById[$filterXiisoCourseId]['code'] ?? 'course';
+        $xiisoSemesterLabel = $xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? 'semester';
+        $filename = str_replace(' ', '_', strtolower(REPORT_TYPE_LABELS[$filterReportType]))
+            . '_' . preg_replace('/\s+/', '_', $xiisoCourseLabel) . '_' . preg_replace('/\s+/', '_', $xiisoSemesterLabel);
+    } else {
+        $filename = report_export_filename($filterReportType, $filterDateFrom, $filterDateTo);
+    }
 
     if ($exportFormat === 'excel') {
         $spreadsheet = new Spreadsheet();
@@ -553,7 +731,7 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
 
         $sheet->setCellValue('A1', $universityName);
         $sheet->setCellValue('A2', $reportTitle);
-        $sheet->setCellValue('A3', 'Period: ' . $filterDateFrom . ' to ' . $filterDateTo . '   |   Generated: ' . date('Y-m-d H:i'));
+        $sheet->setCellValue('A3', $reportMetaLine . '   |   Generated: ' . date('Y-m-d H:i'));
         $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
         $sheet->getStyle('A2')->getFont()->setBold(true)->setSize(11);
         $sheet->getStyle('A3')->getFont()->setItalic(true)->setSize(9);
@@ -597,7 +775,7 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
     $logoBase64 = is_file($logoPath) ? base64_encode((string) file_get_contents($logoPath)) : '';
     $campusLine = trim(($settings['campus'] ?? '') . ' — ' . ($settings['contact_email'] ?? '') . ' — ' . ($settings['contact_phone'] ?? ''), ' —');
 
-    $html = render_report_pdf_html($universityName, $campusLine, $reportTitle, $filterDateFrom, $filterDateTo, $reportColumns, $reportRows, $logoBase64);
+    $html = render_report_pdf_html($universityName, $campusLine, $reportTitle, $reportMetaLine, $reportColumns, $reportRows, $logoBase64);
 
     $pdfOptions = new DompdfOptions();
     $pdfOptions->set('isRemoteEnabled', false);
@@ -651,7 +829,7 @@ $scopeBanner = match ($role) {
                 <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="row g-2 align-items-end">
                     <div class="col-sm-6 col-md-3">
                         <label class="form-label small mb-1">Report Type</label>
-                        <select class="form-select form-select-sm" name="report_type" id="reportTypeSelect" onchange="toggleDepartmentFilter()">
+                        <select class="form-select form-select-sm" name="report_type" id="reportTypeSelect" onchange="toggleReportFilters()">
                             <?php foreach ($allowedReportTypes as $typeKey): ?>
                                 <option value="<?= htmlspecialchars($typeKey) ?>" <?= $filterReportType === $typeKey ? 'selected' : '' ?>>
                                     <?= htmlspecialchars(REPORT_TYPE_LABELS[$typeKey]) ?>
@@ -660,7 +838,7 @@ $scopeBanner = match ($role) {
                         </select>
                     </div>
 
-                    <div class="col-sm-6 col-md-3">
+                    <div class="col-sm-6 col-md-3" id="facultyFilterWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
                         <label class="form-label small mb-1">Faculty</label>
                         <?php if ($role === 'lecturer'): ?>
                             <input type="text" class="form-control form-control-sm" value="Your courses" disabled>
@@ -680,7 +858,7 @@ $scopeBanner = match ($role) {
                         <?php endif; ?>
                     </div>
 
-                    <div class="col-sm-6 col-md-3" id="departmentFilterWrap" style="<?= $filterReportType === 'faculty_summary' ? 'display:none;' : '' ?>">
+                    <div class="col-sm-6 col-md-3" id="departmentFilterWrap" style="<?= ($filterReportType === 'faculty_summary' || $filterReportType === 'xiiso_grid') ? 'display:none;' : '' ?>">
                         <label class="form-label small mb-1">Department</label>
                         <?php if ($role === 'lecturer'): ?>
                             <input type="text" class="form-control form-control-sm" value="Your courses" disabled>
@@ -700,13 +878,36 @@ $scopeBanner = match ($role) {
                         <?php endif; ?>
                     </div>
 
-                    <div class="col-sm-6 col-md-2">
+                    <div class="col-sm-6 col-md-2" id="dateFromWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
                         <label class="form-label small mb-1">From</label>
                         <input type="date" class="form-control form-control-sm" name="date_from" value="<?= htmlspecialchars($filterDateFrom) ?>">
                     </div>
-                    <div class="col-sm-6 col-md-2">
+                    <div class="col-sm-6 col-md-2" id="dateToWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
                         <label class="form-label small mb-1">To</label>
                         <input type="date" class="form-control form-control-sm" name="date_to" value="<?= htmlspecialchars($filterDateTo) ?>">
+                    </div>
+
+                    <div class="col-sm-6 col-md-3" id="xiisoCourseWrap" style="<?= $filterReportType === 'xiiso_grid' ? '' : 'display:none;' ?>">
+                        <label class="form-label small mb-1">Course</label>
+                        <select class="form-select form-select-sm" name="xiiso_course_id">
+                            <option value="">Select course</option>
+                            <?php foreach ($xiisoCourses as $c): ?>
+                                <option value="<?= (int) $c['id'] ?>" <?= $filterXiisoCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-sm-6 col-md-2" id="xiisoSemesterWrap" style="<?= $filterReportType === 'xiiso_grid' ? '' : 'display:none;' ?>">
+                        <label class="form-label small mb-1">Semester</label>
+                        <select class="form-select form-select-sm" name="xiiso_semester_id">
+                            <option value="">Select semester</option>
+                            <?php foreach ($xiisoSemesters as $s): ?>
+                                <option value="<?= (int) $s['id'] ?>" <?= $filterXiisoSemesterId === (int) $s['id'] ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($s['name'] . ' (' . $s['academic_year_label'] . ')') ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
 
                     <div class="col-sm-6 col-md-2">
@@ -718,10 +919,19 @@ $scopeBanner = match ($role) {
             </div>
 
             <div class="admas-card p-4">
+                <?php if ($filterReportType === 'xiiso_grid' && array_key_exists($filterXiisoCourseId, $xiisoCourseById)): ?>
+                    <?= render_scope_breadcrumb([
+                        $xiisoCourseById[$filterXiisoCourseId]['code'],
+                        $xiisoCourseById[$filterXiisoCourseId]['department_name'],
+                        $xiisoCourseById[$filterXiisoCourseId]['faculty_name'],
+                        $xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? null,
+                        $xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? null,
+                    ]) ?>
+                <?php endif; ?>
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                     <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
                         <?= htmlspecialchars($reportTitle) ?>
-                        <span class="text-muted fw-normal">(<?= htmlspecialchars($filterDateFrom) ?> to <?= htmlspecialchars($filterDateTo) ?>)</span>
+                        <span class="text-muted fw-normal">(<?= htmlspecialchars($reportMetaLine) ?>)</span>
                     </h6>
                     <div class="d-flex gap-2">
                         <a href="<?= htmlspecialchars($exportExcelUrl) ?>" class="btn btn-outline-secondary btn-sm">
@@ -738,7 +948,7 @@ $scopeBanner = match ($role) {
                         <thead>
                             <tr>
                                 <?php foreach ($reportColumns as $col): ?>
-                                    <th><?= htmlspecialchars($col['label']) ?></th>
+                                    <th class="<?= !empty($col['group_end']) ? 'col-group-end' : '' ?>"><?= htmlspecialchars($col['label']) ?></th>
                                 <?php endforeach; ?>
                             </tr>
                         </thead>
@@ -751,7 +961,7 @@ $scopeBanner = match ($role) {
                                 <?php foreach ($reportRows as $r): ?>
                                     <tr>
                                         <?php foreach ($reportColumns as $col): ?>
-                                            <td><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
+                                            <td class="<?= !empty($col['group_end']) ? 'col-group-end' : '' ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
                                         <?php endforeach; ?>
                                     </tr>
                                 <?php endforeach; ?>
@@ -765,12 +975,23 @@ $scopeBanner = match ($role) {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        function toggleDepartmentFilter() {
+        function toggleReportFilters() {
             const reportType = document.getElementById('reportTypeSelect').value;
-            const wrap = document.getElementById('departmentFilterWrap');
-            if (wrap) {
-                wrap.style.display = reportType === 'faculty_summary' ? 'none' : '';
-            }
+            const isXiiso = reportType === 'xiiso_grid';
+
+            const setDisplay = (id, visible) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.style.display = visible ? '' : 'none';
+                }
+            };
+
+            setDisplay('facultyFilterWrap', !isXiiso);
+            setDisplay('departmentFilterWrap', !isXiiso && reportType !== 'faculty_summary');
+            setDisplay('dateFromWrap', !isXiiso);
+            setDisplay('dateToWrap', !isXiiso);
+            setDisplay('xiisoCourseWrap', isXiiso);
+            setDisplay('xiisoSemesterWrap', isXiiso);
         }
     </script>
     <?php if (!in_array($role, ['dean', 'lecturer'], true)): ?>

@@ -6,6 +6,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['system_admin']);
 
@@ -23,7 +24,6 @@ if ($settingsResult) {
     }
 }
 $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
-$currentAcademicYearId = (int) ($settings['current_academic_year_id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // KPI cards
@@ -85,25 +85,40 @@ if ($notifStmt) {
     $notifStmt->close();
 }
 
-if (empty($alerts) && $currentAcademicYearId > 0) {
-    $liveStmt = $conn->prepare(
-        "SELECT s.full_name, s.student_no, c.name AS course_name,
-                ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
-         FROM attendance a
-         JOIN students s ON s.id = a.student_id
-         JOIN courses c ON c.id = a.course_id
-         WHERE a.academic_year_id = ?
-         GROUP BY s.id, a.course_id
-         HAVING attendance_pct < ?
-         ORDER BY attendance_pct ASC
-         LIMIT 8"
-    );
-    if ($liveStmt) {
-        $liveStmt->bind_param('id', $currentAcademicYearId, $minAttendancePct);
+if (empty($alerts)) {
+    // Cross-faculty, so each faculty's own current academic year is used
+    // (never one shared global value) — one small query per faculty,
+    // merged and re-sorted, since there's no longer a single "the" current
+    // academic year to filter all of them by at once.
+    $liveAlerts = [];
+    $facultiesForAlerts = $conn->query('SELECT id FROM faculties')->fetch_all(MYSQLI_ASSOC);
+    foreach ($facultiesForAlerts as $f) {
+        $facultyId = (int) $f['id'];
+        $facultySemester = get_current_semester($conn, $facultyId);
+        $facultyAcademicYearId = (int) ($facultySemester['academic_year_id'] ?? 0);
+        if ($facultyAcademicYearId <= 0) {
+            continue;
+        }
+
+        $liveStmt = $conn->prepare(
+            "SELECT s.full_name, s.student_no, c.name AS course_name,
+                    ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
+             FROM attendance a
+             JOIN students s ON s.id = a.student_id
+             JOIN courses c ON c.id = a.course_id
+             WHERE a.academic_year_id = ? AND s.faculty_id = ?
+             GROUP BY s.id, a.course_id
+             HAVING attendance_pct < ?
+             ORDER BY attendance_pct ASC
+             LIMIT 8"
+        );
+        $liveStmt->bind_param('iid', $facultyAcademicYearId, $facultyId, $minAttendancePct);
         $liveStmt->execute();
-        $alerts = $liveStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $liveAlerts = array_merge($liveAlerts, $liveStmt->get_result()->fetch_all(MYSQLI_ASSOC));
         $liveStmt->close();
     }
+    usort($liveAlerts, static fn ($a, $b) => $a['attendance_pct'] <=> $b['attendance_pct']);
+    $alerts = array_slice($liveAlerts, 0, 8);
 }
 
 ?>

@@ -25,10 +25,10 @@ $conn = db();
 if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->fromArray(['Code', 'Name', 'Department', 'Lecturer', 'Credit Hours'], null, 'A1');
-    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', '', 3], null, 'A2');
-    $sheet->getStyle('A1:E1')->getFont()->setBold(true);
-    foreach (['A', 'B', 'C', 'D', 'E'] as $col) {
+    $sheet->fromArray(['Code', 'Name', 'Department', 'Credit Hours'], null, 'A1');
+    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', 3], null, 'A2');
+    $sheet->getStyle('A1:D1')->getFont()->setBold(true);
+    foreach (['A', 'B', 'C', 'D'] as $col) {
         $sheet->getColumnDimension($col)->setAutoSize(true);
     }
 
@@ -78,14 +78,6 @@ foreach ($existingDepartments as $dept) {
     $departmentByLowerName[mb_strtolower(trim((string) $dept['name']))] = (int) $dept['id'];
 }
 
-// Lecturers grouped by department, keyed by lowercase full name, for optional Lecturer column matching.
-$lecturersByDeptAndName = [];
-$lecturerRows = $conn->query('SELECT id, full_name, department_id FROM lecturers')->fetch_all(MYSQLI_ASSOC);
-foreach ($lecturerRows as $lec) {
-    $key = (int) $lec['department_id'] . '|' . mb_strtolower(trim((string) $lec['full_name']));
-    $lecturersByDeptAndName[$key] = (int) $lec['id'];
-}
-
 // ---------------------------------------------------------------------
 // Handle POST actions: preview, confirm, cancel
 // ---------------------------------------------------------------------
@@ -128,10 +120,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         if ($departmentCol === false) {
                             $departmentCol = array_search('department name', $headerRow, true);
                         }
-                        $lecturerCol = array_search('lecturer', $headerRow, true);
-                        if ($lecturerCol === false) {
-                            $lecturerCol = array_search('lecturer name', $headerRow, true);
-                        }
                         $creditCol = array_search('credit hours', $headerRow, true);
                         if ($creditCol === false) {
                             $creditCol = array_search('credit_hours', $headerRow, true);
@@ -151,7 +139,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $code = trim((string) ($row[$codeCol] ?? ''));
                                 $name = trim((string) ($row[$nameCol] ?? ''));
                                 $departmentInput = trim((string) ($row[$departmentCol] ?? ''));
-                                $lecturerInput = $lecturerCol !== false ? trim((string) ($row[$lecturerCol] ?? '')) : '';
                                 $creditInput = $creditCol !== false ? trim((string) ($row[$creditCol] ?? '')) : '';
 
                                 if ($code === '' && $name === '' && $departmentInput === '') {
@@ -161,7 +148,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $status = 'ok';
                                 $message = 'Ready to import';
                                 $departmentId = 0;
-                                $lecturerId = 0;
                                 $creditHours = 3;
                                 $codeUpper = strtoupper($code);
 
@@ -188,15 +174,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         $message = 'Invalid Credit Hours (must be a number 1-10)';
                                     } else {
                                         $creditHours = (int) $creditInput;
-                                    }
-                                }
-
-                                if ($status === 'ok' && $lecturerInput !== '') {
-                                    $lecturerKey = $departmentId . '|' . mb_strtolower($lecturerInput);
-                                    $lecturerId = $lecturersByDeptAndName[$lecturerKey] ?? 0;
-                                    if ($lecturerId === 0) {
-                                        $status = 'error';
-                                        $message = 'Unknown lecturer "' . $lecturerInput . '" in that department';
                                     }
                                 }
 
@@ -227,8 +204,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     'name' => $name,
                                     'department_input' => $departmentInput,
                                     'department_id' => $departmentId,
-                                    'lecturer_input' => $lecturerInput,
-                                    'lecturer_id' => $lecturerId,
                                     'credit_hours' => $creditHours,
                                     'status' => $status,
                                     'message' => $message,
@@ -261,11 +236,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 $conn->begin_transaction();
                 try {
-                    $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, lecturer_id, credit_hours) VALUES (?, ?, ?, ?, ?)');
+                    $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
                     $imported = 0;
                     foreach ($validRows as $row) {
-                        $lecturerParam = $row['lecturer_id'] > 0 ? $row['lecturer_id'] : null;
-                        $insertStmt->bind_param('ssiii', $row['code'], $row['name'], $row['department_id'], $lecturerParam, $row['credit_hours']);
+                        $insertStmt->bind_param('ssii', $row['code'], $row['name'], $row['department_id'], $row['credit_hours']);
                         $insertStmt->execute();
                         $imported++;
                     }
@@ -345,9 +319,9 @@ $invalidCount = count($previewRows) - $validCount;
                     <div class="alert alert-light border small mb-3">
                         The file must have column headers: <strong>Code</strong>, <strong>Name</strong>,
                         and <strong>Department</strong> (the Department value must match an existing
-                        department's name). <strong>Lecturer</strong> and <strong>Credit Hours</strong> are
-                        optional — Credit Hours defaults to 3 if left blank, and Lecturer must match an
-                        existing lecturer's name within that same department.
+                        department's name). <strong>Credit Hours</strong> is optional and defaults to 3
+                        if left blank. Lecturer assignment is per-semester now — use "Manage Offerings"
+                        on each course after importing.
                         <br>
                         <a href="?action=template" class="fw-semibold">
                             <i class="bi bi-download"></i> Download a starter template (.xlsx)
@@ -385,7 +359,6 @@ $invalidCount = count($previewRows) - $validCount;
                                     <th>Code</th>
                                     <th>Name</th>
                                     <th>Department</th>
-                                    <th>Lecturer</th>
                                     <th>Credit Hours</th>
                                     <th>Status</th>
                                 </tr>
@@ -397,7 +370,6 @@ $invalidCount = count($previewRows) - $validCount;
                                         <td><?= htmlspecialchars($r['code']) ?></td>
                                         <td><?= htmlspecialchars($r['name']) ?></td>
                                         <td><?= htmlspecialchars($r['department_input']) ?></td>
-                                        <td><?= $r['lecturer_input'] !== '' ? htmlspecialchars($r['lecturer_input']) : '<span class="text-muted fst-italic">Unassigned</span>' ?></td>
                                         <td><?= (int) $r['credit_hours'] ?></td>
                                         <td>
                                             <?php if ($r['status'] === 'ok'): ?>

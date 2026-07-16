@@ -88,12 +88,80 @@ $formValues = [
     'academic_year_id' => 0,
     'faculty_id' => $deanFacultyId,
     'department_id' => 0,
-    'level' => 1,
+    'semester_id' => 0,
     'shift' => 'morning',
 ];
 
+/**
+ * Shared by both the single-row "Delete" button and the bulk "Delete
+ * Selected" action so the two can never drift on blocker/validation logic.
+ */
+function delete_student_row(mysqli $conn, int $studentId, string $role, int $deanFacultyId): array
+{
+    if ($role === 'dean') {
+        $studentStmt = $conn->prepare('SELECT user_id, full_name FROM students WHERE id = ? AND faculty_id = ?');
+        $studentStmt->bind_param('ii', $studentId, $deanFacultyId);
+    } else {
+        $studentStmt = $conn->prepare('SELECT user_id, full_name FROM students WHERE id = ?');
+        $studentStmt->bind_param('i', $studentId);
+    }
+    $studentStmt->execute();
+    $studentRow = $studentStmt->get_result()->fetch_assoc();
+    $studentStmt->close();
+
+    if (!$studentRow) {
+        return ['ok' => false, 'message' => 'Student not found.'];
+    }
+
+    $userId = (int) $studentRow['user_id'];
+    $label = (string) $studentRow['full_name'];
+
+    $attendanceCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE student_id = ?');
+    $attendanceCountStmt->bind_param('i', $studentId);
+    $attendanceCountStmt->execute();
+    $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $attendanceCountStmt->close();
+
+    $enrollmentCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_enrollments WHERE student_id = ?');
+    $enrollmentCountStmt->bind_param('i', $studentId);
+    $enrollmentCountStmt->execute();
+    $enrollmentCount = (int) ($enrollmentCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $enrollmentCountStmt->close();
+
+    $blockers = [];
+    if ($attendanceCount > 0) {
+        $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's');
+    }
+    if ($enrollmentCount > 0) {
+        $blockers[] = $enrollmentCount . ' course enrollment' . ($enrollmentCount === 1 ? '' : 's');
+    }
+
+    if (!empty($blockers)) {
+        return ['ok' => false, 'message' => $label . ': still has ' . implode(', ', $blockers) . '.'];
+    }
+
+    $conn->begin_transaction();
+    try {
+        $deleteStmt = $conn->prepare('DELETE FROM students WHERE id = ?');
+        $deleteStmt->bind_param('i', $studentId);
+        $deleteStmt->execute();
+        $deleteStmt->close();
+
+        $deactivateStmt = $conn->prepare("UPDATE users SET status = 'inactive' WHERE id = ?");
+        $deactivateStmt->bind_param('i', $userId);
+        $deactivateStmt->execute();
+        $deactivateStmt->close();
+
+        $conn->commit();
+        return ['ok' => true, 'message' => $label . ' deleted.'];
+    } catch (Throwable $e) {
+        $conn->rollback();
+        return ['ok' => false, 'message' => $label . ': could not be deleted, please try again.'];
+    }
+}
+
 // ---------------------------------------------------------------------
-// Handle POST actions: create, update, delete, reset_password
+// Handle POST actions: create, update, delete, bulk_delete, reset_password
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
@@ -108,7 +176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // in a faculty they don't oversee.
         $facultyId = $role === 'dean' ? $deanFacultyId : (int) ($_POST['faculty_id'] ?? 0);
         $departmentId = (int) ($_POST['department_id'] ?? 0);
-        $level = (int) ($_POST['level'] ?? 0);
+        $semesterId = (int) ($_POST['semester_id'] ?? 0);
         $shift = (string) ($_POST['shift'] ?? '');
 
         $formMode = $action === 'update' ? 'edit' : 'create';
@@ -119,7 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'academic_year_id' => $academicYearId,
             'faculty_id' => $facultyId,
             'department_id' => $departmentId,
-            'level' => $level,
+            'semester_id' => $semesterId,
             'shift' => $shift,
         ];
 
@@ -132,8 +200,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Please select a faculty.';
         } elseif ($departmentId <= 0) {
             $validationError = 'Please select a department.';
-        } elseif ($level < 1 || $level > 5) {
-            $validationError = 'Level must be between 1 and 5.';
+        } elseif ($semesterId <= 0) {
+            $validationError = 'Please select a semester.';
         } elseif (!array_key_exists($shift, SHIFT_LABELS)) {
             $validationError = 'Please select a valid shift.';
         } elseif ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -160,6 +228,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $validationError = 'Selected department does not belong to the selected faculty.';
             }
             $deptCheckStmt->close();
+        }
+
+        if ($validationError === '') {
+            $semCheckStmt = $conn->prepare('SELECT id FROM semesters WHERE id = ? AND faculty_id = ?');
+            $semCheckStmt->bind_param('ii', $semesterId, $facultyId);
+            $semCheckStmt->execute();
+            if (!$semCheckStmt->get_result()->fetch_assoc()) {
+                $validationError = 'Selected semester does not belong to the selected faculty.';
+            }
+            $semCheckStmt->close();
         }
 
         $existingUserId = 0;
@@ -215,7 +293,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $insertUserStmt->close();
 
                     $insertStudentStmt = $conn->prepare(
-                        'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, level, shift, status)
+                        'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, "active")'
                     );
                     $insertStudentStmt->bind_param(
@@ -226,7 +304,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $academicYearId,
                         $facultyId,
                         $departmentId,
-                        $level,
+                        $semesterId,
                         $shift
                     );
                     $insertStudentStmt->execute();
@@ -245,7 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->begin_transaction();
                 try {
                     $updateStudentStmt = $conn->prepare(
-                        'UPDATE students SET full_name = ?, academic_year_id = ?, faculty_id = ?, department_id = ?, level = ?, shift = ? WHERE id = ?'
+                        'UPDATE students SET full_name = ?, academic_year_id = ?, faculty_id = ?, department_id = ?, semester_id = ?, shift = ? WHERE id = ?'
                     );
                     $updateStudentStmt->bind_param(
                         'siiiisi',
@@ -253,7 +331,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $academicYearId,
                         $facultyId,
                         $departmentId,
-                        $level,
+                        $semesterId,
                         $shift,
                         $studentId
                     );
@@ -279,70 +357,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errorMessage = $validationError;
     } elseif ($action === 'delete') {
         $studentId = (int) ($_POST['student_id'] ?? 0);
-
-        if ($role === 'dean') {
-            $studentStmt = $conn->prepare('SELECT user_id FROM students WHERE id = ? AND faculty_id = ?');
-            $studentStmt->bind_param('ii', $studentId, $deanFacultyId);
+        $result = delete_student_row($conn, $studentId, $role, $deanFacultyId);
+        if ($result['ok']) {
+            $_SESSION['flash_success'] = 'Student deleted successfully. Their login account has been deactivated.';
+            redirect_to('admin/students.php');
         } else {
-            $studentStmt = $conn->prepare('SELECT user_id FROM students WHERE id = ?');
-            $studentStmt->bind_param('i', $studentId);
+            $errorMessage = $result['message'];
         }
-        $studentStmt->execute();
-        $studentRow = $studentStmt->get_result()->fetch_assoc();
-        $studentStmt->close();
+    } elseif ($action === 'bulk_delete') {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', (array) ($_POST['student_ids'] ?? [])),
+            static fn ($id) => $id > 0
+        )));
 
-        if (!$studentRow) {
-            $errorMessage = 'Student not found.';
+        if (empty($ids)) {
+            $_SESSION['flash_error'] = 'No students were selected.';
         } else {
-            $userId = (int) $studentRow['user_id'];
-
-            $attendanceCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE student_id = ?');
-            $attendanceCountStmt->bind_param('i', $studentId);
-            $attendanceCountStmt->execute();
-            $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
-            $attendanceCountStmt->close();
-
-            $enrollmentCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_enrollments WHERE student_id = ?');
-            $enrollmentCountStmt->bind_param('i', $studentId);
-            $enrollmentCountStmt->execute();
-            $enrollmentCount = (int) ($enrollmentCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
-            $enrollmentCountStmt->close();
-
-            $blockers = [];
-            if ($attendanceCount > 0) {
-                $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's');
-            }
-            if ($enrollmentCount > 0) {
-                $blockers[] = $enrollmentCount . ' course enrollment' . ($enrollmentCount === 1 ? '' : 's');
+            $deletedCount = 0;
+            $skippedMessages = [];
+            foreach ($ids as $sid) {
+                $result = delete_student_row($conn, $sid, $role, $deanFacultyId);
+                if ($result['ok']) {
+                    $deletedCount++;
+                } else {
+                    $skippedMessages[] = $result['message'];
+                }
             }
 
-            if (!empty($blockers)) {
-                $errorMessage = 'Cannot delete this student: they still have ' . implode(', ', $blockers) . '.';
+            $summary = $deletedCount . ' of ' . count($ids) . ' selected student' . (count($ids) === 1 ? '' : 's') . ' deleted.';
+            if (!empty($skippedMessages)) {
+                $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
+            }
+            if ($deletedCount > 0) {
+                $_SESSION['flash_success'] = $summary;
             } else {
-                $conn->begin_transaction();
-                try {
-                    $deleteStmt = $conn->prepare('DELETE FROM students WHERE id = ?');
-                    $deleteStmt->bind_param('i', $studentId);
-                    $deleteStmt->execute();
-                    $deleteStmt->close();
-
-                    $deactivateStmt = $conn->prepare("UPDATE users SET status = 'inactive' WHERE id = ?");
-                    $deactivateStmt->bind_param('i', $userId);
-                    $deactivateStmt->execute();
-                    $deactivateStmt->close();
-
-                    $conn->commit();
-                    $_SESSION['flash_success'] = 'Student deleted successfully. Their login account has been deactivated.';
-                } catch (Throwable $e) {
-                    $conn->rollback();
-                    $errorMessage = 'Could not delete the student. Please try again.';
-                }
-
-                if ($errorMessage === '') {
-                    redirect_to('admin/students.php');
-                }
+                $_SESSION['flash_error'] = $summary;
             }
         }
+        redirect_to('admin/students.php');
     } elseif ($action === 'reset_password') {
         $studentId = (int) ($_POST['student_id'] ?? 0);
 
@@ -388,7 +440,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
     $editId = (int) $_GET['edit'];
     if ($role === 'dean') {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.level, s.shift, u.email
+            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ? AND s.faculty_id = ?'
@@ -396,7 +448,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $editStmt->bind_param('ii', $editId, $deanFacultyId);
     } else {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.level, s.shift, u.email
+            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ?'
@@ -416,7 +468,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
             'academic_year_id' => (int) $editRow['academic_year_id'],
             'faculty_id' => (int) $editRow['faculty_id'],
             'department_id' => (int) $editRow['department_id'],
-            'level' => (int) $editRow['level'],
+            'semester_id' => (int) ($editRow['semester_id'] ?? 0),
             'shift' => (string) $editRow['shift'],
         ];
     }
@@ -461,6 +513,24 @@ foreach ($departments as $dept) {
     $departmentsByFacultyId[(int) $dept['faculty_id']][] = ['id' => (int) $dept['id'], 'name' => $dept['name']];
 }
 
+// Semester options are scoped to the selected Faculty, same cascade
+// pattern as Department — a student's semester is a position within
+// their own faculty's semester track, never a university-wide 1-5 scale.
+if ($role === 'dean') {
+    $semStmt = $conn->prepare('SELECT id, name, faculty_id FROM semesters WHERE faculty_id = ? ORDER BY start_date DESC');
+    $semStmt->bind_param('i', $deanFacultyId);
+    $semStmt->execute();
+    $semesters = $semStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $semStmt->close();
+} else {
+    $semesters = $conn->query('SELECT id, name, faculty_id FROM semesters ORDER BY start_date DESC')->fetch_all(MYSQLI_ASSOC);
+}
+
+$semestersByFacultyId = [];
+foreach ($semesters as $sem) {
+    $semestersByFacultyId[(int) $sem['faculty_id']][] = ['id' => (int) $sem['id'], 'name' => $sem['name']];
+}
+
 $conditions = [];
 $params = [];
 $types = '';
@@ -490,14 +560,16 @@ if ($filterSearch !== '') {
 
 $whereSql = empty($conditions) ? '' : ('WHERE ' . implode(' AND ', $conditions));
 
-$studentsSql = "SELECT s.id, s.student_no, s.full_name, s.level, s.shift,
+$studentsSql = "SELECT s.id, s.student_no, s.full_name, s.shift,
                        ay.label AS academic_year_label, f.name AS faculty_name, d.name AS department_name,
+                       sem.name AS semester_name,
                        u.status AS user_status
                 FROM students s
                 JOIN academic_years ay ON ay.id = s.academic_year_id
                 JOIN faculties f ON f.id = s.faculty_id
                 JOIN departments d ON d.id = s.department_id
                 JOIN users u ON u.id = s.user_id
+                LEFT JOIN semesters sem ON sem.id = s.semester_id
                 {$whereSql}
                 ORDER BY f.name, d.name, s.full_name";
 
@@ -582,6 +654,7 @@ $studentsStmt->close();
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Students</h6>
                             <div class="d-flex gap-2">
+                                <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role !== 'dean'): ?>
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-outline-secondary btn-sm">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
@@ -592,6 +665,11 @@ $studentsStmt->close();
                                 </a>
                             </div>
                         </div>
+
+                        <form id="bulkDeleteStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="d-none">
+                            <input type="hidden" name="action" value="bulk_delete">
+                            <div id="bulkDeleteStudentsIds"></div>
+                        </form>
 
                         <!-- Filter bar: real SQL WHERE filters via GET -->
                         <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="row g-2 mb-3">
@@ -644,12 +722,13 @@ $studentsStmt->close();
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
+                                        <th><input type="checkbox" id="selectAllStudents"></th>
                                         <th>Student No</th>
                                         <th>Full Name</th>
                                         <th>Academic Year</th>
                                         <th>Faculty</th>
                                         <th>Department</th>
-                                        <th>Level</th>
+                                        <th>Semester</th>
                                         <th>Shift</th>
                                         <th>Status</th>
                                         <th>Actions</th>
@@ -658,17 +737,27 @@ $studentsStmt->close();
                                 <tbody>
                                     <?php if (empty($students)): ?>
                                         <tr>
-                                            <td colspan="9" class="text-center text-muted py-4">No students match the current filters.</td>
+                                            <td colspan="10" class="text-center text-muted py-4">No students match the current filters.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($students as $s): ?>
                                             <tr>
+                                                <td>
+                                                    <input type="checkbox" class="row-check-student" value="<?= (int) $s['id'] ?>"
+                                                           data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
+                                                </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
                                                 <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($s['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
                                                 <td><?= htmlspecialchars($s['faculty_name']) ?></td>
                                                 <td><?= htmlspecialchars($s['department_name']) ?></td>
-                                                <td><?= (int) $s['level'] ?></td>
+                                                <td>
+                                                    <?php if ($s['semester_name']): ?>
+                                                        <?= htmlspecialchars($s['semester_name']) ?>
+                                                    <?php else: ?>
+                                                        <span class="text-muted fst-italic">Not set</span>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td><?= htmlspecialchars(SHIFT_LABELS[$s['shift']] ?? $s['shift']) ?></td>
                                                 <td>
                                                     <?php if ($s['user_status'] === 'active'): ?>
@@ -748,13 +837,13 @@ $studentsStmt->close();
                             <div class="mb-3">
                                 <label for="studentFacultySelect" class="form-label">Faculty</label>
                                 <?php if ($role === 'dean'): ?>
-                                    <select class="form-select" id="studentFacultySelect" disabled onchange="updateFormDepartmentOptions(this.value, 0)">
+                                    <select class="form-select" id="studentFacultySelect" disabled onchange="updateFormDepartmentOptions(this.value, 0); updateFormSemesterOptions(this.value, 0);">
                                         <option value="<?= (int) $deanFacultyId ?>" selected><?= htmlspecialchars($deanFacultyName) ?></option>
                                     </select>
                                     <div class="form-text">Locked to your own faculty.</div>
                                 <?php else: ?>
                                     <select class="form-select" id="studentFacultySelect" name="faculty_id" required
-                                            onchange="updateFormDepartmentOptions(this.value, 0)">
+                                            onchange="updateFormDepartmentOptions(this.value, 0); updateFormSemesterOptions(this.value, 0);">
                                         <option value="">Select faculty</option>
                                         <?php foreach ($faculties as $f): ?>
                                             <option value="<?= (int) $f['id'] ?>" <?= (int) $formValues['faculty_id'] === (int) $f['id'] ? 'selected' : '' ?>>
@@ -773,12 +862,11 @@ $studentsStmt->close();
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentLevelSelect" class="form-label">Level</label>
-                                <select class="form-select" id="studentLevelSelect" name="level" required>
-                                    <?php for ($lvl = 1; $lvl <= 5; $lvl++): ?>
-                                        <option value="<?= $lvl ?>" <?= (int) $formValues['level'] === $lvl ? 'selected' : '' ?>>Level <?= $lvl ?></option>
-                                    <?php endfor; ?>
+                                <label for="studentSemesterSelect" class="form-label">Semester</label>
+                                <select class="form-select" id="studentSemesterSelect" name="semester_id" required>
+                                    <option value="">Select semester</option>
                                 </select>
+                                <div class="form-text">Only semesters belonging to the selected faculty are shown.</div>
                             </div>
 
                             <div class="mb-3">
@@ -807,6 +895,7 @@ $studentsStmt->close();
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allDepartmentsFlat = <?= json_encode(array_map(static fn ($d) => ['id' => (int) $d['id'], 'name' => $d['name']], $departments), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -844,12 +933,49 @@ $studentsStmt->close();
             buildDepartmentOptions(document.getElementById('studentDepartmentSelect'), facultyId, selectedDepartmentId, 'Select department', false);
         }
 
+        const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function updateFormSemesterOptions(facultyId, selectedSemesterId) {
+            const select = document.getElementById('studentSemesterSelect');
+            const semesters = semestersByFacultyId[facultyId] || [];
+            select.innerHTML = '';
+
+            const blank = document.createElement('option');
+            blank.value = '';
+            blank.textContent = semesters.length === 0 ? 'No semesters for this faculty yet' : 'Select semester';
+            select.appendChild(blank);
+
+            semesters.forEach((sem) => {
+                const opt = document.createElement('option');
+                opt.value = String(sem.id);
+                opt.textContent = sem.name;
+                select.appendChild(opt);
+            });
+
+            select.value = String(selectedSemesterId || '');
+            if (select.value !== String(selectedSemesterId || '')) {
+                select.value = '';
+            }
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             const filterFacultyId = document.getElementById('filterFacultySelect').value;
             updateFilterDepartmentOptions(filterFacultyId, <?= (int) $filterDepartmentId ?>);
 
             const formFacultyId = document.getElementById('studentFacultySelect').value;
             updateFormDepartmentOptions(formFacultyId, <?= (int) $formValues['department_id'] ?>);
+            updateFormSemesterOptions(formFacultyId, <?= (int) $formValues['semester_id'] ?>);
+
+            admasInitBulkDelete({
+                checkboxSelector: '.row-check-student',
+                selectAllSelector: '#selectAllStudents',
+                buttonSelector: '#bulkDeleteStudentsBtn',
+                formSelector: '#bulkDeleteStudentsForm',
+                hiddenContainerSelector: '#bulkDeleteStudentsIds',
+                hiddenInputName: 'student_ids[]',
+                entityLabel: 'student',
+                entityLabelPlural: 'students',
+            });
         });
     </script>
 </body>
