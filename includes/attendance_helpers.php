@@ -86,6 +86,59 @@ function get_course_faculty_id(mysqli $conn, int $courseId): ?int
 }
 
 /**
+ * The "who teaches this course, and when" summary for one specific
+ * course+semester pair (i.e. one course_offerings row), for display
+ * alongside render_scope_breadcrumb() wherever a course+semester
+ * combination is already on screen (attendance.php's roster/Grid View,
+ * reports.php's Xiiso grid) — the breadcrumb itself only ever describes
+ * Course/Department/Faculty/Semester/Academic Year, never who's actually
+ * teaching or the offering's date range, so this is a separate lookup
+ * rather than a change to that helper's contract. Returns null if no
+ * course_offerings row exists yet for this pair (nothing to show).
+ */
+function get_offering_summary(mysqli $conn, int $courseId, int $semesterId): ?array
+{
+    if ($courseId <= 0 || $semesterId <= 0) {
+        return null;
+    }
+
+    $stmt = $conn->prepare(
+        'SELECT l.full_name AS lecturer_name, co.start_date, co.end_date
+         FROM course_offerings co
+         LEFT JOIN lecturers l ON l.id = co.lecturer_id
+         WHERE co.course_id = ? AND co.semester_id = ?'
+    );
+    $stmt->bind_param('ii', $courseId, $semesterId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row ?: null;
+}
+
+/**
+ * Renders get_offering_summary()'s result as the same small muted-text
+ * line style used elsewhere (e.g. render_scope_breadcrumb()) — a no-op
+ * (empty string) when there's no offering row yet, so callers can use it
+ * unconditionally right after a breadcrumb call.
+ */
+function render_offering_summary(?array $offering): string
+{
+    if ($offering === null) {
+        return '';
+    }
+
+    $lecturer = $offering['lecturer_name'] ?: 'Unassigned';
+    $dates = '';
+    if ($offering['start_date'] || $offering['end_date']) {
+        $dates = ' <span class="mx-1">&middot;</span> ' . htmlspecialchars(($offering['start_date'] ?? '?') . ' to ' . ($offering['end_date'] ?? '?'));
+    }
+
+    return '<div class="text-muted small mb-2"><i class="bi bi-person-badge"></i> '
+        . htmlspecialchars($lecturer) . $dates . '</div>';
+}
+
+/**
  * Inserts or updates exactly one attendance record. This is the single
  * source of truth for the duplicate-prevention logic relied on by both
  * attendance.php's classic single-session form and the Xiiso grid's

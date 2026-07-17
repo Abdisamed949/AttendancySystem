@@ -1815,6 +1815,342 @@ data/configuration task for the university admin, not further code work.
       - All temporary accounts and disposable rows removed after
         verification; `users` count confirmed back to the 330 baseline.
 
+### Dean Access to semesters.php
+- [x] Extended `semesters.php` (Semester + Xiiso session management) —
+      previously `system_admin`/`head_academic` only — to also allow
+      `dean`, strictly scoped to their own faculty (per CLAUDE.md §4
+      "Dean: Own faculty only... Cannot view/edit other faculties").
+      - **Navigation**: added `'dean'` to the `roles` array on the
+        `Semesters` entry in `includes/nav_items.php` — no separate dean
+        page needed since `semesters.php` already lives at the app root
+        with a `path` override, same as `attendance.php`/`reports.php`.
+      - **Scoping, following the exact pattern already used on
+        `admin/students.php`/`admin/departments.php`/etc.**: added
+        `$role = current_role()` + a `$deanFacultyId`/`$deanFacultyName`
+        block reading `$_SESSION['faculty_id']` (never trusted from
+        request input).
+        - **Add New Semester form**: Faculty is a disabled `<select>`
+          showing only the Dean's own faculty name (no `name` attribute,
+          so nothing is even submitted for it) — the backend forces
+          `$facultyId = $deanFacultyId` for a Dean regardless of what's
+          posted, exactly like `admin/departments.php`'s Faculty lock.
+        - **All Semesters list**: for a Dean, a separate prepared-statement
+          query (`WHERE s.faculty_id = ?`) replaces the unscoped one —
+          other faculties' semesters never appear in the list or become
+          reachable as `$selectedSemester` via `?semester_id=`, since that
+          selection is resolved by scanning this already-scoped array.
+        - **Every write action re-checks ownership server-side**, not just
+          via the scoped list/GET side: a new `dean_owns_semester()`
+          helper (`SELECT id FROM semesters WHERE id = ? AND faculty_id =
+          ?`) guards `generate_sessions`, `set_current_semester`,
+          `save_session_dates`, and `bulk_delete_sessions` — each rejects
+          a crafted `semester_id` belonging to another faculty with the
+          generic "Selected semester does not exist." (same
+          not-found-vs-forbidden ambiguity convention used elsewhere in
+          this app, e.g. `admin/students.php`'s Dean edit-check) before
+          touching the database. `assign_faculty` (backfilling a legacy
+          faculty-less semester) is blocked outright for Dean with "Not
+          permitted." — a Dean's own semesters always already have
+          `faculty_id` set at creation, so this action has no legitimate
+          use for that role.
+      - **Academic Year dropdown**: unchanged as a plain `<select>` from
+        existing `academic_years` rows (no "Add New Academic Year" option
+        was ever present) — added a "No academic years exist yet..."
+        message plus a disabled Create-Semester button/select when the
+        table is empty, mirroring `admin/students.php`'s existing
+        empty-state pattern. Applied for all three roles on this page,
+        not just Dean, since the same broken-empty-dropdown case existed
+        for `system_admin`/`head_academic` too.
+      - **Scope banner**: reuses the exact same
+        `<div class="scope-banner">` markup/wording pattern as
+        `dean/dashboard.php`/`admin/lecturers.php` ("Access scope: {name}
+        Faculty only").
+      - **Verified end-to-end via a temporary Dean account** (Engineering
+        & IT faculty): confirmed the scope banner, faculty-filtered list
+        (only that faculty's semester shown), and disabled Faculty select
+        all render correctly; created a semester while POSTing a foreign
+        `faculty_id` in the request and confirmed the server ignored it
+        and forced the Dean's own faculty; confirmed all four write
+        actions succeed against the Dean's own newly-created semester
+        (generate 12 sessions, set as current — correctly clearing the
+        real pre-existing "Semester 3" per the per-faculty exclusivity
+        rule, bulk-delete 2 of its sessions); then, from the same
+        session, attempted `set_current_semester`, `save_session_dates`,
+        `bulk_delete_sessions`, and `generate_sessions` directly against
+        a real semester belonging to a different faculty (Social
+        Sciences) and confirmed every one was rejected with no DB change
+        whatsoever (session dates, session count, and `is_current` flags
+        all verified byte-identical before/after), plus confirmed
+        `assign_faculty` is flatly blocked for Dean. Cleaned up afterward:
+        removed the temp account and test semester, restored the real
+        "Semester 3" to `is_current = 1`; `users` count confirmed back to
+        the 330 baseline.
+
+### course_offerings Teaching-Period Dates
+- [x] Extended `course_offerings` with `start_date DATE NULL` and
+      `end_date DATE NULL` — a specific course's actual teaching period
+      within its semester, independent of the semester's own (usually
+      wider) date range. Both nullable: an offering can exist before its
+      exact dates are known, same spirit as `sessions.date`.
+      - **Schema**: `migrations/2026_08_course_offerings_dates.sql`
+        (additive `ALTER TABLE`, applied and verified against the live
+        dev DB via `SHOW CREATE TABLE`), mirrored into
+        `admas_attendance_schema.sql`.
+      - **Dean access to `admin/course_offerings.php` — already in
+        place**, confirmed by reading the file rather than assumed: it's
+        been `require_role(['system_admin', 'dean'])` with own-faculty
+        course scoping since Phase 2 of the consolidated restructuring;
+        no role/access change was needed here.
+      - **"Guided flow" (Department → Course → Semester → Lecturer →
+        Dates), reusing what already existed rather than building a new
+        page**: Department/Course selection already happens by browsing
+        `admin/courses.php`'s own-faculty-scoped, department-grouped
+        list and clicking a specific course's "Manage Offerings" link;
+        Semester (own-faculty-scoped) and Lecturer (own-department-scoped)
+        were already the two fields on `admin/course_offerings.php`'s
+        existing Add/Update Offering form. Start Date and End Date were
+        added as two more fields on that *same* form/submit — no new
+        page, no new table, one upsert saves semester + lecturer + both
+        dates together, exactly as asked.
+      - **Validation**: end date before start date is a hard block
+        ("End date must be on or after start date.", existing row left
+        untouched on failure). Dates falling outside the selected
+        semester's own `start_date`/`end_date` range are a **soft**
+        warning only — appended to the success flash message, the save
+        still goes through — since a lecturer's real teaching period can
+        legitimately run short of (or rarely past) the semester's
+        nominal boundaries.
+      - **Display, wherever an offering was already shown**:
+        `admin/courses.php`'s "Current Offering" column now shows the
+        date range under the lecturer name (or under "Unassigned", since
+        an offering row — and its dates — can exist independent of
+        whether a lecturer is assigned yet). New
+        `get_offering_summary()` / `render_offering_summary()` in
+        `includes/attendance_helpers.php` resolve and render "Lecturer ·
+        start to end" as a small line directly under the existing
+        `render_scope_breadcrumb()` output — used at both
+        `attendance.php` breadcrumb call sites (roster + Xiiso Grid) and
+        `reports.php`'s Xiiso grid report breadcrumb. Kept as a sibling
+        helper rather than folded into `render_scope_breadcrumb()` itself,
+        since that function's Course/Department/Faculty/Semester/Academic
+        Year contract is used elsewhere (e.g. `admin/course_offerings.php`'s
+        own header) where there's no single offering to summarize.
+      - **Verified end-to-end via temporary `system_admin` and `dean`
+        (Engineering & IT) accounts** against a disposable test course:
+        saved a valid in-range offering and confirmed it in the DB and on
+        the list table; confirmed end-before-start was hard-rejected with
+        the existing row unchanged; confirmed an out-of-semester-range
+        save both succeeded *and* showed the warning text; confirmed the
+        date range renders on `admin/courses.php`, and the new "Lecturer
+        · dates" line renders directly under the breadcrumb on both
+        `attendance.php` call sites and `reports.php`'s Xiiso grid;
+        confirmed the Dean could update the same offering's dates for
+        their own faculty, and that a crafted cross-faculty `semester_id`
+        was rejected with zero DB change (same pre-existing
+        faculty-ownership check, unaffected by the new fields). Cleaned
+        up afterward: removed the temp accounts, the test course, and its
+        offering row; `users` (330), `courses` (24), and the 4
+        pre-existing `course_offerings` rows all confirmed back to
+        baseline.
+
+### Add Course + Optional First Offering
+- [x] Extended `admin/courses.php`'s Add Course form to optionally create
+      the course's first `course_offerings` row in the same submit,
+      instead of requiring a separate "Manage Offerings" trip immediately
+      after — Semester (own-faculty-scoped) → Academic Year (read-only,
+      derived) → Shift → Lecturer (own-department-scoped), left blank by
+      default so course creation works exactly as before if untouched.
+      **Create-mode only** — Edit mode is unchanged, still just points at
+      "Manage Offerings" as before, since this is specifically about a
+      *new* course's *first* offering, not editing an existing one.
+      - **Investigated before implementing, per explicit instruction —
+        recommended and confirmed with the user: Option (b), Shift is
+        informational only.** `course_offerings`' unique key
+        (`course_id`, `semester_id`) is unchanged; a nullable `shift`
+        column was added purely for display. Rejected Option (a)
+        (`shift` in the unique key, allowing a different lecturer per
+        shift) after grepping every `course_offerings` consumer:
+        the lecturer write-authorization check
+        (`user_can_write_course_attendance()` in
+        `includes/attendance_helpers.php`), the lecturer's own course
+        list (`attendance.php`, `lecturer/courses.php`), lecturer
+        dashboard KPIs (`lecturer/dashboard.php`), and the student's
+        displayed lecturer (`student/courses.php`) all key off
+        `(course_id, semester_id, lecturer_id)` with zero concept of
+        shift — making shift part of the identity without auditing and
+        updating every one of those would silently fail to separate
+        write access per shift (a lecturer assigned to only the Morning
+        offering would still pass every one of those checks for
+        Afternoon/Weekend rosters too), reopening the exact "stale
+        access" class of bug Phase 2 exists to close. Documented in
+        `migrations/2026_08_course_offerings_shift.sql`'s header for
+        whoever revisits this if true multi-lecturer-per-shift support
+        is ever needed.
+      - **Schema**: `migrations/2026_08_course_offerings_shift.sql`
+        (`ALTER TABLE course_offerings ADD COLUMN shift ENUM('morning',
+        'afternoon','weekend') NULL`), mirrored into
+        `admas_attendance_schema.sql`, applied and verified against the
+        live dev DB via `SHOW CREATE TABLE`.
+      - **`admin/courses.php`**: reused the exact existing patterns
+        rather than inventing new ones — `semestersByFacultyId` mirrors
+        `admin/students.php`'s Faculty→Semester cascade shape (extended
+        with `academic_year_label`/`is_current`); the Lecturer dropdown
+        reuses `admin/course_offerings.php`'s own
+        `department_id = ? AND status = 'active'` scoping; the read-only
+        Academic Year display reuses `admin/course_offerings.php`'s
+        `data-academic-year` attribute technique verbatim. New
+        `admasUpdateOfferingFieldsForDepartment()` /
+        `admasUpdateOfferingSemesterChange()` JS cascade: Department
+        change rebuilds both the Semester and Lecturer option lists;
+        Semester change reveals the Shift/Lecturer/Academic-Year block
+        (hidden via Bootstrap's `d-none` until a semester is picked, so
+        it's correctly excluded from HTML5 required-field validation
+        while hidden) and fills in the Academic Year. On the backend, the
+        whole offering sub-section only validates at all when
+        `offering_semester_id > 0` (the opt-in gate) — semester must
+        belong to the selected department's faculty, shift must be one
+        of the three valid values (hard error if missing once a semester
+        is chosen — a stored `shift` with no value would defeat the
+        point of adding it), lecturer is optional and defaults to
+        Unassigned exactly like `admin/course_offerings.php`. Course
+        INSERT + offering INSERT are wrapped in one transaction
+        (mirroring `admin/students.php`'s create-with-related-row
+        pattern) so a mid-way failure can't leave an orphaned course with
+        no offering or vice versa. The Courses list's "Current Offering"
+        column now shows the shift label next to the lecturer name (or
+        next to "Unassigned"), reusing the same `SHIFT_LABELS` constant
+        shape already used on `admin/students.php`/`attendance.php`.
+      - **Untouched, exactly as instructed**: `admin/course_offerings.php`
+        ("Manage Offerings") — no shift field was added there, no
+        behavior changed; it remains the only way to add a course to
+        additional semesters/shifts later or reassign a lecturer without
+        recreating the course.
+      - **Verified end-to-end via temporary `system_admin` and `dean`
+        (Engineering & IT) accounts**: confirmed the new fields render;
+        confirmed creating a course with the offering section left blank
+        behaves identically to before (course only, zero
+        `course_offerings` rows, unchanged success message); confirmed
+        creating with Semester+Shift+Lecturer filled in correctly created
+        both rows in one request with the shift persisted, and the
+        Courses list showed it; confirmed a semester chosen with Shift
+        left blank was hard-rejected with **no course created at all**
+        (not even a partial one — the transaction never started because
+        validation runs first); confirmed a crafted cross-faculty
+        `semester_id` was rejected the same way; confirmed the Dean could
+        do the same in their own faculty, and that
+        `admin/course_offerings.php` still loads and functions normally
+        for a course created this way. Cleaned up afterward: removed the
+        temp accounts and every test course/offering; `users` (331 —
+        this session's real baseline, one genuine new student
+        registration happened between sessions and is not test data),
+        `courses` (24), and `course_offerings` (4) all confirmed back to
+        baseline.
+
+### Phase 1: Department Context on semesters.php (display-only)
+- [x] Added an optional "Department" field to `semesters.php`'s Add New
+      Semester form — **purely a display/reference note, not scoping**.
+      A semester still applies to its entire `faculty_id` exactly as
+      before; every department in that faculty still shares the same
+      current semester.
+      - **Schema**: new
+        `migrations/2026_08_semesters_context_department.sql` —
+        `semesters.context_department_id INT UNSIGNED NULL`, FK ->
+        `departments(id) ON DELETE SET NULL` (so deleting the noted
+        department later can't take the semester down with it).
+        Deliberately named `context_department_id`, not `department_id`,
+        so it can never be mistaken for a real scoping/ownership column
+        the way `faculty_id` is. Mirrored into
+        `admas_attendance_schema.sql`, applied and verified against the
+        live dev DB.
+      - **`semesters.php`**: Department `<select>` (cascades from
+        Faculty, same `departmentsByFacultyId` JS pattern already used
+        by `admin/students.php`'s own Faculty->Department field), always
+        optional, labeled "(optional, for your own reference only)".
+        Backend: if the posted `context_department_id` doesn't actually
+        belong to the resolved `faculty_id` (stale JS state or direct
+        tampering), it's **silently dropped to NULL rather than
+        blocking semester creation** — this field is informational only,
+        so a bad value shouldn't stop a real semester from being
+        created. Displayed next to the Faculty name (as a small
+        sub-line) everywhere semesters are already listed: the "All
+        Semesters" table and the selected-semester detail panel.
+      - **Confirmed untouched, by inspection, not just by not having
+        edited the file**: `includes/semester_helpers.php`'s
+        `get_current_semester()` and every per-faculty scoping check
+        added across Phases 0-4 of the consolidated restructuring —
+        grepped the whole codebase for `context_department` and found
+        it nowhere outside `semesters.php` itself and the two schema
+        files above.
+      - **Verified end-to-end via temporary `system_admin` and `dean`
+        accounts**: confirmed the field renders and cascades correctly;
+        created a semester with a valid context department and confirmed
+        it saved and displays correctly in both the list and detail
+        panel; confirmed a crafted cross-faculty department id was
+        silently dropped (`context_department_id` saved as `NULL`, the
+        semester itself still created successfully — not rejected);
+        confirmed Dean's own-faculty flow works the same way. Cleaned up
+        afterward; `users` (331) and `semesters` (5) confirmed back to
+        baseline.
+
+### Phase 2: Department Filter on attendance.php (UI convenience only)
+- [x] Added an optional "Department" dropdown above the Course selector
+      on `attendance.php`, in **both** course pickers on the page (the
+      classic roster form and the Xiiso Grid View form) — makes it
+      faster to find the right course, especially for a Dean managing
+      several departments within one faculty. **Zero new queries, zero
+      new access checks**: purely a client-side show/hide filter over
+      the Course `<select>`'s already-loaded, already-permission-scoped
+      `<option>` elements.
+      - Department dropdown options are scoped per role exactly as
+        specified: `system_admin` sees every department system-wide
+        (via a plain new query — not derived from `$courses`, so
+        departments with zero courses still appear, a legitimate empty
+        state if selected); Dean sees every department in their own
+        faculty (same reasoning); Lecturer's list is derived directly
+        from their own already-scoped `$courses` (distinct
+        `department_id`s already present in their own current-offering
+        course list) — exactly "departments containing courses they're
+        assigned to," with no separate query needed since that's already
+        what `$courses` represents for that role.
+      - Implementation: every course `<option>` (both server-rendered
+        and, for `system_admin`, the ones `rebuildCourseSelect()` builds
+        dynamically for its existing Faculty->Course cascade) now
+        carries `data-department-id`. New `admasFilterCourseByDepartment()`
+        toggles each option's `.hidden` based on the selected
+        department, clearing the Course selection if the currently-picked
+        option becomes hidden. Wired into both pickers' new Department
+        `<select>`, and layered on top of `system_admin`'s existing
+        Faculty filter (selecting Faculty re-applies whatever Department
+        filter is currently set, so the two combine correctly instead of
+        one clobbering the other).
+      - **Confirmed by inspection**: the three role-scoped `$courses`
+        queries (the actual security boundary — unchanged, byte-for-byte
+        same shape as before) and
+        `user_can_write_course_attendance()` in
+        `includes/attendance_helpers.php` were not touched at all in
+        this phase — nothing about which courses a user can select or
+        mark attendance for changed; only how easy they are to find in
+        the dropdown did.
+      - **Verified end-to-end via temporary `system_admin`, `dean`, and
+        `lecturer` accounts** (a disposable test course + offering was
+        needed since the Dean's own faculty currently has zero real
+        courses, an unrelated pre-existing state): confirmed each role's
+        Department dropdown shows exactly the expected scope (all 6
+        departments with faculty prefixes for `system_admin`; only the
+        Dean's own faculty's department, no prefix; only the Lecturer's
+        own assigned department); confirmed `data-department-id` is
+        present and correct on the course options; confirmed the classic
+        roster "Load Students" flow still works end-to-end afterward
+        with zero PHP warnings/notices/fatals — no regression to the
+        real marking flow. Cleaned up afterward (test course, test
+        offering, test lecturer, all three temp accounts); `users` (331)
+        confirmed back to baseline. (Real `courses` count differs from
+        an earlier session's checkpoint — confirmed via a clean-state
+        check that none of this session's own test rows were left
+        behind; the difference reflects legitimate application usage
+        between sessions, e.g. the bulk-delete-courses feature, not
+        anything from this phase.)
+
 ### Deferred Decisions
 - **Profile photo upload** (`users.photo_path`, upload on Profile &
   Password page, camera icon + preview, topbar/profile display only,

@@ -109,6 +109,7 @@ CREATE TABLE semesters (
   id                INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   academic_year_id  INT UNSIGNED NOT NULL,
   faculty_id        INT UNSIGNED NULL,              -- NULL = not yet assigned to a faculty (must be set via semesters.php before it can be marked current)
+  context_department_id INT UNSIGNED NULL,          -- display-only note of which department this was created for — NOT scoping; the semester still applies to the whole faculty_id above. Never read by get_current_semester() or any scoping logic.
   name              VARCHAR(50) NOT NULL,           -- e.g. 'Semester 3'
   start_date        DATE NOT NULL,
   end_date          DATE NOT NULL,
@@ -118,6 +119,8 @@ CREATE TABLE semesters (
     FOREIGN KEY (academic_year_id) REFERENCES academic_years(id),
   CONSTRAINT fk_semesters_faculty
     FOREIGN KEY (faculty_id) REFERENCES faculties(id),
+  CONSTRAINT fk_semesters_context_department
+    FOREIGN KEY (context_department_id) REFERENCES departments(id) ON DELETE SET NULL,
   INDEX idx_semesters_academic_year (academic_year_id),
   UNIQUE KEY uq_semester_name_per_faculty_year (faculty_id, academic_year_id, name)
 ) ENGINE=InnoDB;
@@ -191,6 +194,9 @@ CREATE TABLE course_offerings (
   course_id    INT UNSIGNED NOT NULL,
   semester_id  INT UNSIGNED NOT NULL,
   lecturer_id  INT UNSIGNED NULL,                 -- NULL = unassigned for that semester
+  shift        ENUM('morning','afternoon','weekend') NULL, -- informational only — NOT part of the unique key below; see migrations/2026_08_course_offerings_shift.sql for why
+  start_date   DATE NULL,                         -- this course's actual teaching-period start within the semester; optional
+  end_date     DATE NULL,                         -- and end — both set together, whenever known
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_offerings_course
     FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,

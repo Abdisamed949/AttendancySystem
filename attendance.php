@@ -124,6 +124,40 @@ $faculties = $role === 'system_admin'
     ? $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC)
     : [];
 
+// Department filter options (Phase 2 — UI convenience only, purely a
+// client-side narrowing of the Course dropdown below it; no new access
+// check, since $courses above is already the real, role-scoped security
+// boundary). Scoped per role exactly as specified: system_admin sees
+// every department system-wide; Dean sees every department in their own
+// faculty (not just ones with a course yet); Lecturer's list is derived
+// straight from their own already-scoped $courses, since "departments
+// containing courses they're assigned to" is exactly what that already is.
+if ($role === 'system_admin') {
+    $departmentsForFilter = $conn->query(
+        'SELECT d.id, d.name, f.name AS faculty_name
+         FROM departments d
+         JOIN faculties f ON f.id = d.faculty_id
+         ORDER BY f.name, d.name'
+    )->fetch_all(MYSQLI_ASSOC);
+} elseif ($role === 'dean') {
+    $deptStmt = $conn->prepare('SELECT id, name FROM departments WHERE faculty_id = ? ORDER BY name');
+    $deptStmt->bind_param('i', $deanFacultyId);
+    $deptStmt->execute();
+    $departmentsForFilter = $deptStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $deptStmt->close();
+} else {
+    $seenDepartmentIds = [];
+    $departmentsForFilter = [];
+    foreach ($courses as $c) {
+        $did = (int) $c['department_id'];
+        if (!isset($seenDepartmentIds[$did])) {
+            $seenDepartmentIds[$did] = true;
+            $departmentsForFilter[] = ['id' => $did, 'name' => $c['department_name']];
+        }
+    }
+    usort($departmentsForFilter, static fn ($a, $b) => strcmp($a['name'], $b['name']));
+}
+
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
 
 // ---------------------------------------------------------------------
@@ -427,6 +461,7 @@ foreach ($courses as $c) {
         'label' => $c['code'] . ' — ' . $c['name'],
         'faculty' => $c['faculty_name'],
         'department' => $c['department_name'],
+        'department_id' => (int) $c['department_id'],
     ];
     $courseJsByFaculty['0'][] = $entry;
     $courseJsByFaculty[(string) $c['faculty_id']][] = $entry;
@@ -529,7 +564,7 @@ $scopeBanner = match ($role) {
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Faculty</label>
                             <?php if ($role === 'system_admin'): ?>
-                                <select class="form-select form-select-sm" id="facultySelect" onchange="rebuildCourseSelect(this.value, '')">
+                                <select class="form-select form-select-sm" id="facultySelect" onchange="rebuildCourseSelect(this.value, ''); admasFilterCourseByDepartment(document.getElementById('courseSelect'), document.getElementById('departmentFilterSelect').value)">
                                     <option value="0">All Faculties</option>
                                     <?php foreach ($faculties as $f): ?>
                                         <option value="<?= (int) $f['id'] ?>"><?= htmlspecialchars($f['name']) ?></option>
@@ -545,12 +580,25 @@ $scopeBanner = match ($role) {
                         </div>
 
                         <div class="col-sm-6 col-md-3">
+                            <label class="form-label small mb-1">Department <span class="text-muted fw-normal">(optional)</span></label>
+                            <select class="form-select form-select-sm" id="departmentFilterSelect" onchange="admasFilterCourseByDepartment(document.getElementById('courseSelect'), this.value)">
+                                <option value="">All Departments</option>
+                                <?php foreach ($departmentsForFilter as $d): ?>
+                                    <option value="<?= (int) $d['id'] ?>">
+                                        <?= htmlspecialchars(($role === 'system_admin' ? $d['faculty_name'] . ' — ' : '') . $d['name']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <div class="form-text">Just narrows the list below — doesn't change what you're allowed to select.</div>
+                        </div>
+
+                        <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Course</label>
                             <select class="form-select form-select-sm" name="course_id" id="courseSelect" required onchange="admasReloadWithCourse(this.value)">
                                 <option value="">Select course</option>
                                 <?php if ($role === 'lecturer'): ?>
                                     <?php foreach ($courses as $c): ?>
-                                        <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                        <option value="<?= (int) $c['id'] ?>" data-department-id="<?= (int) $c['department_id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -567,7 +615,7 @@ $scopeBanner = match ($role) {
                                     <?php foreach ($groupedCourses as $label => $list): ?>
                                         <optgroup label="<?= htmlspecialchars($label) ?>">
                                             <?php foreach ($list as $c): ?>
-                                                <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                                <option value="<?= (int) $c['id'] ?>" data-department-id="<?= (int) $c['department_id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
                                                     <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
                                                 </option>
                                             <?php endforeach; ?>
@@ -647,6 +695,7 @@ $scopeBanner = match ($role) {
                             $currentSemester['name'] ?? null,
                             $currentSemester['academic_year_label'] ?? null,
                         ]) ?>
+                        <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0))) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
                                 Roster — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
@@ -727,13 +776,24 @@ $scopeBanner = match ($role) {
                 <?php else: ?>
                     <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/attendance.php" class="row g-2 align-items-end">
                         <input type="hidden" name="view" value="grid">
+                        <div class="col-sm-6 col-md-3">
+                            <label class="form-label small mb-1">Department <span class="text-muted fw-normal">(optional)</span></label>
+                            <select class="form-select form-select-sm" id="gridDepartmentFilterSelect" onchange="admasFilterCourseByDepartment(document.getElementById('gridCourseSelect'), this.value)">
+                                <option value="">All Departments</option>
+                                <?php foreach ($departmentsForFilter as $d): ?>
+                                    <option value="<?= (int) $d['id'] ?>">
+                                        <?= htmlspecialchars(($role === 'system_admin' ? $d['faculty_name'] . ' — ' : '') . $d['name']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                         <div class="col-sm-8 col-md-6">
                             <label class="form-label small mb-1">Course</label>
-                            <select class="form-select form-select-sm" name="course_id" required onchange="admasReloadWithCourse(this.value, 'grid')">
+                            <select class="form-select form-select-sm" name="course_id" id="gridCourseSelect" required onchange="admasReloadWithCourse(this.value, 'grid')">
                                 <option value="">Select course</option>
                                 <?php if ($role === 'lecturer'): ?>
                                     <?php foreach ($courses as $c): ?>
-                                        <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                        <option value="<?= (int) $c['id'] ?>" data-department-id="<?= (int) $c['department_id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -750,7 +810,7 @@ $scopeBanner = match ($role) {
                                     <?php foreach ($gridGroupedCourses as $label => $list): ?>
                                         <optgroup label="<?= htmlspecialchars($label) ?>">
                                             <?php foreach ($list as $c): ?>
-                                                <option value="<?= (int) $c['id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
+                                                <option value="<?= (int) $c['id'] ?>" data-department-id="<?= (int) $c['department_id'] ?>" <?= $filterCourseId === (int) $c['id'] ? 'selected' : '' ?>>
                                                     <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
                                                 </option>
                                             <?php endforeach; ?>
@@ -791,6 +851,7 @@ $scopeBanner = match ($role) {
                             $currentSemester['name'] ?? null,
                             $currentSemester['academic_year_label'] ?? null,
                         ]) ?>
+                        <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0))) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                             <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
                                 Xiiso Grid — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
@@ -908,6 +969,29 @@ $scopeBanner = match ($role) {
             }
             window.location = window.ADMAS_BASE_URL + '/attendance.php?' + params.toString();
         }
+
+        // Phase 2 — Department filter: purely a client-side show/hide over
+        // the Course dropdown's already-loaded, already-permission-scoped
+        // <option> elements (each already carries data-department-id from
+        // the server, or from rebuildCourseSelect() below for
+        // system_admin). Never changes which courses exist in the select,
+        // never re-queries anything — just narrows what's visible. If the
+        // currently-selected course gets hidden by the new filter, the
+        // selection is cleared so a hidden/invisible option can't stay
+        // "selected" behind the scenes.
+        function admasFilterCourseByDepartment(select, departmentId) {
+            if (!select) {
+                return;
+            }
+            const options = select.querySelectorAll('option[data-department-id]');
+            options.forEach((opt) => {
+                opt.hidden = Boolean(departmentId) && opt.dataset.departmentId !== String(departmentId);
+            });
+            const selected = select.options[select.selectedIndex];
+            if (selected && selected.hidden) {
+                select.value = '';
+            }
+        }
     </script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/attendance_grid.js" defer></script>
     <?php if ($role === 'system_admin'): ?>
@@ -942,6 +1026,7 @@ $scopeBanner = match ($role) {
                         const opt = document.createElement('option');
                         opt.value = String(c.id);
                         opt.textContent = c.label;
+                        opt.dataset.departmentId = String(c.department_id);
                         og.appendChild(opt);
                     });
                     select.appendChild(og);

@@ -1,9 +1,11 @@
 <?php
 /**
- * Semester + Session ("Xiiso") management — shared by System Administrator
- * and Head of Academic Affairs. Lives at the app root (not under /admin)
- * because it is reused by both roles, same pattern as attendance.php and
- * reports.php.
+ * Semester + Session ("Xiiso") management — shared by System Administrator,
+ * Head of Academic Affairs, and Dean (own faculty only, per CLAUDE.md §4).
+ * Lives at the app root (not under /admin) because it is reused across
+ * roles, same pattern as attendance.php and reports.php. Dean's
+ * faculty_id is always read from $_SESSION, never trusted from request
+ * input (same pattern as admin/students.php/admin/departments.php/etc.).
  */
 declare(strict_types=1);
 
@@ -11,9 +13,43 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 
-require_role(['system_admin', 'head_academic']);
+require_role(['system_admin', 'head_academic', 'dean']);
 
 $conn = db();
+$role = current_role();
+
+$deanFacultyId = 0;
+$deanFacultyName = '';
+if ($role === 'dean') {
+    $deanFacultyId = (int) ($_SESSION['faculty_id'] ?? 0);
+    if ($deanFacultyId > 0) {
+        $fStmt = $conn->prepare('SELECT name FROM faculties WHERE id = ?');
+        $fStmt->bind_param('i', $deanFacultyId);
+        $fStmt->execute();
+        $fRow = $fStmt->get_result()->fetch_assoc();
+        $fStmt->close();
+        $deanFacultyName = $fRow ? (string) $fRow['name'] : '';
+    }
+}
+
+/**
+ * Dean's write actions (generate sessions, set current, save dates, bulk
+ * delete) must never operate on another faculty's semester even via a
+ * crafted semester_id in the POST body — the list/detail side is already
+ * naturally scoped since $semesters (built further below) only contains
+ * the Dean's own faculty's rows, but every POST handler reads semester_id
+ * straight from $_POST, so each one re-checks ownership here first.
+ */
+function dean_owns_semester(mysqli $conn, int $semesterId, int $deanFacultyId): bool
+{
+    $stmt = $conn->prepare('SELECT id FROM semesters WHERE id = ? AND faculty_id = ?');
+    $stmt->bind_param('ii', $semesterId, $deanFacultyId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row !== null;
+}
 
 // ---------------------------------------------------------------------
 // Flash messages (post-redirect-get, same pattern as the other admin pages)
@@ -30,9 +66,31 @@ if (!empty($_SESSION['flash_error'])) {
 }
 
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
-$faculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$faculties = $role === 'dean'
+    ? array_filter($conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC), static fn ($f) => (int) $f['id'] === $deanFacultyId)
+    : $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 
-$addSemesterFormValues = ['academic_year_id' => '', 'faculty_id' => '', 'name' => '', 'start_date' => '', 'end_date' => ''];
+// Department options for the Add New Semester form's optional, purely
+// informational "Department" field (Phase 1) — cascades from Faculty the
+// same way admin/students.php's own Faculty -> Department field already
+// does. Never used to scope/restrict the semester itself.
+$contextDepartments = $role === 'dean'
+    ? array_filter($conn->query('SELECT id, name, faculty_id FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC), static fn ($d) => (int) $d['faculty_id'] === $deanFacultyId)
+    : $conn->query('SELECT id, name, faculty_id FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+
+$departmentsByFacultyId = [];
+foreach ($contextDepartments as $d) {
+    $departmentsByFacultyId[(int) $d['faculty_id']][] = ['id' => (int) $d['id'], 'name' => $d['name']];
+}
+
+$addSemesterFormValues = [
+    'academic_year_id' => '',
+    'faculty_id' => $role === 'dean' ? (string) $deanFacultyId : '',
+    'context_department_id' => '',
+    'name' => '',
+    'start_date' => '',
+    'end_date' => '',
+];
 
 /**
  * Shared by the bulk "Delete Selected" action over a semester's Xiiso
@@ -87,13 +145,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'add_semester') {
         $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
-        $facultyId = (int) ($_POST['faculty_id'] ?? 0);
+        // A Dean's faculty is always the session's own faculty_id — never the
+        // posted value — so a crafted faculty_id cannot create a semester in
+        // a faculty they don't oversee.
+        $facultyId = $role === 'dean' ? $deanFacultyId : (int) ($_POST['faculty_id'] ?? 0);
+        // Purely informational (Phase 1) — never scopes the semester itself.
+        // A mismatched/stale value (e.g. picked before Faculty was changed)
+        // is silently dropped rather than blocking semester creation over a
+        // non-critical field; see the check right before the INSERT below.
+        $contextDepartmentId = (int) ($_POST['context_department_id'] ?? 0);
         $name = trim((string) ($_POST['name'] ?? ''));
         $startDate = (string) ($_POST['start_date'] ?? '');
         $endDate = (string) ($_POST['end_date'] ?? '');
         $addSemesterFormValues = compact('name', 'startDate', 'endDate') + [
             'academic_year_id' => (string) $academicYearId,
             'faculty_id' => (string) $facultyId,
+            'context_department_id' => (string) $contextDepartmentId,
         ];
 
         $academicYearValid = false;
@@ -103,11 +170,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
             }
         }
-        $facultyValid = false;
-        foreach ($faculties as $f) {
-            if ((int) $f['id'] === $facultyId) {
-                $facultyValid = true;
-                break;
+        if ($role === 'dean') {
+            $facultyValid = $deanFacultyId > 0;
+        } else {
+            $facultyValid = false;
+            foreach ($faculties as $f) {
+                if ((int) $f['id'] === $facultyId) {
+                    $facultyValid = true;
+                    break;
+                }
             }
         }
         $startValid = (bool) DateTime::createFromFormat('Y-m-d', $startDate);
@@ -139,8 +210,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($validationError === '') {
-            $insertStmt = $conn->prepare('INSERT INTO semesters (academic_year_id, faculty_id, name, start_date, end_date) VALUES (?, ?, ?, ?, ?)');
-            $insertStmt->bind_param('iisss', $academicYearId, $facultyId, $name, $startDate, $endDate);
+            // Silently drop (not error) a context department that doesn't
+            // belong to the resolved faculty — this field is informational
+            // only, so a stale/mismatched value shouldn't block creating a
+            // real semester.
+            $contextDepartmentParam = null;
+            if ($contextDepartmentId > 0) {
+                $deptCheckStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
+                $deptCheckStmt->bind_param('ii', $contextDepartmentId, $facultyId);
+                $deptCheckStmt->execute();
+                if ($deptCheckStmt->get_result()->fetch_assoc()) {
+                    $contextDepartmentParam = $contextDepartmentId;
+                }
+                $deptCheckStmt->close();
+            }
+
+            $insertStmt = $conn->prepare(
+                'INSERT INTO semesters (academic_year_id, faculty_id, context_department_id, name, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?)'
+            );
+            $insertStmt->bind_param('iiisss', $academicYearId, $facultyId, $contextDepartmentParam, $name, $startDate, $endDate);
             $insertStmt->execute();
             $insertStmt->close();
 
@@ -150,6 +238,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $errorMessage = $validationError;
     } elseif ($action === 'assign_faculty') {
+        // Not applicable to Dean: a Dean's own semesters always already have
+        // faculty_id set at creation (locked to their own faculty above), so
+        // this "backfill a legacy unassigned semester" action has nothing a
+        // Dean could legitimately use it for.
+        if ($role === 'dean') {
+            $_SESSION['flash_error'] = 'Not permitted.';
+            redirect_to('semesters.php');
+        }
+
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
         $facultyId = (int) ($_POST['faculty_id'] ?? 0);
 
@@ -189,6 +286,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'generate_sessions') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
         $semStmt = $conn->prepare('SELECT name FROM semesters WHERE id = ?');
         $semStmt->bind_param('i', $semesterId);
         $semStmt->execute();
@@ -204,6 +305,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'set_current_semester') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
         $semStmt = $conn->prepare('SELECT name, faculty_id FROM semesters WHERE id = ?');
         $semStmt->bind_param('i', $semesterId);
         $semStmt->execute();
@@ -242,6 +347,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'save_session_dates') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
         $dates = (array) ($_POST['session_date'] ?? []);
 
         $updateStmt = $conn->prepare('UPDATE sessions SET date = ? WHERE id = ? AND semester_id = ?');
@@ -258,6 +367,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'bulk_delete_sessions') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
         $ids = array_values(array_unique(array_filter(
             array_map('intval', (array) ($_POST['session_ids'] ?? [])),
             static fn ($id) => $id > 0
@@ -294,14 +407,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 // Data for rendering
 // ---------------------------------------------------------------------
-$semesters = $conn->query(
-    "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
-            ay.label AS academic_year_label, f.name AS faculty_name
-     FROM semesters s
-     JOIN academic_years ay ON ay.id = s.academic_year_id
-     LEFT JOIN faculties f ON f.id = s.faculty_id
-     ORDER BY (s.faculty_id IS NULL), f.name, ay.label DESC, s.start_date DESC"
-)->fetch_all(MYSQLI_ASSOC);
+if ($role === 'dean') {
+    $semListStmt = $conn->prepare(
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current,
+                ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         JOIN faculties f ON f.id = s.faculty_id
+         LEFT JOIN departments cd ON cd.id = s.context_department_id
+         WHERE s.faculty_id = ?
+         ORDER BY ay.label DESC, s.start_date DESC"
+    );
+    $semListStmt->bind_param('i', $deanFacultyId);
+    $semListStmt->execute();
+    $semesters = $semListStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $semListStmt->close();
+} else {
+    $semesters = $conn->query(
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current,
+                ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         LEFT JOIN faculties f ON f.id = s.faculty_id
+         LEFT JOIN departments cd ON cd.id = s.context_department_id
+         ORDER BY (s.faculty_id IS NULL), f.name, ay.label DESC, s.start_date DESC"
+    )->fetch_all(MYSQLI_ASSOC);
+}
 
 $selectedSemesterId = (int) ($_GET['semester_id'] ?? 0);
 if ($selectedSemesterId === 0 && !empty($semesters)) {
@@ -339,7 +470,11 @@ if ($selectedSemester) {
         <div class="page-body">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                Access scope: All academic years and semesters
+                <?php if ($role === 'dean'): ?>
+                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                <?php else: ?>
+                    Access scope: All academic years and semesters
+                <?php endif; ?>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -371,18 +506,32 @@ if ($selectedSemester) {
 
                             <div>
                                 <label class="form-label small mb-1">Faculty</label>
-                                <select class="form-select form-select-sm" name="faculty_id" required>
-                                    <option value="">Select faculty</option>
-                                    <?php foreach ($faculties as $f): ?>
-                                        <option value="<?= (int) $f['id'] ?>" <?= (string) $f['id'] === $addSemesterFormValues['faculty_id'] ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars($f['name']) ?>
-                                        </option>
-                                    <?php endforeach; ?>
+                                <?php if ($role === 'dean'): ?>
+                                    <select class="form-select form-select-sm" id="semesterFacultySelect" disabled onchange="admasUpdateContextDepartmentOptions(this.value)">
+                                        <option selected value="<?= (int) $deanFacultyId ?>"><?= htmlspecialchars($deanFacultyName) ?></option>
+                                    </select>
+                                    <div class="form-text">Locked to your own faculty.</div>
+                                <?php else: ?>
+                                    <select class="form-select form-select-sm" id="semesterFacultySelect" name="faculty_id" required onchange="admasUpdateContextDepartmentOptions(this.value)">
+                                        <option value="">Select faculty</option>
+                                        <?php foreach ($faculties as $f): ?>
+                                            <option value="<?= (int) $f['id'] ?>" <?= (string) $f['id'] === $addSemesterFormValues['faculty_id'] ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars($f['name']) ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                <?php endif; ?>
+                            </div>
+                            <div>
+                                <label class="form-label small mb-1">Department <span class="text-muted fw-normal">(optional, for your own reference only)</span></label>
+                                <select class="form-select form-select-sm" id="semesterContextDepartmentSelect" name="context_department_id">
+                                    <option value="">No specific department</option>
                                 </select>
+                                <div class="form-text">Doesn't restrict the semester — it still applies to the whole faculty above.</div>
                             </div>
                             <div>
                                 <label class="form-label small mb-1">Academic Year</label>
-                                <select class="form-select form-select-sm" name="academic_year_id" required>
+                                <select class="form-select form-select-sm" name="academic_year_id" required <?= empty($academicYears) ? 'disabled' : '' ?>>
                                     <option value="">Select year</option>
                                     <?php foreach ($academicYears as $ay): ?>
                                         <option value="<?= (int) $ay['id'] ?>" <?= (string) $ay['id'] === $addSemesterFormValues['academic_year_id'] ? 'selected' : '' ?>>
@@ -390,6 +539,9 @@ if ($selectedSemester) {
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
+                                <?php if (empty($academicYears)): ?>
+                                    <div class="form-text text-danger">No academic years exist yet — ask a System Administrator or Head of Academic Affairs to add one before you can create a semester.</div>
+                                <?php endif; ?>
                             </div>
                             <div>
                                 <label class="form-label small mb-1">Name</label>
@@ -408,7 +560,7 @@ if ($selectedSemester) {
                                            value="<?= htmlspecialchars($addSemesterFormValues['end_date']) ?>">
                                 </div>
                             </div>
-                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($academicYears) ? 'disabled' : '' ?>>
                                 <i class="bi bi-plus-lg"></i> Create Semester
                             </button>
                         </form>
@@ -440,6 +592,9 @@ if ($selectedSemester) {
                                                         <span class="badge-pill badge-late">Unassigned</span>
                                                     <?php else: ?>
                                                         <?= htmlspecialchars($s['faculty_name']) ?>
+                                                        <?php if ($s['context_department_name']): ?>
+                                                            <div class="text-muted small"><?= htmlspecialchars($s['context_department_name']) ?></div>
+                                                        <?php endif; ?>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
@@ -474,6 +629,9 @@ if ($selectedSemester) {
                                     </h6>
                                     <p class="text-muted small mb-0">
                                         <?= $selectedSemester['faculty_id'] === null ? 'No faculty assigned' : htmlspecialchars($selectedSemester['faculty_name']) ?>
+                                        <?php if ($selectedSemester['context_department_name']): ?>
+                                            <span class="fst-italic">(<?= htmlspecialchars($selectedSemester['context_department_name']) ?>)</span>
+                                        <?php endif; ?>
                                         &middot; <?= htmlspecialchars($selectedSemester['start_date']) ?> to <?= htmlspecialchars($selectedSemester['end_date']) ?>
                                     </p>
                                 </div>
@@ -582,6 +740,43 @@ if ($selectedSemester) {
                 entityLabel: 'Xiiso session',
                 entityLabelPlural: 'Xiiso sessions',
             });
+        });
+
+        // Add New Semester form's optional, purely informational Department
+        // field (Phase 1) — cascades from Faculty the same way
+        // admin/students.php's own Faculty -> Department field does.
+        const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function admasUpdateContextDepartmentOptions(facultyId, selectedDepartmentId) {
+            const select = document.getElementById('semesterContextDepartmentSelect');
+            if (!select) {
+                return;
+            }
+            const departments = departmentsByFacultyId[facultyId] || [];
+
+            select.innerHTML = '';
+            const blank = document.createElement('option');
+            blank.value = '';
+            blank.textContent = 'No specific department';
+            select.appendChild(blank);
+            departments.forEach((dept) => {
+                const opt = document.createElement('option');
+                opt.value = String(dept.id);
+                opt.textContent = dept.name;
+                select.appendChild(opt);
+            });
+
+            select.value = String(selectedDepartmentId || '');
+            if (select.value !== String(selectedDepartmentId || '')) {
+                select.value = '';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const facultySelect = document.getElementById('semesterFacultySelect');
+            if (facultySelect) {
+                admasUpdateContextDepartmentOptions(facultySelect.value, <?= json_encode($addSemesterFormValues['context_department_id']) ?>);
+            }
         });
     </script>
 </body>

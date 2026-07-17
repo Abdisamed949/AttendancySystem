@@ -30,6 +30,12 @@ if ($role === 'dean') {
     }
 }
 
+const SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
+];
+
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
 // ---------------------------------------------------------------------
@@ -59,7 +65,18 @@ if (!empty($_SESSION['flash_error'])) {
 // Add / Edit side-panel form state
 // ---------------------------------------------------------------------
 $formMode = 'create';
-$formValues = ['id' => 0, 'code' => '', 'name' => '', 'department_id' => 0, 'credit_hours' => 3];
+$formValues = [
+    'id' => 0,
+    'code' => '',
+    'name' => '',
+    'department_id' => 0,
+    'credit_hours' => 3,
+    // Optional "first offering" fields — only meaningful on create; see the
+    // offering_semester_id > 0 branch in the create handler below.
+    'offering_semester_id' => 0,
+    'offering_shift' => '',
+    'offering_lecturer_id' => 0,
+];
 
 /**
  * Shared by both the single-row "Delete" button and the bulk "Delete
@@ -129,6 +146,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $departmentId = (int) ($_POST['department_id'] ?? 0);
         $creditHours = (int) ($_POST['credit_hours'] ?? 3);
 
+        // Optional "first offering" fields — create-only, and the whole
+        // section is opt-in: left blank, the course is created exactly as
+        // before with no course_offerings row.
+        $offeringSemesterId = $action === 'create' ? (int) ($_POST['offering_semester_id'] ?? 0) : 0;
+        $offeringShift = $action === 'create' ? (string) ($_POST['offering_shift'] ?? '') : '';
+        $offeringLecturerId = $action === 'create' ? (int) ($_POST['offering_lecturer_id'] ?? 0) : 0;
+
         $formMode = $action === 'update' ? 'edit' : 'create';
         $formValues = [
             'id' => $courseId,
@@ -136,6 +160,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'name' => $name,
             'department_id' => $departmentId,
             'credit_hours' => $creditHours,
+            'offering_semester_id' => $offeringSemesterId,
+            'offering_shift' => $offeringShift,
+            'offering_lecturer_id' => $offeringLecturerId,
         ];
 
         $validationError = '';
@@ -151,19 +178,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Invalid course selected for editing.';
         }
 
+        $departmentFacultyId = 0;
         if ($validationError === '') {
             if ($role === 'dean') {
-                $deptCheckStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
+                $deptCheckStmt = $conn->prepare('SELECT id, faculty_id FROM departments WHERE id = ? AND faculty_id = ?');
                 $deptCheckStmt->bind_param('ii', $departmentId, $deanFacultyId);
             } else {
-                $deptCheckStmt = $conn->prepare('SELECT id FROM departments WHERE id = ?');
+                $deptCheckStmt = $conn->prepare('SELECT id, faculty_id FROM departments WHERE id = ?');
                 $deptCheckStmt->bind_param('i', $departmentId);
             }
             $deptCheckStmt->execute();
-            if (!$deptCheckStmt->get_result()->fetch_assoc()) {
+            $departmentRow = $deptCheckStmt->get_result()->fetch_assoc();
+            if (!$departmentRow) {
                 $validationError = $role === 'dean'
                     ? 'Selected department does not belong to your faculty.'
                     : 'Selected department does not exist.';
+            } else {
+                $departmentFacultyId = (int) $departmentRow['faculty_id'];
             }
             $deptCheckStmt->close();
         }
@@ -195,13 +226,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $dupStmt->close();
         }
 
+        // Only validated at all if a Semester was actually chosen — this
+        // whole section is opt-in (Semester left blank = no offering,
+        // course created exactly as before).
+        $offeringSemesterRow = null;
+        if ($validationError === '' && $offeringSemesterId > 0) {
+            $offeringSemStmt = $conn->prepare('SELECT id, name FROM semesters WHERE id = ? AND faculty_id = ?');
+            $offeringSemStmt->bind_param('ii', $offeringSemesterId, $departmentFacultyId);
+            $offeringSemStmt->execute();
+            $offeringSemesterRow = $offeringSemStmt->get_result()->fetch_assoc();
+            $offeringSemStmt->close();
+
+            if (!$offeringSemesterRow) {
+                $validationError = 'Please select a valid semester for the selected department\'s faculty.';
+            } elseif (!array_key_exists($offeringShift, SHIFT_LABELS)) {
+                $validationError = 'Please select a shift for the new offering.';
+            } elseif ($offeringLecturerId > 0) {
+                // Lecturer must belong to this course's own department, same
+                // validation admin/course_offerings.php already does.
+                $offeringLecStmt = $conn->prepare('SELECT id FROM lecturers WHERE id = ? AND department_id = ?');
+                $offeringLecStmt->bind_param('ii', $offeringLecturerId, $departmentId);
+                $offeringLecStmt->execute();
+                if (!$offeringLecStmt->get_result()->fetch_assoc()) {
+                    $validationError = 'Selected lecturer does not belong to this course\'s department.';
+                }
+                $offeringLecStmt->close();
+            }
+        }
+
         if ($validationError === '') {
             if ($action === 'create') {
-                $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
-                $insertStmt->bind_param('ssii', $code, $name, $departmentId, $creditHours);
-                $insertStmt->execute();
-                $insertStmt->close();
-                $_SESSION['flash_success'] = 'Course added successfully. Use "Manage Offerings" to assign a lecturer for a semester.';
+                $conn->begin_transaction();
+                try {
+                    $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
+                    $insertStmt->bind_param('ssii', $code, $name, $departmentId, $creditHours);
+                    $insertStmt->execute();
+                    $newCourseId = (int) $conn->insert_id;
+                    $insertStmt->close();
+
+                    $offeringCreated = false;
+                    if ($offeringSemesterId > 0) {
+                        $offeringLecturerParam = $offeringLecturerId > 0 ? $offeringLecturerId : null;
+                        $offerStmt = $conn->prepare(
+                            'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift) VALUES (?, ?, ?, ?)'
+                        );
+                        $offerStmt->bind_param('iiis', $newCourseId, $offeringSemesterId, $offeringLecturerParam, $offeringShift);
+                        $offerStmt->execute();
+                        $offerStmt->close();
+                        $offeringCreated = true;
+                    }
+
+                    $conn->commit();
+                    $_SESSION['flash_success'] = $offeringCreated
+                        ? ('Course added successfully, with an offering for "' . $offeringSemesterRow['name'] . '" (' . SHIFT_LABELS[$offeringShift] . ').')
+                        : 'Course added successfully. Use "Manage Offerings" to assign a lecturer for a semester.';
+                } catch (Throwable $e) {
+                    $conn->rollback();
+                    $_SESSION['flash_error'] = 'Could not save the course. Please try again.';
+                }
                 redirect_to('admin/courses.php');
             } else {
                 $updateStmt = $conn->prepare('UPDATE courses SET code = ?, name = ?, department_id = ?, credit_hours = ? WHERE id = ?');
@@ -316,7 +398,7 @@ if ($role === 'dean') {
         "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
                 d.name AS department_name, f.name AS faculty_name,
                 cur_se.name AS current_semester_name, ay.label AS current_academic_year_label,
-                ol.full_name AS current_lecturer_name
+                ol.full_name AS current_lecturer_name, co.shift AS current_shift, co.start_date AS current_start_date, co.end_date AS current_end_date
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
@@ -343,7 +425,7 @@ if ($role === 'dean') {
         "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
                 d.name AS department_name, f.name AS faculty_name,
                 cur_se.name AS current_semester_name, ay.label AS current_academic_year_label,
-                ol.full_name AS current_lecturer_name
+                ol.full_name AS current_lecturer_name, co.shift AS current_shift, co.start_date AS current_start_date, co.end_date AS current_end_date
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
@@ -358,6 +440,75 @@ if ($role === 'dean') {
 $departmentsByFaculty = [];
 foreach ($departments as $dept) {
     $departmentsByFaculty[$dept['faculty_name']][] = $dept;
+}
+
+$facultyIdByDepartmentId = [];
+foreach ($departments as $dept) {
+    $facultyIdByDepartmentId[(int) $dept['id']] = (int) $dept['faculty_id'];
+}
+
+// Semester options for the Add Course form's optional "first offering"
+// section, grouped by faculty for the Department -> Semester cascade —
+// same shape as admin/students.php's semestersByFacultyId, extended with
+// academic_year_label/is_current for the read-only Academic Year display
+// and the "— Current" option label (same technique as
+// admin/course_offerings.php's own Semester dropdown).
+if ($role === 'dean') {
+    $offeringSemStmt = $conn->prepare(
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.label AS academic_year_label
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         WHERE s.faculty_id = ?
+         ORDER BY s.start_date DESC'
+    );
+    $offeringSemStmt->bind_param('i', $deanFacultyId);
+    $offeringSemStmt->execute();
+    $offeringSemesters = $offeringSemStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $offeringSemStmt->close();
+} else {
+    $offeringSemesters = $conn->query(
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.label AS academic_year_label
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         WHERE s.faculty_id IS NOT NULL
+         ORDER BY s.start_date DESC'
+    )->fetch_all(MYSQLI_ASSOC);
+}
+
+$semestersByFacultyId = [];
+foreach ($offeringSemesters as $sem) {
+    $semestersByFacultyId[(int) $sem['faculty_id']][] = [
+        'id' => (int) $sem['id'],
+        'name' => $sem['name'],
+        'academic_year_label' => $sem['academic_year_label'],
+        'is_current' => (int) $sem['is_current'] === 1,
+    ];
+}
+
+// Lecturer options, grouped by department — same scoping (active
+// lecturers within one department) as admin/course_offerings.php's own
+// Lecturer dropdown, reused here for the Department -> Lecturer cascade.
+if ($role === 'dean') {
+    $offeringLecStmt = $conn->prepare(
+        "SELECT l.id, l.full_name, l.department_id
+         FROM lecturers l
+         JOIN departments d ON d.id = l.department_id
+         WHERE d.faculty_id = ? AND l.status = 'active'
+         ORDER BY l.full_name"
+    );
+    $offeringLecStmt->bind_param('i', $deanFacultyId);
+    $offeringLecStmt->execute();
+    $offeringLecturers = $offeringLecStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $offeringLecStmt->close();
+} else {
+    $offeringLecturers = $conn->query(
+        "SELECT id, full_name, department_id FROM lecturers WHERE status = 'active' ORDER BY full_name"
+    )->fetch_all(MYSQLI_ASSOC);
+}
+
+$lecturersByDepartmentId = [];
+foreach ($offeringLecturers as $lec) {
+    $lecturersByDepartmentId[(int) $lec['department_id']][] = ['id' => (int) $lec['id'], 'full_name' => $lec['full_name']];
 }
 ?>
 <!DOCTYPE html>
@@ -481,10 +632,22 @@ foreach ($departments as $dept) {
                                                         <span class="text-muted fst-italic">No current semester</span>
                                                     <?php elseif ($c['current_lecturer_name']): ?>
                                                         <?= htmlspecialchars($c['current_lecturer_name']) ?>
+                                                        <?php if ($c['current_shift'] && array_key_exists($c['current_shift'], SHIFT_LABELS)): ?>
+                                                            <span class="text-muted">(<?= htmlspecialchars(SHIFT_LABELS[$c['current_shift']]) ?>)</span>
+                                                        <?php endif; ?>
                                                         <div class="text-muted small"><?= htmlspecialchars($c['current_semester_name'] . ' (' . $c['current_academic_year_label'] . ')') ?></div>
+                                                        <?php if ($c['current_start_date'] || $c['current_end_date']): ?>
+                                                            <div class="text-muted small"><?= htmlspecialchars(($c['current_start_date'] ?? '?') . ' to ' . ($c['current_end_date'] ?? '?')) ?></div>
+                                                        <?php endif; ?>
                                                     <?php else: ?>
                                                         <span class="text-muted fst-italic">Unassigned</span>
+                                                        <?php if ($c['current_shift'] && array_key_exists($c['current_shift'], SHIFT_LABELS)): ?>
+                                                            <span class="text-muted">(<?= htmlspecialchars(SHIFT_LABELS[$c['current_shift']]) ?>)</span>
+                                                        <?php endif; ?>
                                                         <div class="text-muted small"><?= htmlspecialchars($c['current_semester_name'] . ' (' . $c['current_academic_year_label'] . ')') ?></div>
+                                                        <?php if ($c['current_start_date'] || $c['current_end_date']): ?>
+                                                            <div class="text-muted small"><?= htmlspecialchars(($c['current_start_date'] ?? '?') . ' to ' . ($c['current_end_date'] ?? '?')) ?></div>
+                                                        <?php endif; ?>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= (int) $c['credit_hours'] ?></td>
@@ -539,7 +702,7 @@ foreach ($departments as $dept) {
 
                             <div class="mb-3">
                                 <label for="courseDepartmentSelect" class="form-label">Department</label>
-                                <select class="form-select" id="courseDepartmentSelect" name="department_id" required>
+                                <select class="form-select" id="courseDepartmentSelect" name="department_id" required onchange="admasUpdateOfferingFieldsForDepartment(this.value)">
                                     <option value="">Select department</option>
                                     <?php foreach ($departmentsByFaculty as $facultyName => $deptList): ?>
                                         <optgroup label="<?= htmlspecialchars($facultyName) ?>">
@@ -568,6 +731,43 @@ foreach ($departments as $dept) {
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $formValues['id'] ?>">Manage Offerings</a>
                                     after saving.
                                 </div>
+                            <?php else: ?>
+                                <hr class="my-3">
+                                <p class="small text-muted mb-2">Optionally create this course's first offering now, instead of using "Manage Offerings" afterward.</p>
+
+                                <div class="mb-3">
+                                    <label for="offeringSemesterSelect" class="form-label">Semester <span class="text-muted fw-normal">(optional)</span></label>
+                                    <select class="form-select" id="offeringSemesterSelect" name="offering_semester_id" onchange="admasUpdateOfferingSemesterChange()">
+                                        <option value="">No offering yet — select a department first</option>
+                                    </select>
+                                </div>
+
+                                <div id="offeringDetailsBlock" class="d-none">
+                                    <div class="mb-3">
+                                        <label for="offeringAcademicYearDisplay" class="form-label">Academic Year</label>
+                                        <input type="text" class="form-control" id="offeringAcademicYearDisplay" value="" disabled placeholder="Derived from the selected semester">
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label for="offeringShiftSelect" class="form-label">Shift</label>
+                                        <select class="form-select" id="offeringShiftSelect" name="offering_shift">
+                                            <option value="">Select shift</option>
+                                            <?php foreach (SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
+                                                <option value="<?= htmlspecialchars($shiftValue) ?>" <?= $formValues['offering_shift'] === $shiftValue ? 'selected' : '' ?>>
+                                                    <?= htmlspecialchars($shiftLabel) ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label for="offeringLecturerSelect" class="form-label">Lecturer</label>
+                                        <select class="form-select" id="offeringLecturerSelect" name="offering_lecturer_id">
+                                            <option value="0">Unassigned</option>
+                                        </select>
+                                        <div class="form-text">Only lecturers in the selected department are shown.</div>
+                                    </div>
+                                </div>
                             <?php endif; ?>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($departments) ? 'disabled' : '' ?>>
@@ -594,6 +794,86 @@ foreach ($departments as $dept) {
                 entityLabel: 'course',
                 entityLabelPlural: 'courses',
             });
+        });
+
+        // Add Course form's optional "first offering" section (create mode
+        // only — these elements don't exist at all in edit mode, so every
+        // function here is a no-op if it can't find them).
+        const facultyIdByDepartmentId = <?= json_encode($facultyIdByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const lecturersByDepartmentId = <?= json_encode($lecturersByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function admasUpdateOfferingFieldsForDepartment(departmentId, selectedSemesterId) {
+            const semesterSelect = document.getElementById('offeringSemesterSelect');
+            const lecturerSelect = document.getElementById('offeringLecturerSelect');
+            if (!semesterSelect || !lecturerSelect) {
+                return;
+            }
+
+            const facultyId = facultyIdByDepartmentId[departmentId];
+            const semesters = (facultyId !== undefined ? semestersByFacultyId[facultyId] : null) || [];
+
+            semesterSelect.innerHTML = '';
+            const blank = document.createElement('option');
+            blank.value = '';
+            blank.textContent = departmentId
+                ? (semesters.length === 0 ? 'No semesters for this faculty yet' : 'No offering yet — select a semester below')
+                : 'No offering yet — select a department first';
+            semesterSelect.appendChild(blank);
+            semesters.forEach((sem) => {
+                const opt = document.createElement('option');
+                opt.value = String(sem.id);
+                opt.dataset.academicYear = sem.academic_year_label;
+                opt.textContent = sem.name + (sem.is_current ? ' — Current' : '');
+                semesterSelect.appendChild(opt);
+            });
+
+            lecturerSelect.innerHTML = '';
+            const unassigned = document.createElement('option');
+            unassigned.value = '0';
+            unassigned.textContent = 'Unassigned';
+            lecturerSelect.appendChild(unassigned);
+            (lecturersByDepartmentId[departmentId] || []).forEach((lec) => {
+                const opt = document.createElement('option');
+                opt.value = String(lec.id);
+                opt.textContent = lec.full_name;
+                lecturerSelect.appendChild(opt);
+            });
+
+            semesterSelect.value = String(selectedSemesterId || '');
+            if (semesterSelect.value !== String(selectedSemesterId || '')) {
+                semesterSelect.value = '';
+            }
+            admasUpdateOfferingSemesterChange();
+        }
+
+        function admasUpdateOfferingSemesterChange() {
+            const semesterSelect = document.getElementById('offeringSemesterSelect');
+            const detailsBlock = document.getElementById('offeringDetailsBlock');
+            const academicYearDisplay = document.getElementById('offeringAcademicYearDisplay');
+            if (!semesterSelect || !detailsBlock || !academicYearDisplay) {
+                return;
+            }
+
+            if (semesterSelect.value) {
+                detailsBlock.classList.remove('d-none');
+                const selected = semesterSelect.options[semesterSelect.selectedIndex];
+                academicYearDisplay.value = selected ? (selected.dataset.academicYear || '') : '';
+            } else {
+                detailsBlock.classList.add('d-none');
+                academicYearDisplay.value = '';
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const departmentSelect = document.getElementById('courseDepartmentSelect');
+            const offeringLecturerSelect = document.getElementById('offeringLecturerSelect');
+            if (departmentSelect && document.getElementById('offeringSemesterSelect')) {
+                admasUpdateOfferingFieldsForDepartment(departmentSelect.value, <?= (int) $formValues['offering_semester_id'] ?>);
+                if (offeringLecturerSelect) {
+                    offeringLecturerSelect.value = <?= json_encode((string) $formValues['offering_lecturer_id']) ?>;
+                }
+            }
         });
     </script>
 </body>

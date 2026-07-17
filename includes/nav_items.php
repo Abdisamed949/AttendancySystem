@@ -38,8 +38,9 @@ function nav_items(): array
         ['label' => 'My Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'roles' => ['student']],
         // Attendance lives at the app root (shared by all three roles below), not under any one role folder.
         ['label' => 'Attendance', 'icon' => 'bi-calendar2-check', 'file' => 'attendance.php', 'path' => 'attendance.php', 'roles' => ['system_admin', 'dean', 'lecturer']],
-        // Semester/Xiiso session management lives at the app root (shared by both roles), same pattern as Attendance above.
-        ['label' => 'Semesters', 'icon' => 'bi-calendar3-week', 'file' => 'semesters.php', 'path' => 'semesters.php', 'roles' => ['system_admin', 'head_academic']],
+        // Semester/Xiiso session management lives at the app root (shared across roles), same pattern as Attendance above.
+        // Dean sees/manages only their own faculty's semesters (enforced in semesters.php itself).
+        ['label' => 'Semesters', 'icon' => 'bi-calendar3-week', 'file' => 'semesters.php', 'path' => 'semesters.php', 'roles' => ['system_admin', 'head_academic', 'dean']],
         ['label' => 'Import Students', 'icon' => 'bi-file-earmark-arrow-up', 'file' => 'students_import.php', 'path' => 'admin/students_import.php', 'roles' => ['system_admin', 'registration']],
         // Reports lives at the app root (shared by five roles), not under any one role folder — same pattern as Attendance above.
         ['label' => 'Reports', 'icon' => 'bi-bar-chart', 'file' => 'reports.php', 'path' => 'reports.php', 'roles' => ['system_admin', 'head_academic', 'registration', 'dean', 'lecturer']],

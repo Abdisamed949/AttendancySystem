@@ -83,14 +83,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'save_offering') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
         $lecturerId = (int) ($_POST['lecturer_id'] ?? 0);
+        $startDateRaw = trim((string) ($_POST['start_date'] ?? ''));
+        $endDateRaw = trim((string) ($_POST['end_date'] ?? ''));
 
         // Semester must belong to THIS course's own faculty (D1: a course
         // is only ever offered under its own faculty's semester track).
-        $semStmt = $conn->prepare('SELECT id, name FROM semesters WHERE id = ? AND faculty_id = ?');
+        $semStmt = $conn->prepare('SELECT id, name, start_date, end_date FROM semesters WHERE id = ? AND faculty_id = ?');
         $semStmt->bind_param('ii', $semesterId, $courseFacultyId);
         $semStmt->execute();
         $semRow = $semStmt->get_result()->fetch_assoc();
         $semStmt->close();
+
+        $startDate = null;
+        $endDate = null;
 
         $validationError = '';
         if (!$semRow) {
@@ -108,20 +113,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lecStmt->close();
         }
 
+        // Start/End Date are both optional, but if given must be real dates,
+        // and together must not run backwards.
+        if ($validationError === '' && $startDateRaw !== '') {
+            if (!DateTime::createFromFormat('Y-m-d', $startDateRaw)) {
+                $validationError = 'Please provide a valid start date.';
+            } else {
+                $startDate = $startDateRaw;
+            }
+        }
+        if ($validationError === '' && $endDateRaw !== '') {
+            if (!DateTime::createFromFormat('Y-m-d', $endDateRaw)) {
+                $validationError = 'Please provide a valid end date.';
+            } else {
+                $endDate = $endDateRaw;
+            }
+        }
+        if ($validationError === '' && $startDate !== null && $endDate !== null && $endDate < $startDate) {
+            $validationError = 'End date must be on or after start date.';
+        }
+
+        // Soft check only: dates outside the semester's own range are
+        // flagged to the user but do not block the save — a lecturer's
+        // real teaching period can legitimately run a little short of, or
+        // (rarely) past, the semester's nominal boundaries.
+        $rangeWarning = '';
+        if ($validationError === '' && $semRow && ($startDate !== null || $endDate !== null)) {
+            $outOfRange = ($startDate !== null && ($startDate < $semRow['start_date'] || $startDate > $semRow['end_date']))
+                || ($endDate !== null && ($endDate < $semRow['start_date'] || $endDate > $semRow['end_date']));
+            if ($outOfRange) {
+                $rangeWarning = ' Warning: the dates you entered fall outside "' . $semRow['name'] . '"\'s own range ('
+                    . $semRow['start_date'] . ' to ' . $semRow['end_date'] . ') — saved anyway, double-check they\'re correct.';
+            }
+        }
+
         if ($validationError === '') {
             $lecturerParam = $lecturerId > 0 ? $lecturerId : null;
             // One offering per (course, semester) — upsert, since re-saving
-            // an existing semester's row should update the lecturer, not
-            // error as a duplicate.
+            // an existing semester's row should update the lecturer/dates,
+            // not error as a duplicate.
             $upsertStmt = $conn->prepare(
-                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id) VALUES (?, ?, ?)
-                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id)'
+                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, start_date, end_date) VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), start_date = VALUES(start_date), end_date = VALUES(end_date)'
             );
-            $upsertStmt->bind_param('iii', $courseId, $semesterId, $lecturerParam);
+            $upsertStmt->bind_param('iiiss', $courseId, $semesterId, $lecturerParam, $startDate, $endDate);
             $upsertStmt->execute();
             $upsertStmt->close();
 
-            $_SESSION['flash_success'] = 'Offering saved for "' . $semRow['name'] . '".';
+            $_SESSION['flash_success'] = 'Offering saved for "' . $semRow['name'] . '".' . $rangeWarning;
             redirect_to('admin/course_offerings.php?course_id=' . $courseId);
         }
 
@@ -161,7 +200,8 @@ $lecturers = $lecturersStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $lecturersStmt->close();
 
 $offeringsStmt = $conn->prepare(
-    'SELECT co.id, co.semester_id, co.lecturer_id, s.name AS semester_name, s.is_current,
+    'SELECT co.id, co.semester_id, co.lecturer_id, co.start_date, co.end_date,
+            s.name AS semester_name, s.is_current,
             ay.label AS academic_year_label, l.full_name AS lecturer_name
      FROM course_offerings co
      JOIN semesters s ON s.id = co.semester_id
@@ -237,13 +277,14 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                                         <th>Semester</th>
                                         <th>Academic Year</th>
                                         <th>Lecturer</th>
+                                        <th>Teaching Period</th>
                                         <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (empty($offerings)): ?>
                                         <tr>
-                                            <td colspan="4" class="text-center text-muted py-3">No offerings yet — add one on the right.</td>
+                                            <td colspan="5" class="text-center text-muted py-3">No offerings yet — add one on the right.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($offerings as $o): ?>
@@ -260,6 +301,13 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                                                         <?= htmlspecialchars($o['lecturer_name']) ?>
                                                     <?php else: ?>
                                                         <span class="text-muted fst-italic">Unassigned</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($o['start_date'] || $o['end_date']): ?>
+                                                        <span class="small"><?= htmlspecialchars(($o['start_date'] ?? '?') . ' to ' . ($o['end_date'] ?? '?')) ?></span>
+                                                    <?php else: ?>
+                                                        <span class="text-muted fst-italic small">Not set</span>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-end">
@@ -322,6 +370,18 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                                 </select>
                                 <div class="form-text">Only lecturers in this course's own department are shown.</div>
                             </div>
+
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">Start Date</label>
+                                    <input type="date" class="form-control form-control-sm" name="start_date">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">End Date</label>
+                                    <input type="date" class="form-control form-control-sm" name="end_date">
+                                </div>
+                            </div>
+                            <div class="form-text">Optional — this course's actual teaching period within the selected semester.</div>
 
                             <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($semesters) ? 'disabled' : '' ?>>
                                 <i class="bi bi-save"></i> Save Offering

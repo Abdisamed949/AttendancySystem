@@ -927,6 +927,7 @@ $scopeBanner = match ($role) {
                         $xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? null,
                         $xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? null,
                     ]) ?>
+                    <?= render_offering_summary(get_offering_summary($conn, $filterXiisoCourseId, (int) $filterXiisoSemesterId)) ?>
                 <?php endif; ?>
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                     <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
