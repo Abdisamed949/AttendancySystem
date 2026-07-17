@@ -199,37 +199,19 @@ $listStmt->close();
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
     <style>
-        .btn-icon {
-            border: none;
-            background: transparent;
-            color: #64748b;
-            padding: 0.25rem 0.4rem;
-            border-radius: 6px;
-        }
-
-        .btn-icon:hover {
-            background: var(--admas-bg);
-            color: #0b1f3a;
-        }
-
-        .btn-icon.text-danger:hover {
-            background: rgba(220, 38, 38, 0.08);
-            color: #dc2626;
-        }
-
         .faculty-summary-card {
             padding: 1.1rem 1.25rem;
         }
 
         .faculty-summary-name {
             font-weight: 700;
-            color: #0b1f3a;
+            color: var(--admas-text);
             margin-bottom: 0.15rem;
         }
 
         .faculty-summary-meta {
             font-size: 0.82rem;
-            color: #64748b;
+            color: var(--admas-text-muted);
         }
     </style>
 </head>
@@ -247,7 +229,7 @@ $listStmt->close();
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Faculty Management</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Faculty Management</h4>
                     <p class="text-muted mb-0">Create and manage faculties.</p>
                 </div>
             </div>
@@ -284,8 +266,8 @@ $listStmt->close();
             <!-- All Faculties table -->
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h6 class="fw-bold mb-0" style="color: #0b1f3a;">All Faculties</h6>
-                    <button type="button" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;"
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Faculties</h6>
+                    <button type="button" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"
                             onclick='openFacultyModal("create", 0, "", 0)'>
                         <i class="bi bi-plus-lg"></i> Add Faculty
                     </button>
@@ -310,7 +292,7 @@ $listStmt->close();
                             <?php else: ?>
                                 <?php foreach ($faculties as $f): ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($f['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
                                         <td>
                                             <?php if ($f['dean_name']): ?>
                                                 <?= htmlspecialchars($f['dean_name']) ?>
@@ -377,7 +359,7 @@ $listStmt->close();
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-                        <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">Save Faculty</button>
+                        <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">Save Faculty</button>
                     </div>
                 </form>
             </div>

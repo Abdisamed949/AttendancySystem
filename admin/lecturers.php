@@ -503,25 +503,6 @@ foreach ($departments as $dept) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
-    <style>
-        .btn-icon {
-            border: none;
-            background: transparent;
-            color: #64748b;
-            padding: 0.25rem 0.4rem;
-            border-radius: 6px;
-        }
-
-        .btn-icon:hover {
-            background: var(--admas-bg);
-            color: #0b1f3a;
-        }
-
-        .btn-icon.text-danger:hover {
-            background: rgba(220, 38, 38, 0.08);
-            color: #dc2626;
-        }
-    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -539,7 +520,7 @@ foreach ($departments as $dept) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Lecturer Management</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Lecturer Management</h4>
                     <p class="text-muted mb-0">Create and manage lecturer accounts.</p>
                 </div>
             </div>
@@ -561,7 +542,7 @@ foreach ($departments as $dept) {
                 <div class="col-lg-8">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Lecturers</h6>
+                            <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Lecturers</h6>
                             <div class="d-flex gap-2">
                                 <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role === 'system_admin'): ?>
@@ -569,7 +550,7 @@ foreach ($departments as $dept) {
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                     <i class="bi bi-plus-lg"></i> Add Lecturer
                                 </a>
                             </div>
@@ -607,7 +588,7 @@ foreach ($departments as $dept) {
                                                            data-label="<?= htmlspecialchars($l['full_name'] . ' (' . $l['staff_no'] . ')') ?>">
                                                 </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($l['full_name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($l['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['faculty_name']) ?></td>
                                                 <td><?= number_format((int) $l['course_count']) ?></td>
@@ -650,7 +631,7 @@ foreach ($departments as $dept) {
 
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                             <?= $formMode === 'edit' ? 'Edit Lecturer' : 'Add Lecturer' ?>
                         </h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php">
@@ -703,7 +684,7 @@ foreach ($departments as $dept) {
                                 <div class="form-text mb-3">A username and temporary password will be generated automatically and shown once after saving.</div>
                             <?php endif; ?>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($departments) ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($departments) ? 'disabled' : '' ?>>
                                 <?= $formMode === 'edit' ? 'Update Lecturer' : 'Save Lecturer' ?>
                             </button>
                         </form>

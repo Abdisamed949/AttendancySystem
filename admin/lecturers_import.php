@@ -345,7 +345,7 @@ $invalidCount = count($previewRows) - $validCount;
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Import Lecturers from Excel</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Import Lecturers from Excel</h4>
                     <p class="text-muted mb-0">Bulk-register lecturers from a .xlsx, .xls, or .csv file.</p>
                 </div>
                 <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-outline-secondary btn-sm">
@@ -368,7 +368,7 @@ $invalidCount = count($previewRows) - $validCount;
 
             <?php if ($step === 'upload'): ?>
                 <div class="admas-card p-4" style="max-width: 640px;">
-                    <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Upload File</h6>
+                    <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Upload File</h6>
 
                     <div class="alert alert-light border small mb-3">
                         The file must have column headers: <strong>Staff No</strong>, <strong>Full Name</strong>,
@@ -387,7 +387,7 @@ $invalidCount = count($previewRows) - $validCount;
                             <label for="importFileInput" class="form-label">Excel or CSV file</label>
                             <input type="file" class="form-control" id="importFileInput" name="import_file" accept=".xlsx,.xls,.csv" required>
                         </div>
-                        <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($existingDepartments) ? 'disabled' : '' ?>>
+                        <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($existingDepartments) ? 'disabled' : '' ?>>
                             <i class="bi bi-eye"></i> Preview Import
                         </button>
                     </form>
@@ -395,7 +395,7 @@ $invalidCount = count($previewRows) - $validCount;
             <?php elseif ($step === 'preview'): ?>
                 <div class="admas-card p-4">
                     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                        <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Preview</h6>
+                        <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Preview</h6>
                         <div>
                             <span class="badge-pill badge-active me-1"><?= $validCount ?> ready</span>
                             <?php if ($invalidCount > 0): ?>
@@ -440,7 +440,7 @@ $invalidCount = count($previewRows) - $validCount;
                     <div class="d-flex gap-2">
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers_import.php">
                             <input type="hidden" name="action" value="confirm">
-                            <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= $validCount === 0 ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= $validCount === 0 ? 'disabled' : '' ?>>
                                 <i class="bi bi-check2-circle"></i> Confirm Import (<?= $validCount ?>)
                             </button>
                         </form>
@@ -487,7 +487,7 @@ $invalidCount = count($previewRows) - $validCount;
                         </div>
                     <?php endif; ?>
 
-                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                         <i class="bi bi-check-lg"></i> Done — Back to Lecturers
                     </a>
                 </div>

@@ -255,7 +255,7 @@ $scopeBanner = match ($role) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Notifications / Alerts</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Notifications / Alerts</h4>
                     <p class="text-muted mb-0">Students whose attendance has dropped below the minimum threshold for the current academic year.</p>
                 </div>
             </div>
@@ -311,7 +311,7 @@ $scopeBanner = match ($role) {
             </div>
 
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Below-Threshold Students</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Below-Threshold Students</h6>
 
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
@@ -340,7 +340,7 @@ $scopeBanner = match ($role) {
                                     ?>
                                     <tr>
                                         <td>
-                                            <div class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($a['full_name']) ?></div>
+                                            <div class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($a['full_name']) ?></div>
                                             <div class="text-muted small"><?= htmlspecialchars($a['student_no']) ?></div>
                                         </td>
                                         <td><?= htmlspecialchars($a['faculty_name']) ?></td>
@@ -370,7 +370,7 @@ $scopeBanner = match ($role) {
                                                     <input type="hidden" name="action" value="notify">
                                                     <input type="hidden" name="student_id" value="<?= (int) $a['student_id'] ?>">
                                                     <input type="hidden" name="course_id" value="<?= (int) $a['course_id'] ?>">
-                                                    <button type="submit" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                                    <button type="submit" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                         <i class="bi bi-send"></i> Notify
                                                     </button>
                                                 </form>

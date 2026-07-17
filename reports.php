@@ -461,7 +461,7 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
         </thead>
         <tbody>
             <?php if (empty($rows)): ?>
-                <tr><td colspan="<?= count($columns) ?>" style="text-align:center;color:#64748b;">No data for the selected filters.</td></tr>
+                <tr><td colspan="<?= count($columns) ?>" style="text-align:center;color:var(--admas-text-muted);">No data for the selected filters.</td></tr>
             <?php else: ?>
                 <?php foreach ($rows as $r): ?>
                     <tr>
@@ -820,7 +820,7 @@ $scopeBanner = match ($role) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Reports</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Reports</h4>
                     <p class="text-muted mb-0">Filter and export attendance and enrollment reports for your scope.</p>
                 </div>
             </div>
@@ -911,7 +911,7 @@ $scopeBanner = match ($role) {
                     </div>
 
                     <div class="col-sm-6 col-md-2">
-                        <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                        <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-funnel"></i> Apply Filters
                         </button>
                     </div>
@@ -930,7 +930,7 @@ $scopeBanner = match ($role) {
                     <?= render_offering_summary(get_offering_summary($conn, $filterXiisoCourseId, (int) $filterXiisoSemesterId)) ?>
                 <?php endif; ?>
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                    <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
                         <?= htmlspecialchars($reportTitle) ?>
                         <span class="text-muted fw-normal">(<?= htmlspecialchars($reportMetaLine) ?>)</span>
                     </h6>

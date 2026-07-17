@@ -77,7 +77,7 @@ function current_user(): ?array
     require_login();
 
     $conn = db();
-    $stmt = $conn->prepare('SELECT id, username, full_name, email, role_id, faculty_id, status FROM users WHERE id = ?');
+    $stmt = $conn->prepare('SELECT id, username, full_name, email, photo_path, role_id, faculty_id, status FROM users WHERE id = ?');
     if ($stmt === false) {
         return null;
     }

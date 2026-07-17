@@ -137,6 +137,81 @@ function delete_session_row(mysqli $conn, int $sessionId, int $semesterId): arra
     return ['ok' => true, 'message' => $label . ' deleted.'];
 }
 
+/**
+ * Delete a semester — system_admin (any) or dean (own faculty only, via
+ * $deanFacultyId). Blocked if any course_offerings reference it, if any
+ * attendance record is reachable through its sessions, or if any student
+ * is still assigned to it. Sessions with no attendance yet, and the
+ * semester's own row, cascade-delete automatically (see
+ * fk_sessions_semester / fk_offerings_semester ON DELETE CASCADE) once
+ * those checks pass — no separate cleanup needed.
+ */
+function delete_semester_row(mysqli $conn, int $semesterId, string $role, int $deanFacultyId): array
+{
+    if ($role === 'dean') {
+        $semStmt = $conn->prepare('SELECT id, name, faculty_id, is_current FROM semesters WHERE id = ? AND faculty_id = ?');
+        $semStmt->bind_param('ii', $semesterId, $deanFacultyId);
+    } else {
+        $semStmt = $conn->prepare('SELECT id, name, faculty_id, is_current FROM semesters WHERE id = ?');
+        $semStmt->bind_param('i', $semesterId);
+    }
+    $semStmt->execute();
+    $semRow = $semStmt->get_result()->fetch_assoc();
+    $semStmt->close();
+
+    if (!$semRow) {
+        return ['ok' => false, 'message' => 'Semester not found.'];
+    }
+
+    $label = (string) $semRow['name'];
+
+    if ((int) $semRow['is_current'] === 1) {
+        return ['ok' => false, 'message' => $label . ' is the current semester for this faculty — set a different semester as current before deleting it.'];
+    }
+
+    $blockers = [];
+
+    $offeringCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_offerings WHERE semester_id = ?');
+    $offeringCountStmt->bind_param('i', $semesterId);
+    $offeringCountStmt->execute();
+    $offeringCount = (int) ($offeringCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $offeringCountStmt->close();
+    if ($offeringCount > 0) {
+        $blockers[] = $offeringCount . ' course offering' . ($offeringCount === 1 ? '' : 's');
+    }
+
+    $attendanceCountStmt = $conn->prepare(
+        'SELECT COUNT(*) AS c FROM attendance a JOIN sessions se ON se.id = a.session_id WHERE se.semester_id = ?'
+    );
+    $attendanceCountStmt->bind_param('i', $semesterId);
+    $attendanceCountStmt->execute();
+    $attendanceCount = (int) ($attendanceCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $attendanceCountStmt->close();
+    if ($attendanceCount > 0) {
+        $blockers[] = $attendanceCount . ' attendance record' . ($attendanceCount === 1 ? '' : 's');
+    }
+
+    $studentCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM students WHERE semester_id = ?');
+    $studentCountStmt->bind_param('i', $semesterId);
+    $studentCountStmt->execute();
+    $studentCount = (int) ($studentCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $studentCountStmt->close();
+    if ($studentCount > 0) {
+        $blockers[] = $studentCount . ' student' . ($studentCount === 1 ? '' : 's') . ' assigned to this semester';
+    }
+
+    if (!empty($blockers)) {
+        return ['ok' => false, 'message' => $label . ': still has ' . implode(', ', $blockers) . '.'];
+    }
+
+    $deleteStmt = $conn->prepare('DELETE FROM semesters WHERE id = ?');
+    $deleteStmt->bind_param('i', $semesterId);
+    $deleteStmt->execute();
+    $deleteStmt->close();
+
+    return ['ok' => true, 'message' => $label . ' deleted.'];
+}
+
 // ---------------------------------------------------------------------
 // Handle POST actions
 // ---------------------------------------------------------------------
@@ -401,6 +476,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
+    } elseif ($action === 'delete_semester') {
+        if (!in_array($role, ['system_admin', 'dean'], true)) {
+            $_SESSION['flash_error'] = 'Not permitted.';
+            redirect_to('semesters.php');
+        }
+
+        $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        $result = delete_semester_row($conn, $semesterId, $role, $deanFacultyId);
+
+        if ($result['ok']) {
+            $_SESSION['flash_success'] = $result['message'];
+        } else {
+            $_SESSION['flash_error'] = $result['message'];
+        }
+        redirect_to('semesters.php');
     }
 }
 
@@ -479,7 +569,7 @@ if ($selectedSemester) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Semesters</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Semesters</h4>
                     <p class="text-muted mb-0">Create semesters and generate their 12 Xiiso sessions (10 regular + Midterm + Final).</p>
                 </div>
             </div>
@@ -560,7 +650,7 @@ if ($selectedSemester) {
                                            value="<?= htmlspecialchars($addSemesterFormValues['end_date']) ?>">
                                 </div>
                             </div>
-                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($academicYears) ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($academicYears) ? 'disabled' : '' ?>>
                                 <i class="bi bi-plus-lg"></i> Create Semester
                             </button>
                         </form>
@@ -576,17 +666,20 @@ if ($selectedSemester) {
                                         <th>Faculty</th>
                                         <th>Academic Year</th>
                                         <th>Current</th>
+                                        <?php if ($role === 'system_admin' || $role === 'dean'): ?>
+                                            <th></th>
+                                        <?php endif; ?>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (empty($semesters)): ?>
                                         <tr>
-                                            <td colspan="4" class="text-center text-muted py-3">No semesters exist yet.</td>
+                                            <td colspan="5" class="text-center text-muted py-3">No semesters exist yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($semesters as $s): ?>
                                             <tr class="<?= (int) $s['id'] === $selectedSemesterId ? 'table-active' : '' ?>" style="cursor:pointer;" onclick="window.location='<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= (int) $s['id'] ?>'">
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($s['name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['name']) ?></td>
                                                 <td>
                                                     <?php if ($s['faculty_id'] === null): ?>
                                                         <span class="badge-pill badge-late">Unassigned</span>
@@ -605,6 +698,19 @@ if ($selectedSemester) {
                                                         <span class="badge-pill badge-inactive">—</span>
                                                     <?php endif; ?>
                                                 </td>
+                                                <?php if ($role === 'system_admin' || $role === 'dean'): ?>
+                                                    <td class="text-end">
+                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php"
+                                                              onclick="event.stopPropagation();"
+                                                              onsubmit="event.stopPropagation(); return confirm('Delete this semester? This cannot be undone.');">
+                                                            <input type="hidden" name="action" value="delete_semester">
+                                                            <input type="hidden" name="semester_id" value="<?= (int) $s['id'] ?>">
+                                                            <button type="submit" class="btn-icon text-danger" title="Delete semester" aria-label="Delete semester">
+                                                                <i class="bi bi-trash"></i>
+                                                            </button>
+                                                        </form>
+                                                    </td>
+                                                <?php endif; ?>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
@@ -623,7 +729,7 @@ if ($selectedSemester) {
                         <div class="admas-card p-4">
                             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
                                 <div>
-                                    <h6 class="fw-bold mb-1" style="color: #0b1f3a;">
+                                    <h6 class="fw-bold mb-1" style="color: var(--admas-text);">
                                         <?= htmlspecialchars($selectedSemester['name']) ?>
                                         <span class="text-muted fw-normal">(<?= htmlspecialchars($selectedSemester['academic_year_label']) ?>)</span>
                                     </h6>
@@ -646,7 +752,7 @@ if ($selectedSemester) {
                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">
                                         <input type="hidden" name="action" value="generate_sessions">
                                         <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
-                                        <button type="submit" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                        <button type="submit" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                             <i class="bi bi-magic"></i> Generate Sessions
                                         </button>
                                     </form>
@@ -703,7 +809,7 @@ if ($selectedSemester) {
                                                                    data-label="<?= htmlspecialchars($session['label']) ?>">
                                                         </td>
                                                         <td><?= (int) $session['session_number'] ?></td>
-                                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($session['label']) ?></td>
+                                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($session['label']) ?></td>
                                                         <td class="text-capitalize"><?= htmlspecialchars($session['type']) ?></td>
                                                         <td>
                                                             <input type="date" class="form-control form-control-sm" name="session_date[<?= (int) $session['id'] ?>]"
@@ -714,7 +820,7 @@ if ($selectedSemester) {
                                             </tbody>
                                         </table>
                                     </div>
-                                    <button type="submit" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                    <button type="submit" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-save"></i> Save Dates
                                     </button>
                                 </form>

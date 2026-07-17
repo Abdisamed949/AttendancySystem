@@ -144,7 +144,7 @@ if (empty($alerts)) {
                 Access scope: Full system — all faculties, departments, and courses
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's what's happening across ADMAS University today.</p>
 
             <!-- KPI Cards -->
@@ -191,13 +191,13 @@ if (empty($alerts)) {
             <div class="row g-3">
                 <div class="col-xl-8">
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Weekly Attendance Trend</h6>
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Weekly Attendance Trend</h6>
                         <canvas id="weeklyAttendanceChart" height="110"></canvas>
                     </div>
                 </div>
                 <div class="col-xl-4">
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                             <i class="bi bi-exclamation-triangle-fill text-warning"></i>
                             Attendance Alerts
                         </h6>

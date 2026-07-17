@@ -119,7 +119,7 @@ if ($ownStudentId > 0) {
                 Access scope: Own personal record only
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's a summary of your attendance this academic year.</p>
 
             <!-- KPI Cards -->
@@ -154,7 +154,7 @@ if ($ownStudentId > 0) {
             </div>
 
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">My Course Attendance</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Course Attendance</h6>
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
@@ -178,7 +178,7 @@ if ($ownStudentId > 0) {
                                     $pct = $totalMarks > 0 ? round(100 * (int) $row['present_count'] / $totalMarks, 1) : 0.0;
                                     ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
                                         <td><?= (int) $row['present_count'] ?></td>
                                         <td><?= (int) $row['absent_count'] ?></td>
                                         <td><?= (int) $row['late_count'] ?></td>

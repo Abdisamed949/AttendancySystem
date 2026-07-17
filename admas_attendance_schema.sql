@@ -43,6 +43,7 @@ CREATE TABLE users (
   password_hash  VARCHAR(255) NOT NULL,      -- use PHP password_hash()
   full_name      VARCHAR(150) NOT NULL,
   email          VARCHAR(150) NULL UNIQUE,
+  photo_path     VARCHAR(255) NULL,          -- filename only, under uploads/profile_photos/; NULL = use the initials-circle avatar
   role_id        TINYINT UNSIGNED NOT NULL,
   faculty_id     INT UNSIGNED NULL,          -- only set when role = 'dean'
   status         ENUM('active','inactive') NOT NULL DEFAULT 'active',

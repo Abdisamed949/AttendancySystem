@@ -10,6 +10,13 @@ $activeFolder = role_folder($activeRole);
 $activeScript = basename((string) ($_SERVER['SCRIPT_NAME'] ?? ''));
 $sidebarUniversityName = $settings['university_name'] ?? 'ADMAS University';
 ?>
+<script>
+    (function () {
+        if (localStorage.getItem('admas-theme') === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+        }
+    })();
+</script>
 <aside class="sidebar">
     <div class="sidebar-brand">
         <img src="<?= htmlspecialchars(BASE_URL) ?>/logo/logo.jpg" alt="<?= htmlspecialchars($sidebarUniversityName) ?> logo">

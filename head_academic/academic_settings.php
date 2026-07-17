@@ -151,7 +151,7 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Academic Settings</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Academic Settings</h4>
                     <p class="text-muted mb-0">Manage the Academic Year and the minimum attendance threshold.</p>
                 </div>
             </div>
@@ -193,7 +193,7 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
                                     <?php else: ?>
                                         <?php foreach ($academicYears as $ay): ?>
                                             <tr>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($ay['label']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($ay['label']) ?></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
@@ -206,7 +206,7 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
                             <input type="hidden" name="action" value="add_academic_year">
                             <input type="text" class="form-control" name="label" maxlength="20" placeholder="e.g. 2026/2027" required
                                    value="<?= htmlspecialchars($addYearFormValues['label']) ?>">
-                            <button type="submit" class="btn btn-primary text-nowrap" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary text-nowrap" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-plus-lg"></i> Add
                             </button>
                         </form>
@@ -227,7 +227,7 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
                                 <div class="form-text">Students below this percentage are surfaced in Notifications / Alerts.</div>
                             </div>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-save"></i> Save Threshold
                             </button>
                         </form>

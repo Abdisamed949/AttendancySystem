@@ -8,11 +8,13 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/factory_reset.php';
 
 require_role(['system_admin']);
 
 $conn = db();
 $currentUser = current_user();
+$currentUserId = (int) $currentUser['id'];
 
 // ---------------------------------------------------------------------
 // Settings (drives the sky-blue top strip + this page's own form defaults)
@@ -67,6 +69,7 @@ $scopeFormValues = [
     'default_department_id' => (int) ($settings['default_department_id'] ?? 0),
     'min_attendance_pct' => (string) ($settings['min_attendance_pct'] ?? '75'),
 ];
+$factoryResetResult = null;
 
 // ---------------------------------------------------------------------
 // Handle POST actions
@@ -188,6 +191,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
+    } elseif ($action === 'factory_reset') {
+        $currentPassword = (string) ($_POST['current_password'] ?? '');
+        $confirmPhrase = (string) ($_POST['confirm_phrase'] ?? '');
+
+        $hashStmt = $conn->prepare('SELECT password_hash FROM users WHERE id = ?');
+        $hashStmt->bind_param('i', $currentUserId);
+        $hashStmt->execute();
+        $hashRow = $hashStmt->get_result()->fetch_assoc();
+        $hashStmt->close();
+
+        $validationError = '';
+        if ($currentPassword === '' || $confirmPhrase === '') {
+            $validationError = 'Please enter your password and type the confirmation phrase.';
+        } elseif (!$hashRow || !password_verify($currentPassword, $hashRow['password_hash'])) {
+            $validationError = 'Current password is incorrect.';
+        } elseif ($confirmPhrase !== FACTORY_RESET_CONFIRM_PHRASE) {
+            $validationError = 'Confirmation phrase does not match. Nothing was changed.';
+        }
+
+        if ($validationError === '') {
+            $backup = factory_reset_run_backup();
+            if (!$backup['success']) {
+                $validationError = 'Backup failed — factory reset was NOT performed. ' . $backup['error'];
+            } else {
+                try {
+                    $resetResult = factory_reset_execute($conn);
+                    $factoryResetResult = [
+                        'backup_path' => $backup['path'],
+                        'backup_size' => $backup['size'],
+                        'counts' => $resetResult['counts'],
+                        'remaining_admins' => $resetResult['remaining_admins'],
+                    ];
+                } catch (Throwable $e) {
+                    $validationError = 'Factory reset failed and was rolled back — no data was deleted. ' . $e->getMessage();
+                }
+            }
+        }
+
+        $errorMessage = $validationError;
     }
 }
 
@@ -213,20 +255,6 @@ foreach ($departments as $d) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
-    <style>
-        .btn-icon {
-            border: none;
-            background: transparent;
-            color: #64748b;
-            padding: 0.25rem 0.4rem;
-            border-radius: 6px;
-        }
-
-        .btn-icon:hover {
-            background: var(--admas-bg);
-            color: #0b1f3a;
-        }
-    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -242,7 +270,7 @@ foreach ($departments as $d) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Settings</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Settings</h4>
                     <p class="text-muted mb-0">University information, Academic Year, default scope, and the attendance threshold.</p>
                 </div>
             </div>
@@ -262,7 +290,7 @@ foreach ($departments as $d) {
 
             <!-- University Information -->
             <div class="admas-card p-4 mb-3">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">University Information</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">University Information</h6>
                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php" class="row g-3">
                     <input type="hidden" name="action" value="save_university_info">
 
@@ -288,7 +316,7 @@ foreach ($departments as $d) {
                     </div>
 
                     <div class="col-12">
-                        <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                        <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-save"></i> Save University Information
                         </button>
                     </div>
@@ -297,7 +325,7 @@ foreach ($departments as $d) {
 
             <!-- Academic Year Settings -->
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Academic Year Settings</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Academic Year Settings</h6>
 
                 <div class="row g-4">
                     <div class="col-lg-6">
@@ -322,7 +350,7 @@ foreach ($departments as $d) {
                                     <?php else: ?>
                                         <?php foreach ($academicYears as $ay): ?>
                                             <tr>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($ay['label']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($ay['label']) ?></td>
                                             </tr>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
@@ -335,7 +363,7 @@ foreach ($departments as $d) {
                             <input type="hidden" name="action" value="add_academic_year">
                             <input type="text" class="form-control" name="label" maxlength="20" placeholder="e.g. 2026/2027" required
                                    value="<?= htmlspecialchars($addYearFormValues['label']) ?>">
-                            <button type="submit" class="btn btn-primary text-nowrap" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary text-nowrap" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-plus-lg"></i> Add
                             </button>
                         </form>
@@ -374,12 +402,78 @@ foreach ($departments as $d) {
                                 <div class="form-text">Students below this percentage are surfaced in Notifications / Alerts.</div>
                             </div>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-save"></i> Save Default Scope &amp; Threshold
                             </button>
                         </form>
                     </div>
                 </div>
+            </div>
+
+            <!-- Danger Zone: Factory Reset -->
+            <div class="admas-card p-4 mt-3 border-danger" style="border-width: 2px;">
+                <h6 class="fw-bold mb-3 text-danger"><i class="bi bi-exclamation-triangle-fill"></i> Danger Zone — Factory Reset</h6>
+
+                <?php if ($factoryResetResult !== null): ?>
+                    <div class="alert alert-success">
+                        <h6 class="fw-bold mb-2"><i class="bi bi-check-circle-fill"></i> Factory reset complete</h6>
+                        <p class="mb-1">
+                            Backup saved to
+                            <code><?= htmlspecialchars($factoryResetResult['backup_path']) ?></code>
+                            (<?= number_format($factoryResetResult['backup_size'] / 1024, 1) ?> KB).
+                        </p>
+                        <p class="mb-2">
+                            Remaining System Administrator account(s):
+                            <strong><?= htmlspecialchars(implode(', ', $factoryResetResult['remaining_admins'])) ?></strong>
+                        </p>
+                        <div class="table-responsive">
+                            <table class="table table-sm mb-0">
+                                <thead>
+                                    <tr><th>Table</th><th class="text-end">Rows deleted</th></tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($factoryResetResult['counts'] as $table => $count): ?>
+                                        <tr>
+                                            <td><code><?= htmlspecialchars($table) ?></code></td>
+                                            <td class="text-end"><?= (int) $count ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                <?php else: ?>
+                    <p class="text-muted">
+                        Permanently deletes every faculty, department, course, semester, session, student,
+                        lecturer, attendance record, notification, and non-admin user account — resetting
+                        the system to an empty shell for handover to a new university. Your own System
+                        Administrator account and login access are kept. <strong>A full database backup is
+                        taken automatically before anything is deleted</strong>, and the reset is cancelled
+                        if that backup fails. This action cannot be undone from within the app.
+                    </p>
+
+                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php" id="factoryResetForm" class="row g-3">
+                        <input type="hidden" name="action" value="factory_reset">
+
+                        <div class="col-md-6">
+                            <label for="factoryResetPasswordInput" class="form-label">Your Current Password</label>
+                            <input type="password" class="form-control" id="factoryResetPasswordInput" name="current_password" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="factoryResetPhraseInput" class="form-label">
+                                Type <code><?= htmlspecialchars(FACTORY_RESET_CONFIRM_PHRASE) ?></code> to confirm
+                            </label>
+                            <input type="text" class="form-control" id="factoryResetPhraseInput" name="confirm_phrase" autocomplete="off" required>
+                        </div>
+
+                        <div class="col-12">
+                            <button type="submit" class="btn btn-danger" id="factoryResetSubmitBtn" disabled
+                                    onclick="return confirm('This will permanently delete all institution data. This cannot be undone. Continue?');">
+                                <i class="bi bi-trash3-fill"></i> Run Factory Reset
+                            </button>
+                        </div>
+                    </form>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -415,6 +509,18 @@ foreach ($departments as $d) {
             const facultySelect = document.getElementById('defaultFacultySelect');
             updateDefaultDepartmentOptions(facultySelect.value, <?= (int) $scopeFormValues['default_department_id'] ?>);
         });
+
+        // Danger Zone: the submit button only unlocks once the phrase is
+        // typed exactly (server-side re-validates this too, since a raw POST
+        // could skip the JS entirely).
+        const factoryResetPhraseConfirm = <?= json_encode(FACTORY_RESET_CONFIRM_PHRASE) ?>;
+        const factoryResetPhraseInput = document.getElementById('factoryResetPhraseInput');
+        const factoryResetSubmitBtn = document.getElementById('factoryResetSubmitBtn');
+        if (factoryResetPhraseInput && factoryResetSubmitBtn) {
+            factoryResetPhraseInput.addEventListener('input', () => {
+                factoryResetSubmitBtn.disabled = factoryResetPhraseInput.value !== factoryResetPhraseConfirm;
+            });
+        }
     </script>
 </body>
 </html>

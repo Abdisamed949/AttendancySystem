@@ -90,7 +90,7 @@ while ($row = $fscRes->fetch_assoc()) {
                 Access scope: All faculties (cross-faculty)
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's what's happening across ADMAS University today.</p>
 
             <!-- KPI Cards -->
@@ -134,7 +134,7 @@ while ($row = $fscRes->fetch_assoc()) {
             </div>
 
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Attendance by Faculty</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Faculty</h6>
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
@@ -153,7 +153,7 @@ while ($row = $fscRes->fetch_assoc()) {
                                 <?php foreach ($faculties as $f): ?>
                                     <?php $fid = (int) $f['id']; ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($f['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
                                         <td><?= number_format($studentCountByFaculty[$fid] ?? 0) ?></td>
                                         <td>
                                             <?php if (isset($avgAttendanceByFaculty[$fid])): ?>

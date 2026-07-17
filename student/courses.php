@@ -141,7 +141,7 @@ if (!empty($courseIds)) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">My Courses</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">My Courses</h4>
                     <p class="text-muted mb-0">Courses you're enrolled in and your attendance % in each.</p>
                 </div>
             </div>
@@ -170,7 +170,7 @@ if (!empty($courseIds)) {
                                     ?>
                                     <tr>
                                         <td><span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span></td>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($c['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['name']) ?></td>
                                         <td>
                                             <?php if ($c['lecturer_name']): ?>
                                                 <?= htmlspecialchars($c['lecturer_name']) ?>

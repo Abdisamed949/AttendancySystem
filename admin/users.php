@@ -333,19 +333,6 @@ $allUsers = $conn->query(
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
     <style>
-        .btn-icon {
-            border: none;
-            background: transparent;
-            color: #64748b;
-            padding: 0.25rem 0.4rem;
-            border-radius: 6px;
-        }
-
-        .btn-icon:hover {
-            background: var(--admas-bg);
-            color: #0b1f3a;
-        }
-
         .role-info-table th, .role-info-table td {
             font-size: 0.85rem;
             vertical-align: top;
@@ -366,7 +353,7 @@ $allUsers = $conn->query(
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">User Management</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">User Management</h4>
                     <p class="text-muted mb-0">Appoint elevated roles and manage every login account in the system.</p>
                 </div>
             </div>
@@ -393,7 +380,7 @@ $allUsers = $conn->query(
             <div class="collapse mb-3" id="roleReferenceCollapse">
                 <!-- System Roles & Responsibilities -->
                 <div class="admas-card p-4 mb-3">
-                    <h6 class="fw-bold mb-3" style="color: #0b1f3a;">System Roles &amp; Responsibilities</h6>
+                    <h6 class="fw-bold mb-3" style="color: var(--admas-text);">System Roles &amp; Responsibilities</h6>
                     <div class="table-responsive">
                         <table class="table role-info-table align-middle mb-0">
                             <thead>
@@ -407,7 +394,7 @@ $allUsers = $conn->query(
                             <tbody>
                                 <?php foreach (ROLE_INFO as $ri): ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($ri['role']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($ri['role']) ?></td>
                                         <td><?= htmlspecialchars($ri['scope']) ?></td>
                                         <td><?= htmlspecialchars($ri['can']) ?></td>
                                         <td class="text-muted"><?= htmlspecialchars($ri['cannot']) ?></td>
@@ -419,7 +406,7 @@ $allUsers = $conn->query(
                 </div>
 
                 <div class="admas-card p-4">
-                    <h6 class="fw-bold mb-3" style="color: #0b1f3a;">How Role Assignment Works</h6>
+                    <h6 class="fw-bold mb-3" style="color: var(--admas-text);">How Role Assignment Works</h6>
                     <ul class="text-muted small mb-0 ps-3">
                         <li class="mb-2">Only lecturers and students can be appointed from here — anyone already Dean, Head of Academic Affairs, Registration Office, or System Administrator must have their role changed by editing that account directly.</li>
                         <li class="mb-2">Appointing a Dean to a faculty automatically releases whichever user previously held that faculty's Dean role.</li>
@@ -431,7 +418,7 @@ $allUsers = $conn->query(
 
             <!-- Assign Role panel -->
             <div class="admas-card p-4 mb-3">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Assign Role</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Assign Role</h6>
                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/users.php">
                     <input type="hidden" name="action" value="assign_role">
 
@@ -488,7 +475,7 @@ $allUsers = $conn->query(
                         <div class="form-text">Required only when appointing a Dean.</div>
                     </div>
 
-                    <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                    <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                         <i class="bi bi-person-check"></i> Save Appointment
                     </button>
                 </form>
@@ -496,7 +483,7 @@ $allUsers = $conn->query(
 
             <!-- System Users table -->
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">System Users</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">System Users</h6>
 
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
@@ -520,7 +507,7 @@ $allUsers = $conn->query(
                                 <?php foreach ($allUsers as $u): ?>
                                     <tr>
                                         <td><?= htmlspecialchars($u['username']) ?></td>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($u['full_name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($u['full_name']) ?></td>
                                         <td><?= htmlspecialchars(role_label($u['role_name'])) ?></td>
                                         <td>
                                             <?php if ($u['faculty_name']): ?>

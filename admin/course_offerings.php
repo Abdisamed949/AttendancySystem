@@ -241,7 +241,7 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">
                         Manage Offerings — <?= htmlspecialchars($course['code'] . ' — ' . $course['name']) ?>
                     </h4>
                     <?= render_scope_breadcrumb([
@@ -289,7 +289,7 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                                     <?php else: ?>
                                         <?php foreach ($offerings as $o): ?>
                                             <tr>
-                                                <td class="fw-semibold" style="color: #0b1f3a;">
+                                                <td class="fw-semibold" style="color: var(--admas-text);">
                                                     <?= htmlspecialchars($o['semester_name']) ?>
                                                     <?php if ((int) $o['is_current'] === 1): ?>
                                                         <span class="badge-pill badge-active">Current</span>
@@ -383,7 +383,7 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                             </div>
                             <div class="form-text">Optional — this course's actual teaching period within the selected semester.</div>
 
-                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($semesters) ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($semesters) ? 'disabled' : '' ?>>
                                 <i class="bi bi-save"></i> Save Offering
                             </button>
                         </form>

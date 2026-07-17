@@ -178,7 +178,7 @@ if ($currentAcademicYearId > 0) {
                 Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's what's happening in <?= htmlspecialchars($deanFacultyName) ?> today.</p>
 
             <!-- KPI Cards -->
@@ -224,7 +224,7 @@ if ($currentAcademicYearId > 0) {
             <div class="row g-3">
                 <div class="col-xl-8">
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Departments in My Faculty</h6>
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Departments in My Faculty</h6>
                         <div class="table-responsive">
                             <table class="table admas-table align-middle">
                                 <thead>
@@ -244,7 +244,7 @@ if ($currentAcademicYearId > 0) {
                                         <?php foreach ($departmentRows as $d): ?>
                                             <?php $deptId = (int) $d['id']; ?>
                                             <tr>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($d['name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($d['name']) ?></td>
                                                 <td><?= number_format($studentCountByDept[$deptId] ?? 0) ?></td>
                                                 <td><?= number_format($lecturerCountByDept[$deptId] ?? 0) ?></td>
                                                 <td>
@@ -264,7 +264,7 @@ if ($currentAcademicYearId > 0) {
                 </div>
                 <div class="col-xl-4">
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                             <i class="bi bi-exclamation-triangle-fill text-warning"></i>
                             Low Attendance — My Faculty
                         </h6>

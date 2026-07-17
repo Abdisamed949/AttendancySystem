@@ -227,7 +227,7 @@ foreach ($academicYears as $ay) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">My Courses</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">My Courses</h4>
                     <p class="text-muted mb-0">Courses assigned to you, filterable by Academic Year, Faculty, and Department.</p>
                 </div>
             </div>
@@ -275,7 +275,7 @@ foreach ($academicYears as $ay) {
             </div>
 
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                     Courses
                     <?php if ($currentAcademicYearLabel !== ''): ?>
                         <span class="text-muted fw-normal">(sessions shown for <?= htmlspecialchars($currentAcademicYearLabel) ?>)</span>
@@ -303,7 +303,7 @@ foreach ($academicYears as $ay) {
                                 <?php foreach ($courses as $c): ?>
                                     <?php $stats = $sessionStatsByCourse[(int) $c['id']] ?? null; ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
                                         <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                         <td><?= number_format((int) $c['student_count']) ?></td>
@@ -316,7 +316,7 @@ foreach ($academicYears as $ay) {
                                             <?php endif; ?>
                                         </td>
                                         <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                 <i class="bi bi-calendar2-check"></i> Take Attendance
                                             </a>
                                         </td>

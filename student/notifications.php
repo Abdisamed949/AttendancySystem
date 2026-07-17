@@ -100,14 +100,14 @@ $unreadCount = count(array_filter($notifications, static fn ($n) => (int) $n['is
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">My Notifications</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">My Notifications</h4>
                     <p class="text-muted mb-0">Attendance alerts your Dean, Head of Academic Affairs, or the System Administrator have raised for you.</p>
                 </div>
             </div>
 
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                    <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Alerts</h6>
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Alerts</h6>
                     <span class="badge-pill badge-inactive"><?= (int) $unreadCount ?> unread</span>
                 </div>
 

@@ -84,6 +84,9 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
         <input type="text" placeholder="Search...">
     </div>
     <div class="topbar-right">
+        <button type="button" id="themeToggleBtn" class="theme-toggle-btn" aria-label="Toggle dark mode" title="Toggle dark mode">
+            <i class="bi bi-moon-stars" id="themeToggleIcon"></i>
+        </button>
         <?php if ($notifLinkUrl !== null): ?>
             <a href="<?= htmlspecialchars($notifLinkUrl) ?>" class="notif-bell" aria-label="Notifications">
                 <i class="bi bi-bell"></i>
@@ -97,7 +100,11 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
             </button>
         <?php endif; ?>
         <div class="topbar-user">
-            <div class="avatar-initials"><?= htmlspecialchars($initials) ?></div>
+            <?php if (!empty($currentUser['photo_path'])): ?>
+                <img class="avatar-photo" width="42" height="42" src="<?= htmlspecialchars(BASE_URL) ?>/uploads/profile_photos/<?= htmlspecialchars((string) $currentUser['photo_path']) ?>" alt="">
+            <?php else: ?>
+                <div class="avatar-initials"><?= htmlspecialchars($initials) ?></div>
+            <?php endif; ?>
             <div class="user-meta">
                 <span class="user-name"><?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></span>
                 <span class="user-role"><?= htmlspecialchars($roleLabel) ?></span>
@@ -108,3 +115,4 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
         </a>
     </div>
 </div>
+<script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/theme_toggle.js"></script>

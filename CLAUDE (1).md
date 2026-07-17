@@ -61,7 +61,7 @@ Six roles, ranked by scope (widest to narrowest):
 
 | Role | Scope | Can do | Cannot do |
 |---|---|---|---|
-| **System Administrator** | Whole system | Full technical control: all CRUD, User Management, role appointment, system Settings, Notification thresholds, backups | — |
+| **System Administrator** | Whole system | Full technical control: all CRUD, User Management, role appointment, system Settings, Notification thresholds, backups (incl. Settings → Danger Zone factory reset for handover, with an automatic pre-wipe `mysqldump` backup) | — |
 | **Head of Academic Affairs** | All faculties | Set Academic Year & minimum attendance threshold; view cross-faculty reports; **register new Lecturer accounts** | Cannot manage students, delete accounts, or edit system Settings |
 | **Registration Office** | All faculties | Add/edit students, bulk Excel import of students, enrollment reports | No access to Attendance or Settings |
 | **Dean** | **Own faculty only** | Full CRUD on Departments, Courses, Lecturers, Students, Attendance *within their faculty*; faculty-scoped reports | Cannot view/edit other faculties, no system Settings, no User Management |
@@ -2151,9 +2151,300 @@ data/configuration task for the university admin, not further code work.
         between sessions, e.g. the bulk-delete-courses feature, not
         anything from this phase.)
 
+### Danger Zone: Factory Reset (handover feature)
+- [x] Built a permanent, self-service, `system_admin`-only "Danger Zone"
+      on `admin/settings.php` that wipes all institution-specific and test
+      data down to an empty shell for handover to a real university —
+      keeping only System Administrator login access, the `roles` lookup
+      table, and the schema itself. Not a one-off script: stays in the app
+      for reuse with future universities.
+      - **New `includes/factory_reset.php`**:
+        `factory_reset_run_backup()` runs a full `mysqldump` (via
+        `proc_open`, password passed through the `MYSQL_PWD` env var
+        rather than a `-p` CLI arg so it never appears in a process
+        listing — this app's first process-exec code) to a timestamped
+        file under `C:\xampp\backups\admas_attendance\` (created
+        recursively if missing, outside `htdocs`, never web-servable);
+        aborts and deletes any partial file if the dump fails or comes
+        back empty. `factory_reset_execute()` deletes rows in FK-safe
+        order inside one transaction (rollback on any failure — no
+        partial wipe): `course_offerings` → `course_enrollments` →
+        `attendance` → `notifications` → `password_resets` →
+        `role_assignments` → `sessions` → `courses` → `students` →
+        `semesters` → `lecturers` → `users` (all except
+        `role_id` = system_admin) → `departments` → `academic_years` →
+        `faculties`. `roles` is never touched. Also resets the `settings`
+        keys that would otherwise dangle-reference deleted rows —
+        `university_name`/`campus`/`contact_email`/`contact_phone` to
+        blank, `default_faculty_id`/`default_department_id` to `'0'`,
+        `current_academic_year_id`/`current_semester_id` to `''` —
+        leaving `min_attendance_pct` untouched as a policy default.
+      - **`admin/settings.php`**: new red-bordered "Danger Zone" card
+        after Academic Year Settings. Requires typing the exact phrase
+        `FACTORY RESET` (submit button starts `disabled`, JS unlocks it
+        only on an exact match) **and** re-entering the acting admin's
+        own current password, verified server-side with
+        `password_verify()` against a freshly-fetched hash (same pattern
+        as `admin/profile.php`'s change-password flow) — both re-checked
+        server-side regardless of the JS gate, since a raw POST can skip
+        it. On success, runs the backup first and refuses to wipe
+        anything if it fails; on a full success, renders a report
+        directly on the page (backup path/size, per-table row-deleted
+        counts, remaining `system_admin` username(s)) instead of
+        redirecting, since there's a one-time report to show.
+      - **Verified end-to-end against the real dev DB** (captured a
+        manual safety-net `mysqldump` snapshot first): confirmed the
+        submit button stays disabled until the phrase is typed exactly;
+        confirmed a wrong password and, separately, a wrong phrase are
+        both rejected server-side with zero rows changed (row counts
+        checked before/after both attempts); ran a real reset and
+        confirmed every table in the delete order was emptied except
+        `roles` (6) and the surviving `admin01` row, `settings` values
+        blanked/zeroed as designed with `min_attendance_pct` unchanged,
+        the on-page report's counts matched the actual pre-reset counts
+        exactly, the backup file existed and was non-empty, and — the
+        deeper check — restoring that backup into a scratch database
+        reproduced the exact pre-reset row counts (331 users, 149
+        attendance, 44 students, 4 faculties); confirmed the acting
+        admin's own session stayed valid and could still load
+        `admin/settings.php`/`admin/dashboard.php` after the wipe.
+        Cleaned up afterward: dropped the scratch restore-test database,
+        deleted the test run's backup file and the manual safety-net
+        snapshot, and restored the real dev DB from that safety-net
+        snapshot — confirmed every table's row count back to the exact
+        pre-test baseline.
+      - No schema migration needed — pure delete/update logic, no new
+        columns or tables.
+
+### Semester Delete
+- [x] Added a Delete action to `semesters.php`'s "All Semesters" list, for
+      `system_admin` (any semester) and `dean` (own faculty only, same
+      scoping already enforced elsewhere on this page) — `head_academic`
+      does not get the button, and a crafted POST from that role is
+      rejected server-side with "Not permitted."
+      - New `delete_semester_row()` follows the exact same
+        "block if dependents exist" shape as
+        `delete_department_row()`/`delete_course_row()`/
+        `delete_lecturer_row()`: scoped `SELECT` first (dean-owned or not
+        found), then blocker counts, then `DELETE`.
+      - **Blockers, exactly as requested**: any `course_offerings` row for
+        the semester, or any `attendance` row reachable through its
+        `sessions`. Sessions with zero attendance are left alone to
+        cascade-delete automatically with the semester
+        (`fk_sessions_semester`/`fk_offerings_semester` are both
+        `ON DELETE CASCADE`) — no separate bulk-delete-sessions step
+        needed first.
+      - **Two additional blockers found during investigation and added
+        beyond the literal request** (flagged to and confirmed by the
+        user before building): `students.semester_id` has no
+        `ON DELETE` clause (RESTRICT) — without an app-level check, a
+        semester with any student still assigned would fail with a raw
+        SQL constraint error instead of a friendly message, so a
+        `students` count blocker was added. Deleting a faculty's
+        `is_current = 1` semester would silently break
+        `get_current_semester()` for every attendance/report page
+        depending on it, so that's now blocked outright with "set a
+        different semester as current before deleting it."
+      - Confirmation is a plain `onsubmit="return confirm(...)"` dialog
+        (same severity/pattern as Faculty/Department/Course/Lecturer
+        delete elsewhere) — not the Danger-Zone typed-phrase pattern,
+        which is reserved for the full factory reset.
+      - **Verified end-to-end** via a temporary `system_admin` account (and
+        a temporary `dean` + temporary second faculty for the cross-faculty
+        check): built five disposable test semesters exercising each path —
+        course_offerings blocker, students blocker, attendance-via-sessions
+        blocker, is_current blocker (all four correctly rejected with the
+        exact expected message and zero DB change), and one dependency-free
+        semester that deleted cleanly with its 12 generated-but-unused
+        sessions cascading away automatically; confirmed `head_academic`
+        never sees the button and a crafted POST is rejected; confirmed a
+        temporary dean scoped to a different faculty can't see or delete a
+        semester belonging to faculty "informatic" (crafted POST rejected
+        with "Semester not found", zero DB change). Cleaned up afterward:
+        all temp semesters/course/student/accounts/faculty removed;
+        confirmed the real `semester1` (faculty "informatic") and its
+        `is_current = 1` flag were untouched throughout, and `users`/
+        `semesters`/`faculties` counts back to the pre-test baseline (2/1/1).
+      - No schema migration needed.
+
+### Profile Photo Upload
+- [x] Implemented exactly as previously scoped in Deferred Decisions:
+      `users.photo_path VARCHAR(255) NULL` (filename only, not a full
+      path), upload control on each role's own Profile & Password page,
+      replacing the initials-circle avatar in both the topbar
+      (`includes/topbar.php`) and on the profile page itself once a photo
+      exists. Admin list tables remain text-only — no thumbnails added
+      anywhere else.
+      - **Schema**: `migrations/2026_08_users_photo_path.sql`, mirrored
+        into `admas_attendance_schema.sql`; `includes/auth.php`'s
+        `current_user()` SELECT extended to include it.
+      - **New `includes/profile_photo.php`**: `save_profile_photo()`
+        validates via `getimagesize()` — real image-content detection,
+        never the client-supplied filename or MIME type — against an
+        allowed-type map (JPEG/PNG/GIF/WEBP), enforces a 5MB cap, and
+        saves under `uploads/profile_photos/` with a
+        `bin2hex(random_bytes(16))` filename (client filename discarded
+        entirely). `delete_old_profile_photo()` best-effort removes the
+        previous file whenever a new one is saved, so replaced photos
+        don't accumulate on disk forever (not explicitly requested, added
+        for correctness).
+      - **New `uploads/profile_photos/.htaccess`**: denies execution of
+        `.php`/`.php\d`/`.phtml`/`.pht` — created directly (not
+        runtime-`mkdir`'d) so the directory is never live without it.
+        Confirmed effective: `AllowOverride All` is set on `C:/xampp/htdocs`
+        in `httpd.conf`, and a live test PHP file placed in the directory
+        returned 403 and never executed, both before and after all upload
+        testing. This is the first `.htaccess` file anywhere in this
+        project — no prior convention existed to reuse.
+      - **All six `*/profile.php`** (admin, dean, head_academic,
+        registration, lecturer, student) got the identical change: a new
+        `upload_photo` POST action, and a new small photo block at the top
+        of the existing "Profile Information" card — current photo (or
+        initials fallback, reusing the exact `$initials` variable already
+        computed by `includes/topbar.php`, since `include` shares scope) —
+        with a camera-icon label opening the file picker. New shared
+        `assets/js/profile_photo.js` (same convention as the existing
+        `bulk_delete.js`/`password-toggle.js`) handles the client-side
+        live preview (`FileReader`) and enables the "Change Photo" submit
+        button only once a file is chosen; server-side re-validates
+        everything regardless.
+      - **Verified end-to-end** via temporary `system_admin` and `student`
+        accounts: confirmed all four allowed formats (JPG/PNG/GIF/WEBP)
+        upload successfully and immediately replace the initials avatar on
+        both the profile page and the topbar; confirmed a text file
+        renamed to `.jpg` is rejected server-side with "Please upload a
+        JPG, PNG, GIF, or WEBP image." despite passing the client-side
+        extension filter; confirmed a 6MB file is rejected with "Image
+        must be 5MB or smaller."; confirmed each successful re-upload
+        deletes the previous file from disk (checked the actual directory
+        listing between uploads); confirmed the `.htaccess` protection
+        survived all of the above. Cleaned up afterward: removed all
+        uploaded test photos, the temp accounts, and the temp student row;
+        `uploads/profile_photos/` confirmed empty except `.htaccess`, and
+        `users`/`students` counts back to the pre-test baseline (2/0).
+
+### Profile Photo Circle/Border Follow-up
+- [x] Fixed two visual bugs reported after the Profile Photo Upload
+      feature above went live: the topbar avatar rendered as a stretched
+      rectangle instead of a cropped circle (root cause: the user was
+      viewing a browser-cached copy of `app.css` from before the
+      `.avatar-photo` rule existed — confirmed via direct curl fetches of
+      the live server response, bypassing any browser cache, that the
+      served HTML/CSS were already correct; a hard refresh resolved it).
+      Hardened anyway rather than relying on "just don't cache": added
+      explicit `width`/`height` HTML attributes (not just CSS) to every
+      place the photo renders — `includes/topbar.php` (42px) and all six
+      `*/profile.php` preview images plus `assets/js/profile_photo.js`'s
+      dynamically-created live-preview `<img>` (72px) — and a `display:
+      block` on `.avatar-photo`. Also added a 2px `var(--admas-sky)`
+      border ring around the circular photo in all of the same places
+      (topbar, profile-page preview, and the JS live-preview element), per
+      a follow-up request, for a consistent branded look wherever the
+      photo appears. Verified live via temporary accounts + a
+      deliberately non-square (400×100, later 50×50) test image at each
+      step, confirming the rendered HTML always carries the explicit
+      `width`/`height` attributes and the border/circle CSS, cleaning up
+      test accounts/files afterward each time.
+
+### Dark / Night Mode
+- [x] Added an app-wide dark/night mode toggle, persisted per-browser via
+      `localStorage` (no schema change — no existing per-user preference
+      mechanism existed to extend, and none was needed).
+      - **`assets/css/app.css`**: expanded `:root` from 4 to 10 custom
+        properties (`--admas-surface`, `--admas-text`, `--admas-text-
+        muted`, `--admas-text-faint`, `--admas-border`, `--admas-shadow`,
+        `--admas-tint-opacity`, `--admas-scope-bg`, `--admas-scope-text`,
+        alongside the existing `--admas-sky`/`--admas-navy-*`/`--admas-
+        bg`), plus a `[data-theme="dark"]` block redefining all of them.
+        Every rule in the file that previously hardcoded a surface/text/
+        border color now references the matching variable instead —
+        ~51 raw-hex declarations rewritten. Status/badge/KPI-icon tint
+        backgrounds (`.badge-present`, `.kpi-icon.bg-*`, `.grid-cell[data-
+        status=...]`, etc.) switched from fixed `rgba(...)` to the modern
+        `rgb(r g b / var(--admas-tint-opacity))` syntax, with the opacity
+        itself bumped from 0.12 to 0.22 in dark mode — a flat opacity
+        percentage that read fine as a light wash on white goes nearly
+        invisible on a dark surface, so this was necessary, not just
+        mechanical substitution (flagged as a judgment call needing visual
+        confirmation, same as everything below). The 8 duplicated
+        `.btn-icon` `<style>` blocks that used to live separately in
+        `admin/settings.php`, `admin/departments.php`, `admin/lecturers.php`,
+        `semesters.php`, `admin/students.php`, `admin/courses.php`,
+        `admin/users.php`, and `admin/faculties.php` were extracted into
+        one shared rule here and removed from all 8 source files
+        (`admin/faculties.php`'s and `admin/users.php`'s own *extra* rules
+        in those same blocks — `.faculty-summary-*`, `.role-info-table` —
+        were kept, just with their colors also switched to variables).
+      - **Toggle mechanism**: `includes/topbar.php` gained a moon/sun
+        icon button (`#themeToggleBtn`) in `.topbar-right`, plus a
+        `<script src=".../assets/js/theme_toggle.js">` at the end of the
+        same partial — since every one of the 34 in-app pages already
+        includes `topbar.php` identically, this reached every page with
+        zero per-page edits. New `assets/js/theme_toggle.js` (same
+        self-contained-IIFE convention as `profile_photo.js`/`password-
+        toggle.js`) reads/writes `localStorage['admas-theme']` and
+        toggles `data-theme="dark"` on `<html>`. `includes/sidebar.php`
+        (the earliest shared include point, right after `<body>` opens)
+        gained a tiny synchronous inline script that applies the saved
+        theme immediately, to minimize (not fully eliminate) a flash of
+        the wrong theme on first paint — full elimination would need
+        editing all 37 pages' individual `<head>` blocks, since no shared
+        `<head>` partial exists in this app; accepted as a deliberate
+        trade-off.
+      - **The ~194 inline `style="..."` hardcoded colors across 34 files**
+        (194 minus the ~13 that lived inside the now-removed `.btn-icon`
+        blocks) were swept with a scripted find-replace of the two exact
+        dominant literal strings — `style="color: #0b1f3a;"` (115
+        matches) → `style="color: var(--admas-text);"`, and `style=
+        "background-color: #0ea5e9; border-color: #0ea5e9;"` (63
+        matches) → the same pair with `var(--admas-sky)` — verified by
+        grep count before/after to confirm the exact expected number of
+        replacements with nothing missed or over-matched. The one
+        remaining miscellaneous instance (`reports.php`'s "No data for
+        the selected filters" row) was fixed by hand.
+      - **Explicitly excluded, on purpose**: `login.php`,
+        `forgot_password.php`, `reset_password.php` (no `sidebar.php`/
+        `topbar.php` include, so no toggle is reachable there — they keep
+        their fixed sky gradient always) and `reports.php`'s
+        `render_report_pdf_html()` print/PDF export stylesheet (printed
+        output should stay light/print-appropriate regardless of the live
+        UI theme). `admin/dashboard.php`'s Chart.js line-color config
+        (`#0ea5e9` in the Weekly Attendance Trend chart) was also left
+        untouched — a known, minor, non-blocking gap noted here for
+        anyone revisiting: the color still reads fine on a dark
+        background, it just isn't dynamically theme-aware.
+      - **Verified programmatically** (no browser/screenshot tool
+        available): `php -l` on all 36 touched files; grep sweeps
+        confirming zero remaining occurrences of either target literal
+        string anywhere in the app, and confirming the `[data-theme=
+        "dark"]` block plus all 10 variables exist in the served
+        `app.css`; curl smoke tests across 10 pages spanning `system_admin`
+        and `student` roles confirming 200 responses, `themeToggleBtn`
+        present in the rendered HTML, and no PHP warnings/fatals in the
+        output. **Final visual confirmation (contrast, the tint-opacity
+        judgment call, overall polish in both themes) still needs the
+        user's own screenshots** — flagged explicitly as an open item
+        pending their review, same limitation as the earlier avatar-photo
+        rendering bug in this session.
+      - No schema migration needed.
+
 ### Deferred Decisions
-- **Profile photo upload** (`users.photo_path`, upload on Profile &
-  Password page, camera icon + preview, topbar/profile display only,
-  admin list tables stay text-only) was scoped and ready to build but
-  deferred by the user — revisit when requested.
+- **Student ID as username/password scheme**: scoped but paused before
+  implementation — the user's request assumed a "Student ID" field
+  already exists as an admin-typed form input (e.g. "1472/23"), but
+  investigation found `students.student_no` is actually auto-generated
+  today (`generate_student_no()` in `includes/lecturer_accounts.php`,
+  format `ADM-2026-0001`) with no such field anywhere in
+  `admin/students.php` or `admin/students_import.php`. Option identified
+  and recommended: repurpose `student_no` into a free-text, admin-typed
+  required field instead of auto-generating it, since it's already the
+  one identifier displayed/searched everywhere (rosters, reports,
+  notifications) — revisit when requested. Separately confirmed
+  `must_change_password` **already exists and works end-to-end** in this
+  app today (`users.must_change_password` defaults to 1 in the schema;
+  `login.php` and `require_role()` in `includes/auth.php` both force a
+  redirect to the role's own `profile.php` while it's set; every role's
+  `profile.php` plus `reset_password.php` clears it on a successful
+  password change) — so when this is revisited, that prerequisite is
+  already satisfied and doesn't need to be rebuilt.
 

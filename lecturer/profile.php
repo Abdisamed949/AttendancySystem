@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/profile_photo.php';
 
 require_role(['lecturer']);
 
@@ -167,6 +168,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
+    } elseif ($action === 'upload_photo') {
+        $result = save_profile_photo($_FILES['photo'] ?? []);
+
+        if (!$result['success']) {
+            $errorMessage = $result['error'];
+        } else {
+            $oldPhotoStmt = $conn->prepare('SELECT photo_path FROM users WHERE id = ?');
+            $oldPhotoStmt->bind_param('i', $currentUserId);
+            $oldPhotoStmt->execute();
+            $oldPhotoRow = $oldPhotoStmt->get_result()->fetch_assoc();
+            $oldPhotoStmt->close();
+
+            $updateStmt = $conn->prepare('UPDATE users SET photo_path = ? WHERE id = ?');
+            $updateStmt->bind_param('si', $result['filename'], $currentUserId);
+            $updateStmt->execute();
+            $updateStmt->close();
+
+            delete_old_profile_photo($oldPhotoRow['photo_path'] ?? null);
+
+            $_SESSION['flash_success'] = 'Profile photo updated successfully.';
+            redirect_to('lecturer/profile.php');
+        }
     }
 }
 ?>
@@ -194,7 +217,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Profile &amp; Password</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Profile &amp; Password</h4>
                     <p class="text-muted mb-0">Manage your own account details, username, and password.</p>
                 </div>
             </div>
@@ -221,7 +244,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <!-- Profile Information -->
             <div class="admas-card p-4 mb-3">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Profile Information</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Profile Information</h6>
+
+                <form method="post" enctype="multipart/form-data" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/profile.php" class="d-flex align-items-center gap-3 mb-4">
+                    <input type="hidden" name="action" value="upload_photo">
+                    <div class="position-relative" style="width: 72px; height: 72px;">
+                        <?php if (!empty($currentUser['photo_path'])): ?>
+                            <img id="profilePhotoPreview" class="rounded-circle" width="72" height="72" style="width: 72px; height: 72px; object-fit: cover; border: 2px solid var(--admas-sky);"
+                                 src="<?= htmlspecialchars(BASE_URL) ?>/uploads/profile_photos/<?= htmlspecialchars((string) $currentUser['photo_path']) ?>" alt="">
+                        <?php else: ?>
+                            <div id="profilePhotoPreview" class="d-flex align-items-center justify-content-center rounded-circle"
+                                 style="width: 72px; height: 72px; background: var(--admas-sky); color: #fff; font-weight: 700; font-size: 1.3rem;">
+                                <?= htmlspecialchars($initials) ?>
+                            </div>
+                        <?php endif; ?>
+                        <label for="profilePhotoInput" class="d-flex align-items-center justify-content-center position-absolute rounded-circle bg-white border"
+                               style="width: 26px; height: 26px; bottom: -2px; right: -2px; cursor: pointer;" title="Change photo">
+                            <i class="bi bi-camera-fill small"></i>
+                        </label>
+                        <input type="file" id="profilePhotoInput" name="photo" accept="image/jpeg,image/png,image/gif,image/webp" class="d-none">
+                    </div>
+                    <div>
+                        <button type="submit" id="profilePhotoSaveBtn" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" disabled>
+                            <i class="bi bi-upload"></i> Change Photo
+                        </button>
+                        <div class="form-text mb-0">JPG, PNG, GIF, or WEBP. Max 5MB.</div>
+                    </div>
+                </form>
+
                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/profile.php" class="row g-3">
                     <input type="hidden" name="action" value="update_profile">
 
@@ -237,7 +287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
 
                     <div class="col-12">
-                        <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                        <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-save"></i> Save Changes
                         </button>
                     </div>
@@ -248,7 +298,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="col-lg-6">
                     <!-- Change Username -->
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Change Username</h6>
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Change Username</h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/profile.php">
                             <input type="hidden" name="action" value="change_username">
 
@@ -259,7 +309,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <div class="form-text">Used to sign in — must be unique across all accounts.</div>
                             </div>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-person-badge"></i> Save Username
                             </button>
                         </form>
@@ -269,7 +319,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="col-lg-6">
                     <!-- Change Password -->
                     <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Change Password</h6>
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Change Password</h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/profile.php">
                             <input type="hidden" name="action" value="change_password">
 
@@ -302,7 +352,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 </div>
                             </div>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-key"></i> Change Password
                             </button>
                         </form>
@@ -314,5 +364,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/password-toggle.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/profile_photo.js"></script>
 </body>
 </html>

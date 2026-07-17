@@ -46,9 +46,9 @@ $ownDashboardUrl = BASE_URL . '/' . role_folder(current_role()) . '/dashboard.ph
         <div class="page-body">
             <div class="admas-card p-5 text-center" style="max-width: 560px; margin: 3rem auto;">
                 <i class="bi bi-shield-lock" style="font-size: 3rem; color: #dc2626;"></i>
-                <h4 class="fw-bold mt-3 mb-2" style="color: #0b1f3a;">Access Denied</h4>
+                <h4 class="fw-bold mt-3 mb-2" style="color: var(--admas-text);">Access Denied</h4>
                 <p class="text-muted mb-4">You don't have permission to view that page with your current role.</p>
-                <a href="<?= htmlspecialchars($ownDashboardUrl) ?>" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                <a href="<?= htmlspecialchars($ownDashboardUrl) ?>" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                     <i class="bi bi-speedometer2"></i> Back to My Dashboard
                 </a>
             </div>

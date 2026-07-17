@@ -73,7 +73,7 @@ $recentStudents = $conn->query(
                 Access scope: All faculties — enrollment-focused
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's the latest student registration activity across ADMAS University.</p>
 
             <!-- KPI Cards -->
@@ -118,12 +118,12 @@ $recentStudents = $conn->query(
 
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                    <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Recent Student Registrations</h6>
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Recent Student Registrations</h6>
                     <div class="d-flex gap-2">
                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-outline-secondary btn-sm">
                             <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                         </a>
-                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-plus-lg"></i> Add Student
                         </a>
                     </div>
@@ -149,7 +149,7 @@ $recentStudents = $conn->query(
                                 <?php foreach ($recentStudents as $s): ?>
                                     <tr>
                                         <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($s['full_name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
                                         <td><?= htmlspecialchars($s['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($s['department_name']) ?></td>
                                         <td><?= htmlspecialchars(date('M j, Y', strtotime((string) $s['created_at']))) ?></td>

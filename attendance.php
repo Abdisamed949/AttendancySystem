@@ -514,7 +514,7 @@ $scopeBanner = match ($role) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Attendance</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Attendance</h4>
                     <p class="text-muted mb-0">Select a course and date, load the roster, then mark each student's status.</p>
                 </div>
                 <div class="btn-group" role="group" aria-label="Attendance marking mode">
@@ -674,7 +674,7 @@ $scopeBanner = match ($role) {
                             </div>
 
                             <div class="col-sm-6 col-md-3">
-                                <button type="submit" name="load" value="1" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                <button type="submit" name="load" value="1" class="btn btn-primary btn-sm w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                     <i class="bi bi-arrow-repeat"></i> Load Students
                                 </button>
                             </div>
@@ -697,7 +697,7 @@ $scopeBanner = match ($role) {
                         ]) ?>
                         <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0))) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
+                            <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
                                 Roster — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
                                 <span class="text-muted fw-normal">(<?= htmlspecialchars(SHIFT_LABELS[$filterShift]) ?>, <?= htmlspecialchars($sessionById[$filterSessionId]['label']) ?>)</span>
                             </h6>
@@ -742,7 +742,7 @@ $scopeBanner = match ($role) {
                                                     <?= htmlspecialchars($r['student_no']) ?>
                                                     <input type="hidden" name="student_ids[]" value="<?= $sid ?>">
                                                 </td>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($r['full_name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($r['full_name']) ?></td>
                                                 <?php foreach (STATUS_LABELS as $statusKey => $statusLabel): ?>
                                                     <td class="roster-radio-cell">
                                                         <input type="radio" class="form-check-input" name="status[<?= $sid ?>]"
@@ -756,7 +756,7 @@ $scopeBanner = match ($role) {
                                 </table>
                             </div>
 
-                            <button type="submit" class="btn btn-primary" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-save"></i> Save Attendance
                             </button>
                         </form>
@@ -820,7 +820,7 @@ $scopeBanner = match ($role) {
                             </select>
                         </div>
                         <div class="col-sm-4 col-md-3">
-                            <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                            <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-grid-3x3"></i> Load Grid
                             </button>
                         </div>
@@ -853,7 +853,7 @@ $scopeBanner = match ($role) {
                         ]) ?>
                         <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0))) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">
+                            <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
                                 Xiiso Grid — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
                                 <span class="text-muted fw-normal">(<?= htmlspecialchars($currentSemester['name']) ?>)</span>
                             </h6>
@@ -900,7 +900,7 @@ $scopeBanner = match ($role) {
                                         ?>
                                         <tr data-student-row="<?= $gsid ?>">
                                             <td><?= htmlspecialchars($st['student_no']) ?></td>
-                                            <td class="fw-semibold col-group-end" style="color: #0b1f3a;"><?= htmlspecialchars($st['full_name']) ?></td>
+                                            <td class="fw-semibold col-group-end" style="color: var(--admas-text);"><?= htmlspecialchars($st['full_name']) ?></td>
                                             <?php foreach ($gridData['sessions'] as $sIndex => $s): ?>
                                                 <?php
                                                 $gSessId = (int) $s['id'];

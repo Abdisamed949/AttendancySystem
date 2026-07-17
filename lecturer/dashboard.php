@@ -126,7 +126,7 @@ $myCoursesStmt2->close();
                 Access scope: Your assigned courses only
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <p class="text-muted mb-4">Here's a summary of your assigned courses.</p>
 
             <!-- KPI Cards -->
@@ -161,7 +161,7 @@ $myCoursesStmt2->close();
             </div>
 
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: #0b1f3a;">My Assigned Courses</h6>
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Assigned Courses</h6>
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
@@ -182,7 +182,7 @@ $myCoursesStmt2->close();
                             <?php else: ?>
                                 <?php foreach ($myCourses as $c): ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
                                         <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
                                         <td>
                                             <?php if ($c['last_shift'] !== null && isset(SHIFT_LABELS[$c['last_shift']])): ?>
@@ -200,7 +200,7 @@ $myCoursesStmt2->close();
                                             <?php endif; ?>
                                         </td>
                                         <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                 <i class="bi bi-calendar2-check"></i> Take Attendance
                                             </a>
                                         </td>

@@ -520,25 +520,6 @@ foreach ($offeringLecturers as $lec) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
-    <style>
-        .btn-icon {
-            border: none;
-            background: transparent;
-            color: #64748b;
-            padding: 0.25rem 0.4rem;
-            border-radius: 6px;
-        }
-
-        .btn-icon:hover {
-            background: var(--admas-bg);
-            color: #0b1f3a;
-        }
-
-        .btn-icon.text-danger:hover {
-            background: rgba(220, 38, 38, 0.08);
-            color: #dc2626;
-        }
-    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -556,7 +537,7 @@ foreach ($offeringLecturers as $lec) {
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Course Management</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Course Management</h4>
                     <p class="text-muted mb-0">Create and manage courses.</p>
                 </div>
             </div>
@@ -578,7 +559,7 @@ foreach ($offeringLecturers as $lec) {
                 <div class="col-lg-8">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">Courses</h6>
+                            <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Courses</h6>
                             <div class="d-flex gap-2">
                                 <button type="button" id="bulkDeleteCoursesBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role === 'system_admin'): ?>
@@ -586,7 +567,7 @@ foreach ($offeringLecturers as $lec) {
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary btn-sm" style="background-color: #0ea5e9; border-color: #0ea5e9;">
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                     <i class="bi bi-plus-lg"></i> Add Course
                                 </a>
                             </div>
@@ -624,7 +605,7 @@ foreach ($offeringLecturers as $lec) {
                                                            data-label="<?= htmlspecialchars($c['name'] . ' (' . $c['code'] . ')') ?>">
                                                 </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span></td>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($c['name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['name']) ?></td>
                                                 <td><?= htmlspecialchars($c['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                                 <td>
@@ -678,7 +659,7 @@ foreach ($offeringLecturers as $lec) {
 
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                             <?= $formMode === 'edit' ? 'Edit Course' : 'Add Course' ?>
                         </h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php">
@@ -770,7 +751,7 @@ foreach ($offeringLecturers as $lec) {
                                 </div>
                             <?php endif; ?>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($departments) ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($departments) ? 'disabled' : '' ?>>
                                 <?= $formMode === 'edit' ? 'Update Course' : 'Save Course' ?>
                             </button>
                         </form>

@@ -311,7 +311,7 @@ $lecturers = $conn->query(
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
-                    <h4 class="fw-bold mb-1" style="color: #0b1f3a;">Lecturers</h4>
+                    <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Lecturers</h4>
                     <p class="text-muted mb-0">University-wide lecturer directory and new-account registration.</p>
                 </div>
             </div>
@@ -333,7 +333,7 @@ $lecturers = $conn->query(
                 <div class="col-lg-8">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                            <h6 class="fw-bold mb-0" style="color: #0b1f3a;">All Lecturers</h6>
+                            <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Lecturers</h6>
                             <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                         </div>
 
@@ -368,7 +368,7 @@ $lecturers = $conn->query(
                                                            data-label="<?= htmlspecialchars($l['full_name'] . ' (' . $l['staff_no'] . ')') ?>">
                                                 </td>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
-                                                <td class="fw-semibold" style="color: #0b1f3a;"><?= htmlspecialchars($l['full_name']) ?></td>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($l['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['faculty_name']) ?></td>
                                                 <td><?= number_format((int) $l['course_count']) ?></td>
@@ -390,7 +390,7 @@ $lecturers = $conn->query(
 
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
-                        <h6 class="fw-bold mb-3" style="color: #0b1f3a;">Register New Lecturer</h6>
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Register New Lecturer</h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/lecturers.php">
                             <input type="hidden" name="action" value="register_lecturer">
 
@@ -428,7 +428,7 @@ $lecturers = $conn->query(
                                 <?php endif; ?>
                             </div>
 
-                            <button type="submit" class="btn btn-primary w-100" style="background-color: #0ea5e9; border-color: #0ea5e9;" <?= empty($departmentsByFaculty) ? 'disabled' : '' ?>>
+                            <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($departmentsByFaculty) ? 'disabled' : '' ?>>
                                 <i class="bi bi-person-plus"></i> Register Lecturer
                             </button>
                         </form>
