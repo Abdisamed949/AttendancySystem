@@ -9,20 +9,17 @@ declare(strict_types=1);
 const STATUS_LABELS = [
     'present' => 'Present',
     'absent' => 'Absent',
-    'late' => 'Late',
-    'excused' => 'Excused',
 ];
 
 /**
- * The subset of STATUS_LABELS reachable via the interactive Xiiso grid's
- * click-cycle (empty -> Present -> Absent -> Excused -> empty). "Late" is
- * intentionally excluded — it remains settable only via the classic
- * single-session form.
+ * Same two statuses as STATUS_LABELS — kept as a separate constant since
+ * the interactive Xiiso grid's click-cycle and the classic single-session
+ * form validate against it independently (see attendance.php and
+ * ajax/save_attendance_cell.php).
  */
 const GRID_STATUS_LABELS = [
     'present' => 'Present',
     'absent' => 'Absent',
-    'excused' => 'Excused',
 ];
 
 /**
@@ -35,7 +32,7 @@ function attendance_badge_class(float $pct, float $threshold): string
         return 'badge-absent';
     }
     if ($pct < $threshold) {
-        return 'badge-late';
+        return 'badge-warning';
     }
 
     return 'badge-present';

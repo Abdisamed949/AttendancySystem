@@ -170,9 +170,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $departmentId = (int) ($_POST['department_id'] ?? 0);
 
         $formMode = $action === 'update' ? 'edit' : 'create';
+        $existingStaffNo = '';
+        if ($formMode === 'edit' && $lecturerId > 0) {
+            $staffNoStmt = $conn->prepare('SELECT staff_no FROM lecturers WHERE id = ?');
+            $staffNoStmt->bind_param('i', $lecturerId);
+            $staffNoStmt->execute();
+            $existingStaffNo = (string) ($staffNoStmt->get_result()->fetch_assoc()['staff_no'] ?? '');
+            $staffNoStmt->close();
+        }
         $formValues = [
             'id' => $lecturerId,
-            'staff_no' => $staffNo,
+            'staff_no' => $formMode === 'edit' ? $existingStaffNo : $staffNo,
             'full_name' => $fullName,
             'email' => $email,
             'department_id' => $departmentId,
@@ -182,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($fullName === '') {
             $validationError = 'Full name is required.';
         } elseif ($action === 'create' && $staffNo === '') {
-            $validationError = 'Staff number is required.';
+            $validationError = 'Staff No is required.';
         } elseif ($departmentId <= 0) {
             $validationError = 'Please select a department.';
         } elseif ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -263,8 +271,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($action === 'create') {
                 $conn->begin_transaction();
                 try {
-                    $username = generate_lecturer_username($conn, $fullName);
-                    $tempPassword = generate_temp_password();
+                    $username = generate_lecturer_username($conn, $fullName, $staffNo);
+                    $tempPassword = $staffNo;
                     $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
                     $insertUserStmt = $conn->prepare(
@@ -283,7 +291,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $insertLecturerStmt->close();
 
                     $conn->commit();
-                    $_SESSION['flash_success'] = 'Lecturer added successfully. Username: ' . $username
+                    $_SESSION['flash_success'] = 'Lecturer added successfully. Staff No: ' . $staffNo
+                        . ' — Username: ' . $username
                         . ' — Temporary Password: ' . $tempPassword
                         . ' — share these credentials with the lecturer now; the password will not be shown again.';
                 } catch (Throwable $e) {
@@ -360,7 +369,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($role === 'dean') {
             $lecturerStmt = $conn->prepare(
-                'SELECT l.user_id, u.username FROM lecturers l
+                'SELECT l.user_id, l.staff_no, u.username FROM lecturers l
                  JOIN users u ON u.id = l.user_id
                  JOIN departments d ON d.id = l.department_id
                  WHERE l.id = ? AND d.faculty_id = ?'
@@ -368,7 +377,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lecturerStmt->bind_param('ii', $lecturerId, $deanFacultyId);
         } else {
             $lecturerStmt = $conn->prepare(
-                'SELECT l.user_id, u.username FROM lecturers l JOIN users u ON u.id = l.user_id WHERE l.id = ?'
+                'SELECT l.user_id, l.staff_no, u.username FROM lecturers l JOIN users u ON u.id = l.user_id WHERE l.id = ?'
             );
             $lecturerStmt->bind_param('i', $lecturerId);
         }
@@ -379,10 +388,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$lecturerRow) {
             $errorMessage = 'Lecturer not found.';
         } else {
-            $newPassword = generate_temp_password();
+            $newPassword = $lecturerRow['staff_no'];
             $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
 
-            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?');
             $updatePassStmt->bind_param('si', $newHash, $lecturerRow['user_id']);
             $updatePassStmt->execute();
             $updatePassStmt->close();
@@ -642,10 +651,13 @@ foreach ($departments as $dept) {
 
                             <div class="mb-3">
                                 <label for="lecturerStaffNoInput" class="form-label">Staff No</label>
-                                <input type="text" class="form-control text-uppercase" id="lecturerStaffNoInput" name="staff_no" maxlength="20"
-                                       value="<?= htmlspecialchars($formValues['staff_no']) ?>" <?= $formMode === 'edit' ? 'disabled' : 'required' ?>>
                                 <?php if ($formMode === 'edit'): ?>
+                                    <input type="text" class="form-control text-uppercase" value="<?= htmlspecialchars($formValues['staff_no']) ?>" disabled>
                                     <div class="form-text">Staff number cannot be changed after creation.</div>
+                                <?php else: ?>
+                                    <input type="text" class="form-control text-uppercase" id="lecturerStaffNoInput" name="staff_no" maxlength="20"
+                                           value="<?= htmlspecialchars($formValues['staff_no']) ?>" required>
+                                    <div class="form-text">The lecturer's existing staff/employee number. This becomes their login username base and initial password.</div>
                                 <?php endif; ?>
                             </div>
 

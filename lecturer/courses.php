@@ -96,7 +96,11 @@ foreach ($departmentOptions as $dept) {
 // check here; Faculty/Department/search are extra narrowing only, never a
 // way to see another lecturer's courses.
 // ---------------------------------------------------------------------
-$conditions = [$currentOfferingExists];
+// Note: the current-offering EXISTS check used for the filter-option
+// queries above is not needed here — the JOIN to course_offerings/semesters
+// below already restricts rows to this lecturer's current offerings, so it
+// would just be redundant filtering (and a duplicate placeholder) on top.
+$conditions = [];
 $params = [$lecturerRecordId];
 $types = 'i';
 
@@ -117,82 +121,92 @@ if ($filterSearch !== '') {
     $params[] = $likeParam;
     $types .= 'ss';
 }
+if ($filterAcademicYearId > 0) {
+    $conditions[] = 'ay.id = ?';
+    $params[] = $filterAcademicYearId;
+    $types .= 'i';
+}
 
-$whereSql = implode(' AND ', $conditions);
+$whereSql = empty($conditions) ? '1 = 1' : implode(' AND ', $conditions);
 
+// One row per (course, current-semester offering) pair — not per course —
+// since a faculty can have multiple concurrent current semesters (see
+// includes/semester_helpers.php's refresh_semester_current_flags()), a
+// lecturer can be teaching the same course under two different current
+// semesters/batches at once, and each needs its own Semester/Pending
+// Xiiso context rather than being collapsed into a single course row.
 $coursesStmt = $conn->prepare(
-    "SELECT c.id, c.code, c.name, c.credit_hours, d.faculty_id, d.name AS department_name, f.name AS faculty_name,
+    "SELECT c.id AS course_id, c.code, c.name, c.credit_hours,
+            d.id AS department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name,
+            se.id AS semester_id, se.name AS semester_name,
+            ay.id AS academic_year_id, ay.label AS academic_year_label,
+            co.shift AS offering_shift,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
      FROM courses c
      JOIN departments d ON d.id = c.department_id
      JOIN faculties f ON f.id = d.faculty_id
+     JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
+     JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
+     JOIN academic_years ay ON ay.id = se.academic_year_id
      WHERE {$whereSql}
-     ORDER BY f.name, d.name, c.code"
+     ORDER BY f.name, d.name, c.code, se.start_date"
 );
 $coursesStmt->bind_param($types, ...$params);
 $coursesStmt->execute();
-$courses = $coursesStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$courseOfferingRows = $coursesStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $coursesStmt->close();
 
 // ---------------------------------------------------------------------
-// Per-course session stats. If the user explicitly picked an Academic
-// Year, every course's stats are scoped to that one shared year (a single
-// query, same as before). Otherwise each course defaults to its OWN
-// faculty's current semester's academic year — never the lecturer's own
-// home faculty — since a lecturer can hold courses across faculties that
-// are on different semesters/years at once; that means one query per
-// distinct faculty represented among this lecturer's course list (small,
-// bounded by the number of faculties), merged by course_id.
+// Per-row session stats + Pending Xiiso — scoped to this exact (course,
+// semester) pair via its own 12 Xiiso sessions, not a broad academic-year
+// date range, so two concurrent semesters for the same course never bleed
+// into each other's counts. Sessions are fetched once per distinct
+// semester_id and reused across every course row that shares it.
 // ---------------------------------------------------------------------
-$sessionStatsByCourse = [];
-if (!empty($courses)) {
-    if ($filterAcademicYearId > 0) {
-        $courseIds = array_map(static fn ($c) => (int) $c['id'], $courses);
-        $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
-        $statsStmt = $conn->prepare(
-            "SELECT course_id, COUNT(DISTINCT attendance_date) AS total_sessions, MAX(attendance_date) AS last_session
-             FROM attendance
-             WHERE academic_year_id = ? AND course_id IN ({$placeholders})
-             GROUP BY course_id"
-        );
-        $statsTypes = 'i' . str_repeat('i', count($courseIds));
-        $statsParams = array_merge([$filterAcademicYearId], $courseIds);
-        $statsStmt->bind_param($statsTypes, ...$statsParams);
-        $statsStmt->execute();
-        $statsRes = $statsStmt->get_result();
-        while ($row = $statsRes->fetch_assoc()) {
-            $sessionStatsByCourse[(int) $row['course_id']] = $row;
+$today = date('Y-m-d');
+$sessionsBySemesterId = [];
+$courses = [];
+foreach ($courseOfferingRows as $row) {
+    $courseId = (int) $row['course_id'];
+    $semesterId = (int) $row['semester_id'];
+
+    if (!isset($sessionsBySemesterId[$semesterId])) {
+        $sessionsBySemesterId[$semesterId] = get_sessions_for_semester($conn, $semesterId);
+    }
+    $sessions = $sessionsBySemesterId[$semesterId];
+
+    $enrolledCount = (int) $row['student_count'];
+    $totalMarked = 0;
+    $lastSessionDate = null;
+    $pendingSessions = [];
+
+    foreach ($sessions as $session) {
+        if ($session['date'] === null) {
+            continue;
         }
-        $statsStmt->close();
-    } else {
-        $courseIdsByFacultyYear = [];
-        foreach ($courses as $c) {
-            $facultyId = (int) $c['faculty_id'];
-            $semester = get_current_semester($conn, $facultyId);
-            $ayId = (int) ($semester['academic_year_id'] ?? 0);
-            if ($ayId > 0) {
-                $courseIdsByFacultyYear[$ayId][] = (int) $c['id'];
+        $markedStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE course_id = ? AND session_id = ?');
+        $markedStmt->bind_param('ii', $courseId, $session['id']);
+        $markedStmt->execute();
+        $markedCount = (int) ($markedStmt->get_result()->fetch_assoc()['c'] ?? 0);
+        $markedStmt->close();
+
+        if ($markedCount > 0) {
+            $totalMarked++;
+            if ($lastSessionDate === null || $session['date'] > $lastSessionDate) {
+                $lastSessionDate = $session['date'];
             }
         }
-        foreach ($courseIdsByFacultyYear as $ayId => $courseIds) {
-            $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
-            $statsStmt = $conn->prepare(
-                "SELECT course_id, COUNT(DISTINCT attendance_date) AS total_sessions, MAX(attendance_date) AS last_session
-                 FROM attendance
-                 WHERE academic_year_id = ? AND course_id IN ({$placeholders})
-                 GROUP BY course_id"
-            );
-            $statsTypes = 'i' . str_repeat('i', count($courseIds));
-            $statsParams = array_merge([$ayId], $courseIds);
-            $statsStmt->bind_param($statsTypes, ...$statsParams);
-            $statsStmt->execute();
-            $statsRes = $statsStmt->get_result();
-            while ($row = $statsRes->fetch_assoc()) {
-                $sessionStatsByCourse[(int) $row['course_id']] = $row;
-            }
-            $statsStmt->close();
+
+        if ($session['date'] <= $today && $enrolledCount > 0 && $markedCount < $enrolledCount) {
+            $pendingSessions[] = $session;
         }
     }
+
+    $row['total_sessions'] = $totalMarked;
+    $row['last_session'] = $lastSessionDate;
+    $row['pending_count'] = count($pendingSessions);
+    $row['next_pending_session'] = $pendingSessions[0] ?? null;
+    $courses[] = $row;
 }
 
 $currentAcademicYearLabel = '';
@@ -287,10 +301,10 @@ foreach ($academicYears as $ay) {
                             <tr>
                                 <th>Course</th>
                                 <th>Department</th>
-                                <th>Faculty</th>
+                                <th>Semester</th>
                                 <th>Students</th>
                                 <th>Sessions</th>
-                                <th>Last Session</th>
+                                <th>Pending Xiiso</th>
                                 <th></th>
                             </tr>
                         </thead>
@@ -301,23 +315,55 @@ foreach ($academicYears as $ay) {
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courses as $c): ?>
-                                    <?php $stats = $sessionStatsByCourse[(int) $c['id']] ?? null; ?>
+                                    <?php
+                                    $pendingCount = (int) $c['pending_count'];
+                                    $nextPending = $c['next_pending_session'];
+
+                                    // Deep-link straight into a ready-to-mark roster whenever
+                                    // both a pending Xiiso and the offering's shift are known,
+                                    // so the lecturer never has to manually pick the course,
+                                    // shift, or session on attendance.php — just click and mark.
+                                    $takeAttendanceUrl = BASE_URL . '/attendance.php?course_id=' . (int) $c['course_id'];
+                                    if ($nextPending !== null && $c['offering_shift'] !== null) {
+                                        $takeAttendanceUrl = BASE_URL . '/attendance.php?' . http_build_query([
+                                            'load' => 1,
+                                            'course_id' => (int) $c['course_id'],
+                                            'shift' => $c['offering_shift'],
+                                            'session_id' => (int) $nextPending['id'],
+                                            'academic_year_id' => (int) $c['academic_year_id'],
+                                        ]);
+                                    }
+                                    ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);">
+                                            <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
+                                            <div class="text-muted small"><?= htmlspecialchars($c['faculty_name']) ?></div>
+                                        </td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
-                                        <td><?= htmlspecialchars($c['faculty_name']) ?></td>
-                                        <td><?= number_format((int) $c['student_count']) ?></td>
-                                        <td><?= $stats ? number_format((int) $stats['total_sessions']) : '0' ?></td>
                                         <td>
-                                            <?php if ($stats && $stats['last_session']): ?>
-                                                <?= htmlspecialchars(date('M j, Y', strtotime((string) $stats['last_session']))) ?>
+                                            <?= htmlspecialchars($c['semester_name']) ?>
+                                            <div class="text-muted small"><?= htmlspecialchars($c['academic_year_label']) ?></div>
+                                        </td>
+                                        <td><?= number_format((int) $c['student_count']) ?></td>
+                                        <td>
+                                            <?= number_format((int) $c['total_sessions']) ?>
+                                            <?php if ($c['last_session']): ?>
+                                                <div class="text-muted small">Last: <?= htmlspecialchars(date('M j, Y', strtotime((string) $c['last_session']))) ?></div>
                                             <?php else: ?>
-                                                <span class="text-muted fst-italic">Never</span>
+                                                <div class="text-muted small fst-italic">Never</div>
                                             <?php endif; ?>
                                         </td>
                                         <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-calendar2-check"></i> Take Attendance
+                                            <?php if ($pendingCount > 0): ?>
+                                                <span class="badge-pill badge-warning"><?= $pendingCount ?> pending</span>
+                                            <?php else: ?>
+                                                <span class="badge-pill badge-present">Up to date</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <a href="<?= htmlspecialchars($takeAttendanceUrl) ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                                <i class="bi bi-calendar2-check"></i>
+                                                <?= $nextPending !== null ? 'Take Attendance (' . htmlspecialchars($nextPending['label']) . ')' : 'Take Attendance' ?>
                                             </a>
                                         </td>
                                     </tr>

@@ -119,6 +119,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
+    } elseif ($action === 'save_semesters_per_year') {
+        $facultyId = (int) ($_POST['faculty_id'] ?? 0);
+        $semestersPerYearInput = (int) ($_POST['semesters_per_year'] ?? 0);
+
+        $validationError = '';
+        if ($facultyId <= 0) {
+            $validationError = 'Invalid faculty.';
+        } elseif ($semestersPerYearInput < 1 || $semestersPerYearInput > 6) {
+            $validationError = 'Semesters per Year must be between 1 and 6.';
+        }
+
+        if ($validationError === '') {
+            $facultyCheckStmt = $conn->prepare('SELECT id, name FROM faculties WHERE id = ?');
+            $facultyCheckStmt->bind_param('i', $facultyId);
+            $facultyCheckStmt->execute();
+            $facultyRow = $facultyCheckStmt->get_result()->fetch_assoc();
+            $facultyCheckStmt->close();
+
+            if (!$facultyRow) {
+                $validationError = 'Faculty not found.';
+            } else {
+                $updateStmt = $conn->prepare('UPDATE faculties SET semesters_per_year = ? WHERE id = ?');
+                $updateStmt->bind_param('ii', $semestersPerYearInput, $facultyId);
+                $updateStmt->execute();
+                $updateStmt->close();
+
+                $_SESSION['flash_success'] = 'Semesters per Year updated for ' . $facultyRow['name'] . '.';
+                redirect_to('head_academic/academic_settings.php');
+            }
+        }
+
+        $errorMessage = $validationError;
     }
 }
 
@@ -126,6 +158,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Data for rendering
 // ---------------------------------------------------------------------
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
+$faculties = $conn->query('SELECT id, name, semesters_per_year FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -231,6 +264,54 @@ $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years 
                                 <i class="bi bi-save"></i> Save Threshold
                             </button>
                         </form>
+                    </div>
+                </div>
+
+                <div class="col-lg-12">
+                    <div class="admas-card p-4">
+                        <h6 class="small text-uppercase text-muted mb-2">Semesters per Year — by Faculty</h6>
+                        <p class="text-muted small">
+                            How many semesters each faculty's curriculum runs per year (e.g. 3 for most
+                            faculties, 2 for a faculty like Health Sciences) — drives the "Year X" shown on
+                            the <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page
+                            and how <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Generate Next
+                            Semester</a> numbers new semesters for that faculty.
+                        </p>
+                        <div class="table-responsive">
+                            <table class="table admas-table align-middle mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Faculty</th>
+                                        <th style="width: 260px;">Semesters per Year</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php if (empty($faculties)): ?>
+                                        <tr>
+                                            <td colspan="2" class="text-center text-muted py-3">No faculties exist yet.</td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php foreach ($faculties as $f): ?>
+                                            <tr>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
+                                                <td>
+                                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/academic_settings.php" class="d-flex gap-2">
+                                                        <input type="hidden" name="action" value="save_semesters_per_year">
+                                                        <input type="hidden" name="faculty_id" value="<?= (int) $f['id'] ?>">
+                                                        <input type="number" class="form-control form-control-sm" name="semesters_per_year"
+                                                               min="1" max="6" required style="max-width: 100px;"
+                                                               value="<?= (int) $f['semesters_per_year'] ?>">
+                                                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                                            <i class="bi bi-save"></i> Save
+                                                        </button>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>

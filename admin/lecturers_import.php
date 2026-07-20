@@ -119,32 +119,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (empty($rows)) {
                         $errorMessage = 'The uploaded file is empty.';
                     } else {
-                        $headerRow = array_map(static fn ($h) => mb_strtolower(trim((string) $h)), array_shift($rows));
+                        $headerRow = array_map(static fn ($h) => str_replace('-', '', mb_strtolower(trim((string) $h))), array_shift($rows));
 
-                        $staffCol = array_search('staff no', $headerRow, true);
-                        if ($staffCol === false) {
-                            $staffCol = array_search('staff_no', $headerRow, true);
-                        }
-                        $nameCol = array_search('full name', $headerRow, true);
-                        if ($nameCol === false) {
-                            $nameCol = array_search('name', $headerRow, true);
-                        }
-                        $emailCol = array_search('email', $headerRow, true);
-                        $departmentCol = array_search('department', $headerRow, true);
-                        if ($departmentCol === false) {
-                            $departmentCol = array_search('department name', $headerRow, true);
-                        }
+                        // Each field accepts English and Somali header synonyms, so
+                        // staff can write the sheet in whichever language is natural
+                        // for them without needing to rename columns first. Hyphens
+                        // are stripped from both sides above, so "ID-ga"/"id ga"/
+                        // "idga" all match the same candidate.
+                        $staffCol = find_import_column($headerRow, ['staff no', 'staffno', 'id', 'idga macalinka', 'lambarka macalinka', 'lambarka shaqaalaha']);
+                        $nameCol = find_import_column($headerRow, ['full name', 'name', 'magaca buuxa', 'magaca']);
+                        $emailCol = find_import_column($headerRow, ['email', 'emailka', 'iimaylka']);
+                        $departmentCol = find_import_column($headerRow, ['department', 'department name', 'waaxda', 'waax']);
 
                         if ($staffCol === false || $nameCol === false || $departmentCol === false) {
-                            $errorMessage = 'The file must have "Staff No", "Full Name" and "Department" column headers.';
+                            $errorMessage = 'The file must have "Staff No" (or "ID-ga Macalinka"), "Full Name" (or "Magaca Buuxa") and "Department" (or "Waaxda") column headers.';
                         } else {
-                            $seenInFile = [];
+                            $seenStaffNosInFile = [];
                             $seenEmailsInFile = [];
                             $rowNumber = 1;
 
                             foreach ($rows as $row) {
                                 $rowNumber++;
-                                $staffNo = trim((string) ($row[$staffCol] ?? ''));
+                                $staffNo = strtoupper(trim((string) ($row[$staffCol] ?? '')));
                                 $fullName = trim((string) ($row[$nameCol] ?? ''));
                                 $emailInput = $emailCol !== false ? trim((string) ($row[$emailCol] ?? '')) : '';
                                 $departmentInput = trim((string) ($row[$departmentCol] ?? ''));
@@ -156,7 +152,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $status = 'ok';
                                 $message = 'Ready to import';
                                 $departmentId = 0;
-                                $staffNoUpper = strtoupper($staffNo);
 
                                 if ($staffNo === '') {
                                     $status = 'error';
@@ -197,13 +192,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     }
                                 }
 
+                                if ($status === 'ok' && $emailInput !== '') {
+                                    $seenEmailsInFile[mb_strtolower($emailInput)] = true;
+                                }
+
                                 if ($status === 'ok') {
-                                    if (isset($seenInFile[$staffNoUpper])) {
+                                    if (isset($seenStaffNosInFile[$staffNo])) {
                                         $status = 'error';
                                         $message = 'Duplicate Staff No within this file';
                                     } else {
                                         $checkStmt = $conn->prepare('SELECT id FROM lecturers WHERE UPPER(staff_no) = ?');
-                                        $checkStmt->bind_param('s', $staffNoUpper);
+                                        $checkStmt->bind_param('s', $staffNo);
                                         $checkStmt->execute();
                                         if ($checkStmt->get_result()->fetch_assoc()) {
                                             $status = 'error';
@@ -213,16 +212,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     }
 
                                     if ($status === 'ok') {
-                                        $seenInFile[$staffNoUpper] = true;
-                                        if ($emailInput !== '') {
-                                            $seenEmailsInFile[mb_strtolower($emailInput)] = true;
-                                        }
+                                        $seenStaffNosInFile[$staffNo] = true;
                                     }
                                 }
 
                                 $previewRows[] = [
                                     'row' => $rowNumber,
-                                    'staff_no' => $staffNoUpper,
+                                    'staff_no' => $staffNo,
                                     'full_name' => $fullName,
                                     'email' => $emailInput,
                                     'department_input' => $departmentInput,
@@ -267,8 +263,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($validRows as $row) {
             $conn->begin_transaction();
             try {
-                $username = generate_lecturer_username($conn, $row['full_name']);
-                $tempPassword = generate_temp_password();
+                $staffNo = $row['staff_no'];
+                $username = generate_lecturer_username($conn, $row['full_name'], $staffNo);
+                $tempPassword = $staffNo;
                 $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
                 $emailParam = $row['email'] !== '' ? $row['email'] : null;
 
@@ -283,7 +280,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insertLecturerStmt = $conn->prepare(
                     'INSERT INTO lecturers (staff_no, full_name, user_id, department_id, status) VALUES (?, ?, ?, ?, "active")'
                 );
-                $insertLecturerStmt->bind_param('ssii', $row['staff_no'], $row['full_name'], $newUserId, $row['department_id']);
+                $insertLecturerStmt->bind_param('ssii', $staffNo, $row['full_name'], $newUserId, $row['department_id']);
                 $insertLecturerStmt->execute();
                 $insertLecturerStmt->close();
 
@@ -291,7 +288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $imported++;
 
                 $resultRows[] = [
-                    'staff_no' => $row['staff_no'],
+                    'staff_no' => $staffNo,
                     'full_name' => $row['full_name'],
                     'username' => $username,
                     'password' => $tempPassword,
@@ -371,10 +368,14 @@ $invalidCount = count($previewRows) - $validCount;
                     <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Upload File</h6>
 
                     <div class="alert alert-light border small mb-3">
-                        The file must have column headers: <strong>Staff No</strong>, <strong>Full Name</strong>,
-                        and <strong>Department</strong> (the Department value must match an existing department's
+                        The file must have column headers: <strong>Staff No</strong> (the lecturer's existing
+                        staff/employee number — must be unique), <strong>Full Name</strong>, and
+                        <strong>Department</strong> (the Department value must match an existing department's
                         name). <strong>Email</strong> is optional. A username and temporary password will be
-                        generated automatically for each imported lecturer.
+                        generated automatically from the Staff No for each imported lecturer.
+                        <br>
+                        Column headers may also be written in Somali (e.g. "Magaca Buuxa" for Full Name, "ID-ga
+                        Macalinka" for Staff No, "Waaxda" for Department).
                         <br>
                         <a href="?action=template" class="fw-semibold">
                             <i class="bi bi-download"></i> Download a starter template (.xlsx)

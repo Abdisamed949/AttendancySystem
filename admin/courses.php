@@ -242,13 +242,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif (!array_key_exists($offeringShift, SHIFT_LABELS)) {
                 $validationError = 'Please select a shift for the new offering.';
             } elseif ($offeringLecturerId > 0) {
-                // Lecturer must belong to this course's own department, same
-                // validation admin/course_offerings.php already does.
-                $offeringLecStmt = $conn->prepare('SELECT id FROM lecturers WHERE id = ? AND department_id = ?');
-                $offeringLecStmt->bind_param('ii', $offeringLecturerId, $departmentId);
+                // Any active lecturer system-wide may be assigned, not just
+                // ones in this course's own department — universities share
+                // "common" courses across faculties via one lecturer, and a
+                // Dean assigning an outside lecturer here only ever touches
+                // a course_offerings row inside their own faculty (the
+                // course + semester still belong to them), so this doesn't
+                // widen what a Dean can see or edit elsewhere.
+                $offeringLecStmt = $conn->prepare("SELECT id FROM lecturers WHERE id = ? AND status = 'active'");
+                $offeringLecStmt->bind_param('i', $offeringLecturerId);
                 $offeringLecStmt->execute();
                 if (!$offeringLecStmt->get_result()->fetch_assoc()) {
-                    $validationError = 'Selected lecturer does not belong to this course\'s department.';
+                    $validationError = 'Selected lecturer is not a valid active lecturer.';
                 }
                 $offeringLecStmt->close();
             }
@@ -485,30 +490,34 @@ foreach ($offeringSemesters as $sem) {
     ];
 }
 
-// Lecturer options, grouped by department — same scoping (active
-// lecturers within one department) as admin/course_offerings.php's own
-// Lecturer dropdown, reused here for the Department -> Lecturer cascade.
-if ($role === 'dean') {
-    $offeringLecStmt = $conn->prepare(
-        "SELECT l.id, l.full_name, l.department_id
-         FROM lecturers l
-         JOIN departments d ON d.id = l.department_id
-         WHERE d.faculty_id = ? AND l.status = 'active'
-         ORDER BY l.full_name"
-    );
-    $offeringLecStmt->bind_param('i', $deanFacultyId);
-    $offeringLecStmt->execute();
-    $offeringLecturers = $offeringLecStmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $offeringLecStmt->close();
-} else {
-    $offeringLecturers = $conn->query(
-        "SELECT id, full_name, department_id FROM lecturers WHERE status = 'active' ORDER BY full_name"
-    )->fetch_all(MYSQLI_ASSOC);
-}
+// Lecturer options for the Department -> Lecturer cascade. Every active
+// lecturer system-wide is available (not just the picked department's own)
+// — universities share "common" courses across faculties via one
+// lecturer, and assigning an outside lecturer only ever creates a
+// course_offerings row inside this course's own department/faculty, so it
+// never widens what a Dean can see or edit elsewhere. Grouped by
+// department for the JS cascade's "own department" list, plus one flat
+// "every other active lecturer" list (labeled with their home faculty) the
+// same JS appends below it.
+$offeringLecturers = $conn->query(
+    "SELECT l.id, l.full_name, l.department_id, f.name AS home_faculty_name
+     FROM lecturers l
+     JOIN departments d ON d.id = l.department_id
+     JOIN faculties f ON f.id = d.faculty_id
+     WHERE l.status = 'active'
+     ORDER BY l.full_name"
+)->fetch_all(MYSQLI_ASSOC);
 
 $lecturersByDepartmentId = [];
+$allActiveLecturers = [];
 foreach ($offeringLecturers as $lec) {
     $lecturersByDepartmentId[(int) $lec['department_id']][] = ['id' => (int) $lec['id'], 'full_name' => $lec['full_name']];
+    $allActiveLecturers[] = [
+        'id' => (int) $lec['id'],
+        'full_name' => $lec['full_name'],
+        'department_id' => (int) $lec['department_id'],
+        'home_faculty_name' => $lec['home_faculty_name'],
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -783,6 +792,7 @@ foreach ($offeringLecturers as $lec) {
         const facultyIdByDepartmentId = <?= json_encode($facultyIdByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const lecturersByDepartmentId = <?= json_encode($lecturersByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const allActiveLecturers = <?= json_encode($allActiveLecturers, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
         function admasUpdateOfferingFieldsForDepartment(departmentId, selectedSemesterId) {
             const semesterSelect = document.getElementById('offeringSemesterSelect');
@@ -814,12 +824,31 @@ foreach ($offeringLecturers as $lec) {
             unassigned.value = '0';
             unassigned.textContent = 'Unassigned';
             lecturerSelect.appendChild(unassigned);
-            (lecturersByDepartmentId[departmentId] || []).forEach((lec) => {
+            const ownDepartmentLecturers = lecturersByDepartmentId[departmentId] || [];
+            const ownDepartmentIds = new Set(ownDepartmentLecturers.map((lec) => lec.id));
+            ownDepartmentLecturers.forEach((lec) => {
                 const opt = document.createElement('option');
                 opt.value = String(lec.id);
                 opt.textContent = lec.full_name;
                 lecturerSelect.appendChild(opt);
             });
+
+            // Every other active lecturer (outside this department) is
+            // still selectable — labeled with their home faculty — for
+            // "common" courses one lecturer teaches across faculties.
+            const otherLecturers = allActiveLecturers.filter((lec) => !ownDepartmentIds.has(lec.id));
+            if (otherLecturers.length > 0) {
+                const separator = document.createElement('option');
+                separator.disabled = true;
+                separator.textContent = '── Other faculties ──';
+                lecturerSelect.appendChild(separator);
+                otherLecturers.forEach((lec) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(lec.id);
+                    opt.textContent = lec.full_name + ' (' + lec.home_faculty_name + ')';
+                    lecturerSelect.appendChild(opt);
+                });
+            }
 
             semesterSelect.value = String(selectedSemesterId || '');
             if (semesterSelect.value !== String(selectedSemesterId || '')) {

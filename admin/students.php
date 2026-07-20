@@ -83,6 +83,7 @@ if (!empty($_SESSION['flash_error'])) {
 $formMode = 'create';
 $formValues = [
     'id' => 0,
+    'student_no' => '',
     'full_name' => '',
     'email' => '',
     'academic_year_id' => 0,
@@ -168,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'create' || $action === 'update') {
         $studentId = $action === 'update' ? (int) ($_POST['student_id'] ?? 0) : 0;
+        $studentNo = strtoupper(trim((string) ($_POST['student_no'] ?? '')));
         $fullName = trim((string) ($_POST['full_name'] ?? ''));
         $email = trim((string) ($_POST['email'] ?? ''));
         $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
@@ -180,8 +182,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $shift = (string) ($_POST['shift'] ?? '');
 
         $formMode = $action === 'update' ? 'edit' : 'create';
+        $existingStudentNo = '';
+        if ($formMode === 'edit' && $studentId > 0) {
+            $studentNoStmt = $conn->prepare('SELECT student_no FROM students WHERE id = ?');
+            $studentNoStmt->bind_param('i', $studentId);
+            $studentNoStmt->execute();
+            $existingStudentNo = (string) ($studentNoStmt->get_result()->fetch_assoc()['student_no'] ?? '');
+            $studentNoStmt->close();
+        }
         $formValues = [
             'id' => $studentId,
+            'student_no' => $formMode === 'edit' ? $existingStudentNo : $studentNo,
             'full_name' => $fullName,
             'email' => $email,
             'academic_year_id' => $academicYearId,
@@ -194,6 +205,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $validationError = '';
         if ($fullName === '') {
             $validationError = 'Full name is required.';
+        } elseif ($action === 'create' && $studentNo === '') {
+            $validationError = 'Student No is required.';
         } elseif ($academicYearId <= 0) {
             $validationError = 'Please select an academic year.';
         } elseif ($facultyId <= 0) {
@@ -240,6 +253,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $semCheckStmt->close();
         }
 
+        if ($validationError === '' && $action === 'create') {
+            $dupNoStmt = $conn->prepare('SELECT id FROM students WHERE UPPER(student_no) = ?');
+            $dupNoStmt->bind_param('s', $studentNo);
+            $dupNoStmt->execute();
+            if ($dupNoStmt->get_result()->fetch_assoc()) {
+                $validationError = 'A student with this Student No already exists.';
+            }
+            $dupNoStmt->close();
+        }
+
         $existingUserId = 0;
         if ($validationError === '' && $action === 'update') {
             // A Dean editing an existing student must currently own them —
@@ -279,9 +302,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($action === 'create') {
                 $conn->begin_transaction();
                 try {
-                    $studentNo = generate_student_no($conn);
-                    $username = generate_student_username($conn, $fullName);
-                    $tempPassword = generate_temp_password();
+                    $username = generate_student_username($conn, $fullName, $studentNo);
+                    $tempPassword = $studentNo;
                     $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
                     $insertUserStmt = $conn->prepare(
@@ -400,12 +422,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($role === 'dean') {
             $studentStmt = $conn->prepare(
-                'SELECT s.user_id, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.faculty_id = ?'
+                'SELECT s.user_id, s.student_no, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.faculty_id = ?'
             );
             $studentStmt->bind_param('ii', $studentId, $deanFacultyId);
         } else {
             $studentStmt = $conn->prepare(
-                'SELECT s.user_id, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ?'
+                'SELECT s.user_id, s.student_no, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ?'
             );
             $studentStmt->bind_param('i', $studentId);
         }
@@ -416,10 +438,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$studentRow) {
             $errorMessage = 'Student not found.';
         } else {
-            $newPassword = generate_temp_password();
+            $newPassword = $studentRow['student_no'];
             $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
 
-            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?');
             $updatePassStmt->bind_param('si', $newHash, $studentRow['user_id']);
             $updatePassStmt->execute();
             $updatePassStmt->close();
@@ -440,7 +462,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
     $editId = (int) $_GET['edit'];
     if ($role === 'dean') {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
+            'SELECT s.id, s.student_no, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ? AND s.faculty_id = ?'
@@ -448,7 +470,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $editStmt->bind_param('ii', $editId, $deanFacultyId);
     } else {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
+            'SELECT s.id, s.student_no, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ?'
@@ -463,6 +485,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $formMode = 'edit';
         $formValues = [
             'id' => (int) $editRow['id'],
+            'student_no' => (string) $editRow['student_no'],
             'full_name' => (string) $editRow['full_name'],
             'email' => (string) ($editRow['email'] ?? ''),
             'academic_year_id' => (int) $editRow['academic_year_id'],
@@ -483,6 +506,11 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
 $filterAcademicYearId = (int) ($_GET['academic_year_id'] ?? 0);
 $filterFacultyId = $role === 'dean' ? $deanFacultyId : (int) ($_GET['faculty_id'] ?? 0);
 $filterDepartmentId = (int) ($_GET['department_id'] ?? 0);
+$filterSemesterId = (int) ($_GET['semester_id'] ?? 0);
+$filterShift = (string) ($_GET['shift'] ?? '');
+if (!array_key_exists($filterShift, SHIFT_LABELS)) {
+    $filterShift = '';
+}
 $filterSearch = trim((string) ($_GET['search'] ?? ''));
 
 // ---------------------------------------------------------------------
@@ -549,6 +577,16 @@ if ($filterDepartmentId > 0) {
     $conditions[] = 's.department_id = ?';
     $params[] = $filterDepartmentId;
     $types .= 'i';
+}
+if ($filterSemesterId > 0) {
+    $conditions[] = 's.semester_id = ?';
+    $params[] = $filterSemesterId;
+    $types .= 'i';
+}
+if ($filterShift !== '') {
+    $conditions[] = 's.shift = ?';
+    $params[] = $filterShift;
+    $types .= 's';
 }
 if ($filterSearch !== '') {
     $conditions[] = '(s.full_name LIKE ? OR s.student_no LIKE ?)';
@@ -654,7 +692,7 @@ $studentsStmt->close();
 
                         <!-- Filter bar: real SQL WHERE filters via GET -->
                         <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="row g-2 mb-3">
-                            <div class="col-sm-6 col-md-3">
+                            <div class="col-sm-6 col-md-2">
                                 <select class="form-select form-select-sm" name="academic_year_id">
                                     <option value="0">All Academic Years</option>
                                     <?php foreach ($academicYears as $ay): ?>
@@ -664,13 +702,13 @@ $studentsStmt->close();
                                     <?php endforeach; ?>
                                 </select>
                             </div>
-                            <div class="col-sm-6 col-md-3">
+                            <div class="col-sm-6 col-md-2">
                                 <?php if ($role === 'dean'): ?>
-                                    <select class="form-select form-select-sm" id="filterFacultySelect" disabled onchange="updateFilterDepartmentOptions(this.value, 0)">
+                                    <select class="form-select form-select-sm" id="filterFacultySelect" disabled onchange="updateFilterDepartmentOptions(this.value, 0); updateFilterSemesterOptions(this.value, 0);">
                                         <option value="<?= (int) $deanFacultyId ?>" selected><?= htmlspecialchars($deanFacultyName) ?></option>
                                     </select>
                                 <?php else: ?>
-                                    <select class="form-select form-select-sm" name="faculty_id" id="filterFacultySelect" onchange="updateFilterDepartmentOptions(this.value, 0)">
+                                    <select class="form-select form-select-sm" name="faculty_id" id="filterFacultySelect" onchange="updateFilterDepartmentOptions(this.value, 0); updateFilterSemesterOptions(this.value, 0);">
                                         <option value="0">All Faculties</option>
                                         <?php foreach ($faculties as $f): ?>
                                             <option value="<?= (int) $f['id'] ?>" <?= $filterFacultyId === (int) $f['id'] ? 'selected' : '' ?>>
@@ -680,19 +718,34 @@ $studentsStmt->close();
                                     </select>
                                 <?php endif; ?>
                             </div>
-                            <div class="col-sm-6 col-md-3">
+                            <div class="col-sm-6 col-md-2">
                                 <select class="form-select form-select-sm" name="department_id" id="filterDepartmentSelect">
                                     <option value="0">All Departments</option>
                                 </select>
                             </div>
-                            <div class="col-sm-6 col-md-3">
+                            <div class="col-sm-6 col-md-2">
+                                <select class="form-select form-select-sm" name="semester_id" id="filterSemesterSelect">
+                                    <option value="0">All Semesters</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-6 col-md-2">
+                                <select class="form-select form-select-sm" name="shift">
+                                    <option value="">All Shifts</option>
+                                    <?php foreach (SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
+                                        <option value="<?= htmlspecialchars($shiftValue) ?>" <?= $filterShift === $shiftValue ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($shiftLabel) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="col-sm-6 col-md-2">
                                 <div class="input-group input-group-sm">
                                     <input type="text" class="form-control" name="search" placeholder="Search name or student no"
                                            value="<?= htmlspecialchars($filterSearch) ?>">
                                     <button type="submit" class="btn btn-outline-secondary"><i class="bi bi-search"></i></button>
                                 </div>
                             </div>
-                            <?php if ($filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepartmentId > 0 || $filterSearch !== ''): ?>
+                            <?php if ($filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepartmentId > 0 || $filterSemesterId > 0 || $filterShift !== '' || $filterSearch !== ''): ?>
                                 <div class="col-12">
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="small">Clear filters</a>
                                 </div>
@@ -787,6 +840,18 @@ $studentsStmt->close();
                             <?php if ($formMode === 'edit'): ?>
                                 <input type="hidden" name="student_id" value="<?= (int) $formValues['id'] ?>">
                             <?php endif; ?>
+
+                            <div class="mb-3">
+                                <label for="studentNoInput" class="form-label">Student No</label>
+                                <?php if ($formMode === 'edit'): ?>
+                                    <input type="text" class="form-control text-uppercase" value="<?= htmlspecialchars($formValues['student_no']) ?>" disabled>
+                                    <div class="form-text">Student No cannot be changed after creation.</div>
+                                <?php else: ?>
+                                    <input type="text" class="form-control text-uppercase" id="studentNoInput" name="student_no" maxlength="20"
+                                           value="<?= htmlspecialchars($formValues['student_no']) ?>" required>
+                                    <div class="form-text">The student's existing admission/ID number. This becomes their login username base and initial password.</div>
+                                <?php endif; ?>
+                            </div>
 
                             <div class="mb-3">
                                 <label for="studentFullNameInput" class="form-label">Full Name</label>
@@ -915,6 +980,33 @@ $studentsStmt->close();
         }
 
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const allSemestersFlat = <?= json_encode(array_map(static fn ($s) => ['id' => (int) $s['id'], 'name' => $s['name']], $semesters), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function updateFilterSemesterOptions(facultyId, selectedSemesterId) {
+            const select = document.getElementById('filterSemesterSelect');
+            let semesters = semestersByFacultyId[facultyId] || [];
+            if (semesters.length === 0 && (!facultyId || facultyId === '0')) {
+                semesters = allSemestersFlat;
+            }
+            select.innerHTML = '';
+
+            const allOption = document.createElement('option');
+            allOption.value = '0';
+            allOption.textContent = 'All Semesters';
+            select.appendChild(allOption);
+
+            semesters.forEach((sem) => {
+                const opt = document.createElement('option');
+                opt.value = String(sem.id);
+                opt.textContent = sem.name;
+                select.appendChild(opt);
+            });
+
+            select.value = String(selectedSemesterId || 0);
+            if (select.value !== String(selectedSemesterId || 0)) {
+                select.value = '0';
+            }
+        }
 
         function updateFormSemesterOptions(facultyId, selectedSemesterId) {
             const select = document.getElementById('studentSemesterSelect');
@@ -942,6 +1034,7 @@ $studentsStmt->close();
         window.addEventListener('DOMContentLoaded', () => {
             const filterFacultyId = document.getElementById('filterFacultySelect').value;
             updateFilterDepartmentOptions(filterFacultyId, <?= (int) $filterDepartmentId ?>);
+            updateFilterSemesterOptions(filterFacultyId, <?= (int) $filterSemesterId ?>);
 
             const formFacultyId = document.getElementById('studentFacultySelect').value;
             updateFormDepartmentOptions(formFacultyId, <?= (int) $formValues['department_id'] ?>);

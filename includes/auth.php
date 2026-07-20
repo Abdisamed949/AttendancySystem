@@ -15,6 +15,13 @@ if (session_status() === PHP_SESSION_NONE) {
 
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/nav_items.php';
+require_once __DIR__ . '/semester_helpers.php';
+
+// Keeps semesters.is_current in sync with today's date on every request,
+// before any page's own is_current-scoped queries run — see
+// refresh_semester_current_flags() for why "current" is date-derived
+// rather than a manually-toggled single flag per faculty.
+refresh_semester_current_flags(db());
 
 /**
  * Redirect to a path inside the application base URL.

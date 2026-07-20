@@ -1,9 +1,7 @@
 /**
  * Interactive Xiiso grid on attendance.php: click a cell to cycle its
- * status ('' -> present -> absent -> excused -> ''), saving each change via
- * AJAX with an optimistic UI that rolls back on failure. A cell showing
- * "late" (only ever set via the classic single-session form) advances to
- * "present" on click, joining the normal cycle from there.
+ * status ('' -> present -> absent -> ''), saving each change via AJAX with
+ * an optimistic UI that rolls back on failure.
  */
 document.addEventListener('DOMContentLoaded', function () {
     var table = document.getElementById('xiisoGridTable');
@@ -17,16 +15,13 @@ document.addEventListener('DOMContentLoaded', function () {
     var NEXT_STATUS = {
         '': 'present',
         'present': 'absent',
-        'absent': 'excused',
-        'excused': '',
+        'absent': '',
     };
 
     var GLYPHS = {
         '': '',
         'present': 'P',
         'absent': 'A',
-        'late': 'L',
-        'excused': 'E',
     };
 
     function cellKey(button) {

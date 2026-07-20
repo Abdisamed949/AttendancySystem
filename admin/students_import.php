@@ -55,10 +55,10 @@ function normalize_shift_input(string $input): ?string
 if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->fromArray(['Full Name', 'Email', 'Academic Year', 'Faculty', 'Department', 'Semester', 'Shift'], null, 'A1');
-    $sheet->fromArray(['Amina Hassan', 'amina.hassan@admas.edu.so', '2025/2026', 'Engineering & IT', 'Computer Science', 'Semester 1', 'Morning Shift'], null, 'A2');
-    $sheet->getStyle('A1:G1')->getFont()->setBold(true);
-    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G'] as $col) {
+    $sheet->fromArray(['Student No', 'Full Name', 'Email', 'Academic Year', 'Faculty', 'Department', 'Semester', 'Shift'], null, 'A1');
+    $sheet->fromArray(['1472/23', 'Amina Hassan', 'amina.hassan@admas.edu.so', '2025/2026', 'Engineering & IT', 'Computer Science', 'Semester 1', 'Morning Shift'], null, 'A2');
+    $sheet->getStyle('A1:H1')->getFont()->setBold(true);
+    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as $col) {
         $sheet->getColumnDimension($col)->setAutoSize(true);
     }
 
@@ -132,9 +132,23 @@ foreach ($existingDepartments as $dept) {
 // Faculty, never globally.
 $existingSemesters = $conn->query('SELECT id, name, faculty_id FROM semesters ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 $semesterByFacultyAndLowerName = [];
+// Fallback for a bare number ("1", "Semester 1") against a semester named
+// e.g. "semester1" — only kept when the digits are unambiguous within the
+// faculty (no two semesters in the same faculty reducing to the same digits).
+$semesterByFacultyAndDigits = [];
 foreach ($existingSemesters as $sem) {
-    $key = (int) $sem['faculty_id'] . '|' . mb_strtolower(trim((string) $sem['name']));
+    $facultyId = (int) $sem['faculty_id'];
+    $name = mb_strtolower(trim((string) $sem['name']));
+    $key = $facultyId . '|' . $name;
     $semesterByFacultyAndLowerName[$key] = (int) $sem['id'];
+
+    $digits = preg_replace('/\D/', '', $name);
+    if ($digits !== '') {
+        $digitsKey = $facultyId . '|' . $digits;
+        $semesterByFacultyAndDigits[$digitsKey] = array_key_exists($digitsKey, $semesterByFacultyAndDigits)
+            ? -1 // ambiguous: two semesters in this faculty share the same digits — don't guess
+            : (int) $sem['id'];
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -168,37 +182,107 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (empty($rows)) {
                         $errorMessage = 'The uploaded file is empty.';
                     } else {
-                        $headerRow = array_map(static fn ($h) => mb_strtolower(trim((string) $h)), array_shift($rows));
+                        // Some sheets put shared info at the top as "Field:", "value"
+                        // rows (e.g. "Faculty:", "Informatic") before the actual
+                        // Name/ID table — common when a whole sheet is one class
+                        // where every student shares the same Academic Year/Faculty/
+                        // Department/Semester/Shift. Peel those off as defaults so
+                        // the per-row table only strictly needs Student No + Full
+                        // Name; any of these 5 fields can still be overridden with
+                        // its own column in the table below.
+                        $batchDefaults = ['academic_year' => '', 'faculty' => '', 'department' => '', 'semester' => '', 'shift' => ''];
+                        $batchFieldLabels = [
+                            'academic_year' => ['academic year', 'sanadka waxbarasho', 'sanadka waxbarashada', 'sanadka'],
+                            'faculty' => ['faculty', 'kulliyadda', 'kulliyad'],
+                            'department' => ['department', 'waaxda', 'waax'],
+                            'semester' => ['semester', 'semesterka'],
+                            'shift' => ['shift', 'shiftka'],
+                        ];
 
-                        $nameCol = array_search('full name', $headerRow, true);
-                        if ($nameCol === false) {
-                            $nameCol = array_search('name', $headerRow, true);
+                        $tableStart = 0;
+                        while ($tableStart < count($rows)) {
+                            $label = str_replace([':', '-'], '', mb_strtolower(trim((string) ($rows[$tableStart][0] ?? ''))));
+                            $matchedField = null;
+                            foreach ($batchFieldLabels as $field => $labels) {
+                                if (in_array($label, $labels, true)) {
+                                    $matchedField = $field;
+                                    break;
+                                }
+                            }
+                            if ($matchedField === null) {
+                                break;
+                            }
+                            $batchDefaults[$matchedField] = trim((string) ($rows[$tableStart][1] ?? ''));
+                            $tableStart++;
                         }
-                        $emailCol = array_search('email', $headerRow, true);
-                        $yearCol = array_search('academic year', $headerRow, true);
-                        $facultyCol = array_search('faculty', $headerRow, true);
-                        $departmentCol = array_search('department', $headerRow, true);
-                        $semesterCol = array_search('semester', $headerRow, true);
-                        $shiftCol = array_search('shift', $headerRow, true);
+                        // Skip a blank separator row between the batch-header block
+                        // and the table.
+                        while ($tableStart < count($rows) && count(array_filter($rows[$tableStart], static fn ($c) => trim((string) $c) !== '')) === 0) {
+                            $tableStart++;
+                        }
 
-                        if ($nameCol === false || $yearCol === false || $facultyCol === false
-                            || $departmentCol === false || $semesterCol === false || $shiftCol === false) {
-                            $errorMessage = 'The file must have "Full Name", "Academic Year", "Faculty", "Department", "Semester" and "Shift" column headers.';
+                        if ($tableStart >= count($rows)) {
+                            $errorMessage = 'No student table was found in the uploaded file.';
                         } else {
-                            $rowNumber = 1;
+                        $headerRow = array_map(static fn ($h) => str_replace('-', '', mb_strtolower(trim((string) $h))), $rows[$tableStart]);
+                        $dataRows = array_slice($rows, $tableStart + 1);
+                        $rowNumber = $tableStart + 1;
 
-                            foreach ($rows as $row) {
+                        // Each field accepts English and Somali header synonyms, so
+                        // staff can write the sheet in whichever language is natural
+                        // for them without needing to rename columns first. Hyphens
+                        // are stripped from both sides above, so "ID-ga"/"id ga"/
+                        // "idga" all match the same candidate.
+                        $studentNoCol = find_import_column($headerRow, ['student no', 'studentno', 'id', 'idga ardayga', 'idga', 'lambarka ardayga', 'lambarka']);
+                        $nameCol = find_import_column($headerRow, ['full name', 'name', 'magaca buuxa', 'magaca']);
+                        $emailCol = find_import_column($headerRow, ['email', 'emailka', 'iimaylka']);
+                        $yearCol = find_import_column($headerRow, ['academic year', 'sanadka waxbarasho', 'sanadka waxbarashada', 'sanadka']);
+                        $facultyCol = find_import_column($headerRow, ['faculty', 'kulliyadda', 'kulliyad']);
+                        $departmentCol = find_import_column($headerRow, ['department', 'department name', 'waaxda', 'waax']);
+                        $semesterCol = find_import_column($headerRow, ['semester', 'semesterka']);
+                        $shiftCol = find_import_column($headerRow, ['shift', 'shiftka']);
+
+                        $missingRequired = $studentNoCol === false || $nameCol === false
+                            || ($yearCol === false && $batchDefaults['academic_year'] === '')
+                            || ($facultyCol === false && $batchDefaults['faculty'] === '')
+                            || ($departmentCol === false && $batchDefaults['department'] === '')
+                            || ($semesterCol === false && $batchDefaults['semester'] === '')
+                            || ($shiftCol === false && $batchDefaults['shift'] === '');
+
+                        if ($missingRequired) {
+                            $errorMessage = 'The file must have "Student No" (or "ID-ga Ardayga") and "Full Name" (or "Magaca Buuxa") columns, plus Academic Year, Faculty, Department, Semester and Shift — either as columns in the table, or as "Field:", "value" rows above it.';
+                        } else {
+                            $seenStudentNosInFile = [];
+
+                            foreach ($dataRows as $row) {
                                 $rowNumber++;
+                                $studentNo = strtoupper(trim((string) ($row[$studentNoCol] ?? '')));
                                 $fullName = trim((string) ($row[$nameCol] ?? ''));
-                                $emailInput = $emailCol !== false ? trim((string) ($row[$emailCol] ?? '')) : '';
-                                $yearInput = trim((string) ($row[$yearCol] ?? ''));
-                                $facultyInput = trim((string) ($row[$facultyCol] ?? ''));
-                                $departmentInput = trim((string) ($row[$departmentCol] ?? ''));
-                                $semesterInput = trim((string) ($row[$semesterCol] ?? ''));
-                                $shiftInput = trim((string) ($row[$shiftCol] ?? ''));
 
-                                if ($fullName === '' && $yearInput === '' && $facultyInput === '' && $departmentInput === '') {
+                                if ($studentNo === '' && $fullName === '') {
                                     continue;
+                                }
+
+                                $emailInput = $emailCol !== false ? trim((string) ($row[$emailCol] ?? '')) : '';
+                                $yearInput = $yearCol !== false ? trim((string) ($row[$yearCol] ?? '')) : '';
+                                if ($yearInput === '') {
+                                    $yearInput = $batchDefaults['academic_year'];
+                                }
+                                $facultyInput = $facultyCol !== false ? trim((string) ($row[$facultyCol] ?? '')) : '';
+                                if ($facultyInput === '') {
+                                    $facultyInput = $batchDefaults['faculty'];
+                                }
+                                $departmentInput = $departmentCol !== false ? trim((string) ($row[$departmentCol] ?? '')) : '';
+                                if ($departmentInput === '') {
+                                    $departmentInput = $batchDefaults['department'];
+                                }
+                                $semesterInput = $semesterCol !== false ? trim((string) ($row[$semesterCol] ?? '')) : '';
+                                if ($semesterInput === '') {
+                                    $semesterInput = $batchDefaults['semester'];
+                                }
+                                $shiftInput = $shiftCol !== false ? trim((string) ($row[$shiftCol] ?? '')) : '';
+                                if ($shiftInput === '') {
+                                    $shiftInput = $batchDefaults['shift'];
                                 }
 
                                 $status = 'ok';
@@ -209,7 +293,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $semesterId = 0;
                                 $shift = null;
 
-                                if ($fullName === '') {
+                                if ($studentNo === '') {
+                                    $status = 'error';
+                                    $message = 'Missing Student No';
+                                } elseif ($fullName === '') {
                                     $status = 'error';
                                     $message = 'Missing Full Name';
                                 } elseif ($yearInput === '') {
@@ -255,6 +342,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 if ($status === 'ok') {
                                     $semKey = $facultyId . '|' . mb_strtolower($semesterInput);
                                     $semesterId = $semesterByFacultyAndLowerName[$semKey] ?? 0;
+
+                                    if ($semesterId === 0) {
+                                        // Fall back to matching a bare number ("1", "Semester 1")
+                                        // against a semester named e.g. "semester1", but only when
+                                        // that's unambiguous within the faculty.
+                                        $digits = preg_replace('/\D/', '', $semesterInput);
+                                        if ($digits !== '') {
+                                            $digitsId = $semesterByFacultyAndDigits[$facultyId . '|' . $digits] ?? 0;
+                                            if ($digitsId > 0) {
+                                                $semesterId = $digitsId;
+                                            }
+                                        }
+                                    }
+
                                     if ($semesterId === 0) {
                                         $status = 'error';
                                         $message = 'Unknown semester "' . $semesterInput . '" in faculty "' . $facultyInput . '"';
@@ -285,8 +386,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $emailCheckStmt->close();
                                 }
 
+                                if ($status === 'ok') {
+                                    if (isset($seenStudentNosInFile[$studentNo])) {
+                                        $status = 'error';
+                                        $message = 'Duplicate Student No within this file';
+                                    } else {
+                                        $dupNoStmt = $conn->prepare('SELECT id FROM students WHERE UPPER(student_no) = ?');
+                                        $dupNoStmt->bind_param('s', $studentNo);
+                                        $dupNoStmt->execute();
+                                        if ($dupNoStmt->get_result()->fetch_assoc()) {
+                                            $status = 'error';
+                                            $message = 'Student No already exists';
+                                        }
+                                        $dupNoStmt->close();
+                                    }
+
+                                    if ($status === 'ok') {
+                                        $seenStudentNosInFile[$studentNo] = true;
+                                    }
+                                }
+
                                 $previewRows[] = [
                                     'row' => $rowNumber,
+                                    'student_no' => $studentNo,
                                     'full_name' => $fullName,
                                     'email' => $emailInput,
                                     'year_input' => $yearInput,
@@ -310,6 +432,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $_SESSION['student_import_preview'] = $previewRows;
                                 $step = 'preview';
                             }
+                        }
                         }
                     }
                 } catch (\Throwable $e) {
@@ -338,9 +461,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($validRows as $row) {
             $conn->begin_transaction();
             try {
-                $studentNo = generate_student_no($conn);
-                $username = generate_student_username($conn, $row['full_name']);
-                $tempPassword = generate_temp_password();
+                $studentNo = $row['student_no'];
+                $username = generate_student_username($conn, $row['full_name'], $studentNo);
+                $tempPassword = $studentNo;
                 $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
                 $emailParam = $row['email'] !== '' ? $row['email'] : null;
 
@@ -445,12 +568,16 @@ $invalidCount = count($previewRows) - $validCount;
                     <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Upload File</h6>
 
                     <div class="alert alert-light border small mb-3">
-                        The file must have column headers: <strong>Full Name</strong>, <strong>Academic Year</strong>,
+                        The file must have column headers: <strong>Student No</strong> (the student's existing
+                        admission/ID number — must be unique), <strong>Full Name</strong>, <strong>Academic Year</strong>,
                         <strong>Faculty</strong>, <strong>Department</strong>, <strong>Semester</strong> (must match
                         an existing semester name within that Faculty), and
                         <strong>Shift</strong> (Morning Shift / Afternoon Shift / Weekend). <strong>Email</strong> is
-                        optional. A student number, username, and temporary password will be generated automatically
-                        for each imported student.
+                        optional. A username and temporary password will be generated automatically from the Student
+                        No for each imported student.
+                        <br>
+                        Column headers may also be written in Somali (e.g. "Magaca Buuxa" for Full Name, "ID-ga Ardayga"
+                        for Student No, "Kulliyadda" for Faculty, "Waaxda" for Department).
                         <br>
                         <a href="?action=template" class="fw-semibold">
                             <i class="bi bi-download"></i> Download a starter template (.xlsx)
@@ -486,6 +613,7 @@ $invalidCount = count($previewRows) - $validCount;
                             <thead>
                                 <tr>
                                     <th>Row</th>
+                                    <th>Student No</th>
                                     <th>Full Name</th>
                                     <th>Academic Year</th>
                                     <th>Faculty</th>
@@ -499,6 +627,7 @@ $invalidCount = count($previewRows) - $validCount;
                                 <?php foreach ($previewRows as $r): ?>
                                     <tr>
                                         <td><?= (int) $r['row'] ?></td>
+                                        <td><?= htmlspecialchars($r['student_no']) ?></td>
                                         <td><?= htmlspecialchars($r['full_name']) ?></td>
                                         <td><?= htmlspecialchars($r['year_input']) ?></td>
                                         <td><?= htmlspecialchars($r['faculty_input']) ?></td>

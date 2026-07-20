@@ -62,7 +62,7 @@ Six roles, ranked by scope (widest to narrowest):
 | Role | Scope | Can do | Cannot do |
 |---|---|---|---|
 | **System Administrator** | Whole system | Full technical control: all CRUD, User Management, role appointment, system Settings, Notification thresholds, backups (incl. Settings → Danger Zone factory reset for handover, with an automatic pre-wipe `mysqldump` backup) | — |
-| **Head of Academic Affairs** | All faculties | Set Academic Year & minimum attendance threshold; view cross-faculty reports; **register new Lecturer accounts** | Cannot manage students, delete accounts, or edit system Settings |
+| **Head of Academic Affairs** | All faculties | Set Academic Year & minimum attendance threshold; **set Semesters per Year per faculty**; view cross-faculty reports; **register new Lecturer accounts** | Cannot manage students, delete accounts, or edit system Settings |
 | **Registration Office** | All faculties | Add/edit students, bulk Excel import of students, enrollment reports | No access to Attendance or Settings |
 | **Dean** | **Own faculty only** | Full CRUD on Departments, Courses, Lecturers, Students, Attendance *within their faculty*; faculty-scoped reports | Cannot view/edit other faculties, no system Settings, no User Management |
 | **Lecturer** | Own assigned courses only | Take attendance, view "My Courses" (filtered by Academic Year + Faculty + Department to disambiguate duplicate course codes across faculties), class reports | Cannot see other lecturers' courses or student management screens |
@@ -800,6 +800,29 @@ under "Known Gaps / Things to Revisit" at the end of this section.
   real logged-in user will need either a password reset through the app or
   new temporary accounts (as this session did for attendance.php, cleaned up
   afterward) rather than assuming the old seeded credentials still work.
+- ~~Not yet done — cross-faculty lecturer assignment (planned)~~ — **resolved**.
+  The real university this system models has lecturers who teach in more
+  than one faculty at once, and "common" courses that multiple faculties
+  share via one lecturer. `attendance.php`, `lecturer/courses.php`,
+  `lecturer/dashboard.php`, and `reports.php` already resolved a lecturer's
+  courses/current-semester **per course's own faculty**, not the lecturer's
+  home faculty, so nothing changed there. The actual blockers were the
+  `department_id = ?` lecturer-ownership checks in `admin/courses.php`
+  (Add Course + first offering) and `admin/course_offerings.php` (Manage
+  Offerings — the real per-semester assignment page) — both relaxed to
+  `status = 'active'` (any lecturer system-wide), for **both**
+  `system_admin` and `dean` (a Dean assigning an outside lecturer only
+  touches a course_offering inside their own faculty — it doesn't grant
+  visibility into the lecturer's home faculty's data, so this doesn't
+  violate Dean's "own faculty only" scope). Both lecturer dropdowns now
+  label an outside lecturer with their home faculty (e.g. "Jane Doe
+  (Engineering)") — `admin/course_offerings.php`'s flat list sorts own-
+  department first; `admin/courses.php`'s JS cascade lists the picked
+  department's own lecturers first, then every other active lecturer under
+  an "── Other faculties ──" separator. Verified live: created a temporary
+  test course under Nursing and assigned it to an Engineering-department
+  lecturer via `admin/course_offerings.php` — saved and displayed
+  correctly, no errors; cleaned up afterward.
 
 ### Dean Role Audit
 - [x] **Full audit of every page a Dean can reach**, against CLAUDE.md §4/§6,

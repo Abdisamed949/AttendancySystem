@@ -28,10 +28,11 @@ INSERT INTO roles (name) VALUES
 -- 2. FACULTIES
 -- ---------------------------------------------------------------------
 CREATE TABLE faculties (
-  id            INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-  name          VARCHAR(150) NOT NULL,
-  dean_user_id  INT UNSIGNED NULL,   -- FK added after users table exists
-  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  id                  INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  name                VARCHAR(150) NOT NULL,
+  semesters_per_year  TINYINT UNSIGNED NOT NULL DEFAULT 3,  -- e.g. 3 for most faculties, 2 for Health; display-only (see migrations/2026_08_faculties_semesters_per_year.sql)
+  dean_user_id        INT UNSIGNED NULL,   -- FK added after users table exists
+  created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -261,7 +262,7 @@ CREATE TABLE attendance (
   academic_year_id    INT UNSIGNED NOT NULL,
   shift               ENUM('morning','afternoon','weekend') NOT NULL,
   attendance_date     DATE NOT NULL,           -- denormalized from sessions.date at save time (see semester_helpers.php)
-  status              ENUM('present','absent','late','excused') NOT NULL,
+  status              ENUM('present','absent') NOT NULL,
   recorded_by_user_id INT UNSIGNED NOT NULL,   -- the lecturer who marked it
   created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_attendance_student

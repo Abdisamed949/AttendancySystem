@@ -186,7 +186,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
     if ($fullName === '') {
         $validationError = 'Full name is required.';
     } elseif ($staffNo === '') {
-        $validationError = 'Staff number is required.';
+        $validationError = 'Staff No is required.';
     } elseif ($departmentId <= 0) {
         $validationError = 'Please select a department.';
     } elseif ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -228,8 +228,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 
         $conn->begin_transaction();
         try {
-            $username = generate_lecturer_username($conn, $fullName);
-            $tempPassword = generate_temp_password();
+            $username = generate_lecturer_username($conn, $fullName, $staffNo);
+            $tempPassword = $staffNo;
             $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
             $insertUserStmt = $conn->prepare(
@@ -248,7 +248,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
             $insertLecturerStmt->close();
 
             $conn->commit();
-            $_SESSION['flash_success'] = 'Lecturer registered successfully. Username: ' . $username
+            $_SESSION['flash_success'] = 'Lecturer registered successfully. Staff No: ' . $staffNo
+                . ' — Username: ' . $username
                 . ' — Temporary Password: ' . $tempPassword
                 . ' — share these credentials with the lecturer now; the password will not be shown again.';
         } catch (Throwable $e) {
@@ -398,6 +399,7 @@ $lecturers = $conn->query(
                                 <label for="lecturerStaffNoInput" class="form-label">Staff No</label>
                                 <input type="text" class="form-control text-uppercase" id="lecturerStaffNoInput" name="staff_no" maxlength="20" required
                                        value="<?= htmlspecialchars($lecturerFormValues['staff_no']) ?>">
+                                <div class="form-text">The lecturer's existing staff/employee number. This becomes their login username base and initial password.</div>
                             </div>
                             <div class="mb-3">
                                 <label for="lecturerFullNameInput" class="form-label">Full Name</label>

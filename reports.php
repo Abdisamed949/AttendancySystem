@@ -345,7 +345,7 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
  * Reproduces the lecturer's paper/Excel grid: one row per student enrolled
  * in the course, one column per Xiiso (1-12) for the given semester, plus
  * auto-computed P (present count) / A (absent count) / % trailing columns.
- * Cell values: '1' present, '0' absent, 'L' late, 'E' excused, '' unmarked.
+ * Cell values: '1' present, '0' absent, '' unmarked.
  */
 function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): array
 {
@@ -381,8 +381,6 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): 
             $row['session_' . $s['id']] = match ($status) {
                 'present' => '1',
                 'absent' => '0',
-                'late' => 'L',
-                'excused' => 'E',
                 default => '',
             };
             if ($status !== null) {

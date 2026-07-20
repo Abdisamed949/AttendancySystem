@@ -8,6 +8,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['lecturer']);
 
@@ -87,7 +88,7 @@ $sessionsStmt->close();
 // there is no single shared "the current academic year" to show anymore.
 // ---------------------------------------------------------------------
 $myCoursesStmt2 = $conn->prepare(
-    "SELECT c.id, c.code, c.name, ay.label AS academic_year_label,
+    "SELECT c.id, c.code, c.name, ay.label AS academic_year_label, se.id AS semester_id,
             MAX(a.attendance_date) AS last_session,
             (SELECT a2.shift FROM attendance a2 WHERE a2.course_id = c.id ORDER BY a2.attendance_date DESC LIMIT 1) AS last_shift,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
@@ -96,13 +97,53 @@ $myCoursesStmt2 = $conn->prepare(
      {$currentOfferingJoin}
      JOIN academic_years ay ON ay.id = se.academic_year_id
      LEFT JOIN attendance a ON a.course_id = c.id
-     GROUP BY c.id, c.code, c.name, ay.label
+     GROUP BY c.id, c.code, c.name, ay.label, se.id
      ORDER BY c.code"
 );
 $myCoursesStmt2->bind_param('i', $lecturerRecordId);
 $myCoursesStmt2->execute();
 $myCourses = $myCoursesStmt2->get_result()->fetch_all(MYSQLI_ASSOC);
 $myCoursesStmt2->close();
+
+// ---------------------------------------------------------------------
+// Pending Xiiso Sessions — for each currently-offered course, any Xiiso
+// whose date has already passed but doesn't have an attendance mark for
+// every enrolled student yet. Surfaced so a lecturer never accidentally
+// lets a session go unrecorded before the semester closes.
+// ---------------------------------------------------------------------
+$today = date('Y-m-d');
+$pendingSessions = [];
+foreach ($myCourses as $course) {
+    $enrolledCount = (int) $course['student_count'];
+    if ($enrolledCount === 0 || $course['semester_id'] === null) {
+        continue;
+    }
+
+    $sessions = get_sessions_for_semester($conn, (int) $course['semester_id']);
+    foreach ($sessions as $session) {
+        if ($session['date'] === null || $session['date'] > $today) {
+            continue;
+        }
+
+        $markedStmt = $conn->prepare('SELECT COUNT(*) AS c FROM attendance WHERE course_id = ? AND session_id = ?');
+        $markedStmt->bind_param('ii', $course['id'], $session['id']);
+        $markedStmt->execute();
+        $markedCount = (int) ($markedStmt->get_result()->fetch_assoc()['c'] ?? 0);
+        $markedStmt->close();
+
+        if ($markedCount < $enrolledCount) {
+            $pendingSessions[] = [
+                'course_id' => (int) $course['id'],
+                'course_label' => $course['code'] . ' — ' . $course['name'],
+                'session_label' => $session['label'],
+                'session_date' => $session['date'],
+                'marked_count' => $markedCount,
+                'enrolled_count' => $enrolledCount,
+            ];
+        }
+    }
+}
+usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['session_date']));
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -159,6 +200,45 @@ $myCoursesStmt2->close();
                     </div>
                 </div>
             </div>
+
+            <?php if (!empty($pendingSessions)): ?>
+                <div class="admas-card p-4 mb-4">
+                    <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
+                        <i class="bi bi-exclamation-triangle-fill text-warning"></i> Pending Xiiso Sessions
+                    </h6>
+                    <p class="text-muted small mb-3">These sessions have already happened but attendance hasn't been marked for every student yet.</p>
+                    <div class="table-responsive">
+                        <table class="table admas-table align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Course</th>
+                                    <th>Xiiso</th>
+                                    <th>Date</th>
+                                    <th>Marked</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($pendingSessions as $p): ?>
+                                    <tr>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($p['course_label']) ?></td>
+                                        <td><?= htmlspecialchars($p['session_label']) ?></td>
+                                        <td><?= htmlspecialchars(date('M j, Y', strtotime($p['session_date']))) ?></td>
+                                        <td>
+                                            <span class="badge-pill badge-warning"><?= $p['marked_count'] ?> / <?= $p['enrolled_count'] ?></span>
+                                        </td>
+                                        <td>
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= $p['course_id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                                <i class="bi bi-calendar2-check"></i> Mark Now
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="admas-card p-4">
                 <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Assigned Courses</h6>

@@ -36,6 +36,9 @@ function nav_items(): array
         // same reasoning as the head_academic Lecturers entry above).
         ['label' => 'My Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'roles' => ['lecturer']],
         ['label' => 'My Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'roles' => ['student']],
+        // Per-semester attendance breakdown (all semesters, not just the
+        // current academic year like My Courses above) — student only.
+        ['label' => 'Attendance History', 'icon' => 'bi-clock-history', 'file' => 'attendance_history.php', 'roles' => ['student']],
         // Attendance lives at the app root (shared by all three roles below), not under any one role folder.
         ['label' => 'Attendance', 'icon' => 'bi-calendar2-check', 'file' => 'attendance.php', 'path' => 'attendance.php', 'roles' => ['system_admin', 'dean', 'lecturer']],
         // Semester/Xiiso session management lives at the app root (shared across roles), same pattern as Attendance above.

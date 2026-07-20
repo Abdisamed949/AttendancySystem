@@ -267,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
         foreach ($studentIds as $sid) {
             $st = (string) ($statusInput[$sid] ?? '');
             if (!array_key_exists($st, STATUS_LABELS)) {
-                $validationError = 'Please select a status (Present/Absent/Late/Excused) for every student before saving.';
+                $validationError = 'Please select a status (Present/Absent) for every student before saving.';
                 break;
             }
             $rows[$sid] = $st;
@@ -406,7 +406,7 @@ if ($showRoster) {
     unset($r);
 }
 
-$statusCounts = ['present' => 0, 'absent' => 0, 'late' => 0, 'excused' => 0];
+$statusCounts = ['present' => 0, 'absent' => 0];
 foreach ($roster as $r) {
     if ($r['status'] !== '' && isset($statusCounts[$r['status']])) {
         $statusCounts[$r['status']]++;
@@ -909,8 +909,6 @@ $scopeBanner = match ($role) {
                                                 $gCellGlyph = match ($gCellStatus) {
                                                     'present' => 'P',
                                                     'absent' => 'A',
-                                                    'late' => 'L',
-                                                    'excused' => 'E',
                                                     default => '',
                                                 };
                                                 $gIsLastSession = $sIndex === count($gridData['sessions']) - 1;

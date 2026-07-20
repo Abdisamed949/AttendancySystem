@@ -31,7 +31,13 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // ---------------------------------------------------------------------
 // Own students.id (never trusted from input)
 // ---------------------------------------------------------------------
-$ownStmt = $conn->prepare('SELECT id, full_name, faculty_id FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare(
+    'SELECT s.id, s.full_name, s.faculty_id, f.name AS faculty_name, d.name AS department_name
+     FROM students s
+     JOIN faculties f ON f.id = s.faculty_id
+     JOIN departments d ON d.id = s.department_id
+     WHERE s.user_id = ?'
+);
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
@@ -52,7 +58,6 @@ if ($ownStudentId > 0 && $currentAcademicYearId > 0) {
         "SELECT c.id AS course_id, c.code, c.name,
                 SUM(a.status = 'present') AS present_count,
                 SUM(a.status = 'absent') AS absent_count,
-                SUM(a.status = 'late') AS late_count,
                 COUNT(*) AS total_marks
          FROM attendance a
          JOIN courses c ON c.id = a.course_id
@@ -119,7 +124,17 @@ if ($ownStudentId > 0) {
                 Access scope: Own personal record only
             </div>
 
-            <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <h4 class="fw-bold mb-2" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
+            <?php if ($ownRow): ?>
+                <div class="d-flex flex-wrap gap-2 mb-2">
+                    <span class="badge-pill badge-present fs-6 px-3 py-2">
+                        <i class="bi bi-bank"></i> <?= htmlspecialchars((string) $ownRow['faculty_name']) ?>
+                    </span>
+                    <span class="badge-pill badge-neutral fs-6 px-3 py-2">
+                        <i class="bi bi-diagram-3"></i> <?= htmlspecialchars((string) $ownRow['department_name']) ?>
+                    </span>
+                </div>
+            <?php endif; ?>
             <p class="text-muted mb-4">Here's a summary of your attendance this academic year.</p>
 
             <!-- KPI Cards -->
@@ -162,14 +177,13 @@ if ($ownStudentId > 0) {
                                 <th>Course</th>
                                 <th>Present</th>
                                 <th>Absent</th>
-                                <th>Late</th>
                                 <th>Attendance %</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (empty($courseAttendance)): ?>
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted py-4">No attendance records exist for you yet.</td>
+                                    <td colspan="4" class="text-center text-muted py-4">No attendance records exist for you yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courseAttendance as $row): ?>
@@ -181,7 +195,6 @@ if ($ownStudentId > 0) {
                                         <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
                                         <td><?= (int) $row['present_count'] ?></td>
                                         <td><?= (int) $row['absent_count'] ?></td>
-                                        <td><?= (int) $row['late_count'] ?></td>
                                         <td><span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= number_format($pct, 1) ?>%</span></td>
                                     </tr>
                                 <?php endforeach; ?>

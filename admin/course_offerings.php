@@ -101,14 +101,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$semRow) {
             $validationError = 'Please select a valid semester for this course\'s faculty.';
         } elseif ($lecturerId > 0) {
-            // Lecturer must belong to this course's own department, same
-            // validation admin/courses.php used to do for the old
-            // permanent lecturer_id field.
-            $lecStmt = $conn->prepare('SELECT id FROM lecturers WHERE id = ? AND department_id = ?');
-            $lecStmt->bind_param('ii', $lecturerId, $courseDepartmentId);
+            // Any active lecturer system-wide may be assigned, not just
+            // ones in this course's own department — universities share
+            // "common" courses across faculties via one lecturer, and this
+            // only ever creates a course_offerings row inside the course's
+            // own faculty (never grants access to the lecturer's home
+            // faculty's data), so a Dean's "own faculty only" scope still
+            // holds.
+            $lecStmt = $conn->prepare("SELECT id FROM lecturers WHERE id = ? AND status = 'active'");
+            $lecStmt->bind_param('i', $lecturerId);
             $lecStmt->execute();
             if (!$lecStmt->get_result()->fetch_assoc()) {
-                $validationError = 'Selected lecturer does not belong to this course\'s department.';
+                $validationError = 'Selected lecturer is not a valid active lecturer.';
             }
             $lecStmt->close();
         }
@@ -193,7 +197,20 @@ $semestersStmt->execute();
 $semesters = $semestersStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $semestersStmt->close();
 
-$lecturersStmt = $conn->prepare("SELECT id, full_name FROM lecturers WHERE department_id = ? AND status = 'active' ORDER BY full_name");
+// Every active lecturer system-wide, not just this course's own department
+// — universities share "common" courses across faculties via one
+// lecturer (see the ownership note on the lecturer validation below). Each
+// lecturer's own home faculty is fetched too, so the dropdown can label
+// outside lecturers (e.g. "Jane Doe (Health Sciences)") instead of just
+// listing everyone with no context.
+$lecturersStmt = $conn->prepare(
+    "SELECT l.id, l.full_name, f.name AS home_faculty_name, (l.department_id = ?) AS is_own_department
+     FROM lecturers l
+     JOIN departments d ON d.id = l.department_id
+     JOIN faculties f ON f.id = d.faculty_id
+     WHERE l.status = 'active'
+     ORDER BY is_own_department DESC, l.full_name"
+);
 $lecturersStmt->bind_param('i', $courseDepartmentId);
 $lecturersStmt->execute();
 $lecturers = $lecturersStmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -365,10 +382,12 @@ $offeredSemesterIds = array_map(static fn ($o) => (int) $o['semester_id'], $offe
                                 <select class="form-select form-select-sm" name="lecturer_id">
                                     <option value="0">Unassigned</option>
                                     <?php foreach ($lecturers as $l): ?>
-                                        <option value="<?= (int) $l['id'] ?>"><?= htmlspecialchars($l['full_name']) ?></option>
+                                        <option value="<?= (int) $l['id'] ?>">
+                                            <?= htmlspecialchars($l['full_name']) ?><?= $l['is_own_department'] ? '' : ' (' . htmlspecialchars($l['home_faculty_name']) . ')' ?>
+                                        </option>
                                     <?php endforeach; ?>
                                 </select>
-                                <div class="form-text">Only lecturers in this course's own department are shown.</div>
+                                <div class="form-text">Any active lecturer may be assigned — outside lecturers are labeled with their home faculty.</div>
                             </div>
 
                             <div class="row g-2">
