@@ -823,8 +823,27 @@ under "Known Gaps / Things to Revisit" at the end of this section.
   test course under Nursing and assigned it to an Engineering-department
   lecturer via `admin/course_offerings.php` — saved and displayed
   correctly, no errors; cleaned up afterward.
-
-### Dean Role Audit
+- **Lecturer-first "Assign Courses" page** (`lecturer_courses.php`, app
+  root, shared by `system_admin`/`dean`/`head_academic`) — the course-first
+  flow above (`admin/course_offerings.php`: open a course, pick a
+  lecturer) had no inverse: a lecturer teaching "common" courses across
+  faculties had their assignments scattered one course-page at a time,
+  with no single view of everything they teach. This page starts from the
+  lecturer instead: an "Assign Courses" link on their row in
+  `admin/lecturers.php` and `head_academic/lecturers.php` opens a page
+  showing every course_offerings row for that lecturer, any faculty
+  (Course/Semester/Faculty/Academic Year/Teaching Period), plus a
+  Faculty→Department→Course→Semester cascading form to add a new one.
+  Writes the exact same `course_offerings` table as the course-first page
+  — two doors, one room. Scoping: `system_admin`/`head_academic` may
+  add/remove anywhere; `dean` sees a lecturer's full cross-faculty teaching
+  list read-only (schedule metadata only, not student/attendance data) but
+  can only add/remove an assignment inside their own faculty — rows
+  outside it show "Other faculty" instead of a Remove button, and the
+  server independently re-derives/re-checks the course's faculty on every
+  POST rather than trusting anything posted from the form. Verified live
+  as temp system_admin, dean (own-faculty allow + cross-faculty POST
+  correctly rejected), and head_academic accounts; cleaned up afterward.
 - [x] **Full audit of every page a Dean can reach**, against CLAUDE.md §4/§6,
       prompted by the "Known Gaps" note that Dean had no working Students/
       Courses/Departments/Lecturers management despite §4 granting "Full

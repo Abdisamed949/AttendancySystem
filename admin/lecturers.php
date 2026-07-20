@@ -609,6 +609,9 @@ foreach ($departments as $dept) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon" title="Assign Courses">
+                                                        <i class="bi bi-journal-plus"></i>
+                                                    </a>
                                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php?edit=<?= (int) $l['id'] ?>" class="btn-icon" title="Edit">
                                                         <i class="bi bi-pencil"></i>
                                                     </a>

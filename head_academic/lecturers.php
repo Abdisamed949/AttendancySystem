@@ -354,12 +354,13 @@ $lecturers = $conn->query(
                                         <th>Faculty</th>
                                         <th># Courses</th>
                                         <th>Status</th>
+                                        <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (empty($lecturers)): ?>
                                         <tr>
-                                            <td colspan="7" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
+                                            <td colspan="8" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($lecturers as $l): ?>
@@ -379,6 +380,11 @@ $lecturers = $conn->query(
                                                     <?php else: ?>
                                                         <span class="badge-pill badge-inactive">Inactive</span>
                                                     <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon" title="Assign Courses">
+                                                        <i class="bi bi-journal-plus"></i>
+                                                    </a>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
