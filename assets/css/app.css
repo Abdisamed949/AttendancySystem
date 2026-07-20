@@ -124,6 +124,16 @@ body {
     flex-direction: column;
 }
 
+/* Sticky wrapper — keeps the sky-blue strip (email/phone) and the white
+   topbar pinned together at the top of the viewport while the page
+   content scrolls, instead of just the white topbar sticking on its own
+   and the strip scrolling away underneath it. */
+.header-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 1020;
+}
+
 /* Sky-blue top strip */
 .top-strip {
     background: var(--admas-sky);
@@ -153,9 +163,6 @@ body {
     justify-content: space-between;
     align-items: center;
     box-shadow: 0 1px 3px var(--admas-shadow);
-    position: sticky;
-    top: 0;
-    z-index: 1020;
 }
 
 .topbar-search {

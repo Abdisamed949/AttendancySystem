@@ -64,6 +64,7 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
     $notifLinkUrl = BASE_URL . '/student/notifications.php';
 }
 ?>
+<div class="header-sticky">
 <div class="top-strip">
     <div class="top-strip-left">
         <i class="bi bi-geo-alt-fill"></i>
@@ -114,5 +115,6 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
             <i class="bi bi-box-arrow-right"></i>
         </a>
     </div>
+</div>
 </div>
 <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/theme_toggle.js"></script>
