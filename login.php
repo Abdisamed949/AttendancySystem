@@ -127,6 +127,46 @@ if ($campusShort === '') {
         @media (max-width: 860px) {
             .login-card {
                 grid-template-columns: 1fr;
+                min-height: 0;
+            }
+
+            .login-shell {
+                align-items: flex-start;
+                padding: 1rem 0.75rem;
+            }
+
+            .brand-panel {
+                flex-direction: row;
+                justify-content: center;
+                gap: 0.85rem;
+                padding: 1rem 1.25rem;
+                text-align: left;
+            }
+
+            .brand-logo-ring {
+                width: 50px;
+                height: 50px;
+                margin: 0;
+                flex-shrink: 0;
+            }
+
+            .brand-name-line1 {
+                font-size: 1.2rem;
+                margin-bottom: 0.1rem;
+            }
+
+            .brand-name-line2 {
+                font-size: 0.8rem;
+                letter-spacing: 0.18em;
+                margin-bottom: 0;
+            }
+
+            .brand-subtitle {
+                display: none;
+            }
+
+            .form-panel {
+                padding: 1.5rem 1.5rem 1.75rem;
             }
         }
 
