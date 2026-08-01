@@ -140,31 +140,34 @@ if ($ownStudentId > 0) {
             <!-- KPI Cards -->
             <div class="row g-3 mb-4">
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/student/attendance_history.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-graph-up-arrow"></i></div>
                         <div>
                             <div class="kpi-value"><?= $myAttendancePct === null ? '—' : number_format($myAttendancePct, 1) . '%' ?></div>
                             <div class="kpi-label">My Attendance %</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-journal-bookmark-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($enrolledCoursesCount) ?></div>
                             <div class="kpi-label">Enrolled Courses</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="admas-card kpi-card accent-amber h-100">
                         <div class="kpi-icon bg-amber"><i class="bi bi-exclamation-triangle-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($coursesBelowThreshold) ?></div>
                             <div class="kpi-label">Courses Below Threshold</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
             </div>
 

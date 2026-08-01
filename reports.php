@@ -355,18 +355,27 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): 
     $marksByStudentSession = $gridData['marks'];
 
     $columns = [
-        ['key' => 'student_no', 'label' => 'Student No'],
-        ['key' => 'full_name', 'label' => 'Full Name', 'group_end' => true],
+        ['key' => 'student_no', 'label' => 'Student No', 'header_accent' => true],
+        ['key' => 'full_name', 'label' => 'Full Name', 'group_end' => true, 'header_accent' => true],
     ];
+    // Every 4th Xiiso column gets a sky-blue divider (build_xiiso_chunks()),
+    // matching the university's own paper/Excel tracker's banded layout.
+    $sessionIdsAtChunkEnd = [];
+    foreach (build_xiiso_chunks($sessions) as $chunk) {
+        if (!empty($chunk['session_ids'])) {
+            $sessionIdsAtChunkEnd[end($chunk['session_ids'])] = true;
+        }
+    }
     foreach ($sessions as $s) {
-        $columns[] = ['key' => 'session_' . $s['id'], 'label' => $s['label']];
+        $columns[] = [
+            'key' => 'session_' . $s['id'],
+            'label' => $s['label'],
+            'group_end' => isset($sessionIdsAtChunkEnd[(int) $s['id']]),
+        ];
     }
-    if (!empty($sessions)) {
-        $columns[count($columns) - 1]['group_end'] = true;
-    }
-    $columns[] = ['key' => 'present_count', 'label' => 'P'];
-    $columns[] = ['key' => 'absent_count', 'label' => 'A'];
-    $columns[] = ['key' => 'attendance_pct', 'label' => '%'];
+    $columns[] = ['key' => 'present_count', 'label' => 'P', 'group_end' => true, 'summary' => true];
+    $columns[] = ['key' => 'absent_count', 'label' => 'A', 'group_end' => true, 'summary' => true];
+    $columns[] = ['key' => 'attendance_pct', 'label' => '%', 'summary' => true];
 
     $data = [];
     foreach ($students as $st) {
@@ -945,9 +954,19 @@ $scopeBanner = match ($role) {
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
+                            <?php if ($filterReportType === 'xiiso_grid' && $filterXiisoSemesterId > 0): ?>
+                                <?php $xiisoBandChunks = build_xiiso_chunks(get_sessions_for_semester($conn, $filterXiisoSemesterId)); ?>
+                                <tr>
+                                    <th colspan="2"></th>
+                                    <?php foreach ($xiisoBandChunks as $chunk): ?>
+                                        <th class="grid-month-band col-group-end" colspan="<?= (int) $chunk['span'] ?>"><?= htmlspecialchars($chunk['label']) ?></th>
+                                    <?php endforeach; ?>
+                                    <th colspan="3"></th>
+                                </tr>
+                            <?php endif; ?>
                             <tr>
                                 <?php foreach ($reportColumns as $col): ?>
-                                    <th class="<?= !empty($col['group_end']) ? 'col-group-end' : '' ?>"><?= htmlspecialchars($col['label']) ?></th>
+                                    <th class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary' : '')) ?>"><?= htmlspecialchars($col['label']) ?></th>
                                 <?php endforeach; ?>
                             </tr>
                         </thead>
@@ -960,7 +979,7 @@ $scopeBanner = match ($role) {
                                 <?php foreach ($reportRows as $r): ?>
                                     <tr>
                                         <?php foreach ($reportColumns as $col): ?>
-                                            <td class="<?= !empty($col['group_end']) ? 'col-group-end' : '' ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
+                                            <td class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) ? 'col-summary' : '')) ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
                                         <?php endforeach; ?>
                                     </tr>
                                 <?php endforeach; ?>

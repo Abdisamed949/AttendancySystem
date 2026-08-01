@@ -173,31 +173,34 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
             <!-- KPI Cards -->
             <div class="row g-3 mb-4">
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-journal-bookmark-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($myCoursesCount) ?></div>
                             <div class="kpi-label">My Courses</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-people-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($totalStudentsCount) ?></div>
                             <div class="kpi-label">Total Students</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-4">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="admas-card kpi-card accent-green h-100">
                         <div class="kpi-icon bg-green"><i class="bi bi-calendar2-check-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($sessionsRecorded) ?></div>
                             <div class="kpi-label">Sessions Recorded</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
             </div>
 

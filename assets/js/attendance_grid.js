@@ -108,6 +108,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         var body = new URLSearchParams({
             course_id: button.dataset.courseId,
+            semester_id: table.dataset.semesterId,
             session_id: button.dataset.sessionId,
             student_id: button.dataset.studentId,
             status: nextStatus,

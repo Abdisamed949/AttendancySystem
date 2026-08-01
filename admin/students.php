@@ -84,7 +84,9 @@ $formMode = 'create';
 $formValues = [
     'id' => 0,
     'student_no' => '',
-    'full_name' => '',
+    'first_name' => '',
+    'father_name' => '',
+    'grandfather_name' => '',
     'email' => '',
     'academic_year_id' => 0,
     'faculty_id' => $deanFacultyId,
@@ -170,7 +172,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'create' || $action === 'update') {
         $studentId = $action === 'update' ? (int) ($_POST['student_id'] ?? 0) : 0;
         $studentNo = strtoupper(trim((string) ($_POST['student_no'] ?? '')));
-        $fullName = trim((string) ($_POST['full_name'] ?? ''));
+        $firstName = trim((string) ($_POST['first_name'] ?? ''));
+        $fatherName = trim((string) ($_POST['father_name'] ?? ''));
+        $grandfatherName = trim((string) ($_POST['grandfather_name'] ?? ''));
+        $fullName = trim($firstName . ' ' . $fatherName . ' ' . $grandfatherName);
         $email = trim((string) ($_POST['email'] ?? ''));
         $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
         // A Dean's faculty is always the session's own faculty_id — never the
@@ -193,7 +198,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $formValues = [
             'id' => $studentId,
             'student_no' => $formMode === 'edit' ? $existingStudentNo : $studentNo,
-            'full_name' => $fullName,
+            'first_name' => $firstName,
+            'father_name' => $fatherName,
+            'grandfather_name' => $grandfatherName,
             'email' => $email,
             'academic_year_id' => $academicYearId,
             'faculty_id' => $facultyId,
@@ -203,8 +210,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ];
 
         $validationError = '';
-        if ($fullName === '') {
-            $validationError = 'Full name is required.';
+        if ($firstName === '' || $fatherName === '') {
+            $validationError = 'First Name and Father\'s Name are required.';
         } elseif ($action === 'create' && $studentNo === '') {
             $validationError = 'Student No is required.';
         } elseif ($academicYearId <= 0) {
@@ -302,7 +309,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($action === 'create') {
                 $conn->begin_transaction();
                 try {
-                    $username = generate_student_username($conn, $fullName, $studentNo);
+                    $username = generate_student_username($conn, $firstName, $studentNo);
                     $tempPassword = $studentNo;
                     $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
@@ -315,13 +322,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $insertUserStmt->close();
 
                     $insertStudentStmt = $conn->prepare(
-                        'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, "active")'
+                        'INSERT INTO students (student_no, first_name, father_name, grandfather_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "active")'
                     );
+                    $grandfatherParam = $grandfatherName !== '' ? $grandfatherName : null;
                     $insertStudentStmt->bind_param(
-                        'ssiiiiis',
+                        'ssssiiiiis',
                         $studentNo,
-                        $fullName,
+                        $firstName,
+                        $fatherName,
+                        $grandfatherParam,
                         $newUserId,
                         $academicYearId,
                         $facultyId,
@@ -345,11 +355,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->begin_transaction();
                 try {
                     $updateStudentStmt = $conn->prepare(
-                        'UPDATE students SET full_name = ?, academic_year_id = ?, faculty_id = ?, department_id = ?, semester_id = ?, shift = ? WHERE id = ?'
+                        'UPDATE students SET first_name = ?, father_name = ?, grandfather_name = ?, academic_year_id = ?, faculty_id = ?, department_id = ?, semester_id = ?, shift = ? WHERE id = ?'
                     );
+                    $grandfatherParam = $grandfatherName !== '' ? $grandfatherName : null;
                     $updateStudentStmt->bind_param(
-                        'siiiisi',
-                        $fullName,
+                        'sssiiiisi',
+                        $firstName,
+                        $fatherName,
+                        $grandfatherParam,
                         $academicYearId,
                         $facultyId,
                         $departmentId,
@@ -462,7 +475,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
     $editId = (int) $_GET['edit'];
     if ($role === 'dean') {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.student_no, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
+            'SELECT s.id, s.student_no, s.first_name, s.father_name, s.grandfather_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ? AND s.faculty_id = ?'
@@ -470,7 +483,7 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $editStmt->bind_param('ii', $editId, $deanFacultyId);
     } else {
         $editStmt = $conn->prepare(
-            'SELECT s.id, s.student_no, s.full_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
+            'SELECT s.id, s.student_no, s.first_name, s.father_name, s.grandfather_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
              FROM students s
              JOIN users u ON u.id = s.user_id
              WHERE s.id = ?'
@@ -486,7 +499,9 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $formValues = [
             'id' => (int) $editRow['id'],
             'student_no' => (string) $editRow['student_no'],
-            'full_name' => (string) $editRow['full_name'],
+            'first_name' => (string) $editRow['first_name'],
+            'father_name' => (string) $editRow['father_name'],
+            'grandfather_name' => (string) ($editRow['grandfather_name'] ?? ''),
             'email' => (string) ($editRow['email'] ?? ''),
             'academic_year_id' => (int) $editRow['academic_year_id'],
             'faculty_id' => (int) $editRow['faculty_id'],
@@ -589,11 +604,14 @@ if ($filterShift !== '') {
     $types .= 's';
 }
 if ($filterSearch !== '') {
-    $conditions[] = '(s.full_name LIKE ? OR s.student_no LIKE ?)';
+    $conditions[] = '(s.full_name LIKE ? OR s.first_name LIKE ? OR s.father_name LIKE ? OR s.grandfather_name LIKE ? OR s.student_no LIKE ?)';
     $likeParam = '%' . $filterSearch . '%';
     $params[] = $likeParam;
     $params[] = $likeParam;
-    $types .= 'ss';
+    $params[] = $likeParam;
+    $params[] = $likeParam;
+    $params[] = $likeParam;
+    $types .= 'sssss';
 }
 
 $whereSql = empty($conditions) ? '' : ('WHERE ' . implode(' AND ', $conditions));
@@ -854,9 +872,21 @@ $studentsStmt->close();
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentFullNameInput" class="form-label">Full Name</label>
-                                <input type="text" class="form-control" id="studentFullNameInput" name="full_name" maxlength="150"
-                                       value="<?= htmlspecialchars($formValues['full_name']) ?>" required>
+                                <label for="studentFirstNameInput" class="form-label">First Name</label>
+                                <input type="text" class="form-control" id="studentFirstNameInput" name="first_name" maxlength="60"
+                                       value="<?= htmlspecialchars($formValues['first_name']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentFatherNameInput" class="form-label">Father's Name</label>
+                                <input type="text" class="form-control" id="studentFatherNameInput" name="father_name" maxlength="60"
+                                       value="<?= htmlspecialchars($formValues['father_name']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentGrandfatherNameInput" class="form-label">Grandfather's Name <span class="text-muted fw-normal">(optional)</span></label>
+                                <input type="text" class="form-control" id="studentGrandfatherNameInput" name="grandfather_name" maxlength="60"
+                                       value="<?= htmlspecialchars($formValues['grandfather_name']) ?>">
                             </div>
 
                             <div class="mb-3">

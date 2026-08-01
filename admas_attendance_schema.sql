@@ -215,7 +215,10 @@ CREATE TABLE course_offerings (
 CREATE TABLE students (
   id                INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   student_no        VARCHAR(20)  NOT NULL UNIQUE,   -- e.g. ADM-2301
-  full_name         VARCHAR(150) NOT NULL,
+  first_name        VARCHAR(60)  NOT NULL,
+  father_name       VARCHAR(60)  NOT NULL,
+  grandfather_name  VARCHAR(60)  NULL,              -- optional: not every real name has 3 parts
+  full_name         VARCHAR(150) GENERATED ALWAYS AS (TRIM(CONCAT_WS(' ', first_name, father_name, grandfather_name))) STORED,
   user_id           INT UNSIGNED NOT NULL UNIQUE,   -- 1:1 login account
   academic_year_id  INT UNSIGNED NOT NULL,
   faculty_id        INT UNSIGNED NOT NULL,
@@ -392,8 +395,8 @@ VALUES ('student01', '$2y$10$OYwvkyykHB5R3NVSONHSz.QRA5BKpYFXmCE7akFRD1b2O1wX1z4
         'Student Test', 'student01@admas.edu.so',
         (SELECT id FROM roles WHERE name = 'student'), 'active');
 SET @student_user_id = LAST_INSERT_ID();
-INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, level, shift)
-VALUES ('ADM-2601', 'Student Test', @student_user_id,
+INSERT INTO students (student_no, first_name, father_name, user_id, academic_year_id, faculty_id, department_id, level, shift)
+VALUES ('ADM-2601', 'Student', 'Test', @student_user_id,
         (SELECT id FROM academic_years WHERE is_current = 1), @faculty_id, @dept_id, 1, 'morning');
 
 -- =====================================================================

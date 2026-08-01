@@ -315,27 +315,67 @@ body {
 /* Cards */
 .admas-card {
     background: var(--admas-surface);
-    border-radius: 14px;
-    border: none;
-    box-shadow: 0 1px 3px var(--admas-shadow);
+    border-radius: 16px;
+    border: 1px solid var(--admas-border);
+    box-shadow: 0 1px 2px var(--admas-shadow);
+    transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
 }
 
 .kpi-card {
     display: flex;
     align-items: center;
     gap: 1rem;
-    padding: 1.25rem;
+    padding: 1.35rem 1.4rem;
+    position: relative;
+    overflow: hidden;
+}
+
+.kpi-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 4px;
+    background: var(--kpi-accent, var(--admas-sky));
+}
+
+.kpi-card.accent-sky { --kpi-accent: var(--admas-sky); }
+.kpi-card.accent-navy { --kpi-accent: var(--admas-navy-start); }
+.kpi-card.accent-green { --kpi-accent: #16a34a; }
+.kpi-card.accent-amber { --kpi-accent: #d97706; }
+
+a.kpi-card {
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+}
+
+a.kpi-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 16px 30px var(--admas-shadow), 0 4px 10px var(--admas-shadow);
+    border-color: var(--admas-sky);
+}
+
+a.kpi-card:hover .kpi-icon {
+    transform: scale(1.08) rotate(-4deg);
+}
+
+a.kpi-card:hover .kpi-arrow {
+    opacity: 1;
+    transform: translateX(0);
 }
 
 .kpi-icon {
-    width: 52px;
-    height: 52px;
-    border-radius: 14px;
+    width: 54px;
+    height: 54px;
+    border-radius: 15px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.4rem;
+    font-size: 1.45rem;
     flex-shrink: 0;
+    transition: transform 0.25s ease;
 }
 
 .kpi-icon.bg-sky { background: rgb(14 165 233 / var(--admas-tint-opacity)); color: var(--admas-sky); }
@@ -344,15 +384,28 @@ body {
 .kpi-icon.bg-amber { background: rgb(245 158 11 / var(--admas-tint-opacity)); color: #d97706; }
 
 .kpi-value {
-    font-size: 1.6rem;
-    font-weight: 700;
+    font-size: 1.7rem;
+    font-weight: 800;
     color: var(--admas-text);
     line-height: 1.2;
+    letter-spacing: -0.02em;
 }
 
 .kpi-label {
     font-size: 0.8rem;
     color: var(--admas-text-muted);
+    font-weight: 500;
+}
+
+.kpi-arrow {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    color: var(--admas-text-faint);
+    font-size: 0.95rem;
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
 /* Status / pill badges */
@@ -378,8 +431,14 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.75rem 0;
+    padding: 0.75rem 0.5rem;
     border-bottom: 1px solid var(--admas-border);
+    border-radius: 10px;
+    transition: background-color 0.15s ease;
+}
+
+.alert-row:hover {
+    background-color: rgb(14 165 233 / var(--admas-tint-opacity));
 }
 
 .alert-row:last-child {
@@ -435,6 +494,35 @@ table.admas-table thead th.grid-month-band {
 table.admas-table th.col-group-end,
 table.admas-table td.col-group-end {
     border-right: 3px solid var(--admas-sky);
+}
+
+/* Separates the Present/Absent/Average summary badges (student/xiiso_grid.php)
+   with the same sky-blue accent used for table column groups above, for
+   views that show these as badge pills rather than table columns. */
+.badge-divider {
+    border-right: 3px solid var(--admas-sky);
+    padding-right: 0.75rem;
+    margin-right: 0.75rem;
+}
+
+.badge-divider:last-child {
+    border-right: none;
+    padding-right: 0;
+    margin-right: 0;
+}
+
+/* Present/Absent/% summary columns on the Xiiso grid views (reports.php's
+   Xiiso Attendance Grid, attendance.php's Grid View) get a sky-blue accent
+   so the totals stand out from the plain per-session cells next to them. */
+table.admas-table th.col-summary {
+    background: var(--admas-sky);
+    color: #fff;
+}
+
+table.admas-table td.col-summary {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-text);
+    font-weight: 700;
 }
 
 .view-toggle-btn {

@@ -319,18 +319,18 @@ foreach ($academicYears as $ay) {
                                     $pendingCount = (int) $c['pending_count'];
                                     $nextPending = $c['next_pending_session'];
 
-                                    // Deep-link straight into a ready-to-mark roster whenever
-                                    // both a pending Xiiso and the offering's shift are known,
-                                    // so the lecturer never has to manually pick the course,
-                                    // shift, or session on attendance.php — just click and mark.
+                                    // Deep-link straight into the ready-to-mark Grid View whenever
+                                    // the offering's shift is known, so the lecturer never has to
+                                    // manually pick the course/semester/shift on attendance.php —
+                                    // just click and mark. attendance.php's Grid View shows the
+                                    // whole semester at once (not one specific session), so this
+                                    // only needs course/semester/shift, not the pending session id.
                                     $takeAttendanceUrl = BASE_URL . '/attendance.php?course_id=' . (int) $c['course_id'];
                                     if ($nextPending !== null && $c['offering_shift'] !== null) {
                                         $takeAttendanceUrl = BASE_URL . '/attendance.php?' . http_build_query([
-                                            'load' => 1,
                                             'course_id' => (int) $c['course_id'],
+                                            'semester_id' => (int) $c['semester_id'],
                                             'shift' => $c['offering_shift'],
-                                            'session_id' => (int) $nextPending['id'],
-                                            'academic_year_id' => (int) $c['academic_year_id'],
                                         ]);
                                     }
                                     ?>

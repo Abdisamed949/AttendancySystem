@@ -2470,6 +2470,365 @@ data/configuration task for the university admin, not further code work.
         rendering bug in this session.
       - No schema migration needed.
 
+### Student Name Split (First/Father/Grandfather), Attendance Excel Import, Xiiso Grid Borders
+- [x] Three related features requested together after the user shared a
+      screenshot of the real paper/Excel attendance tracker ADMAS staff
+      already use, which splits a student's name into three columns
+      (FIRST NAMES / FATHER'S / G.FATHER'S — the standard Somali given +
+      father's + grandfather's naming) and lays out attendance as one
+      column per calendar day grouped into colored month bands. Planned in
+      plan mode (3 parallel Explore agents traced every `full_name`
+      consumer, the existing Xiiso grid rendering, and the existing import
+      page-flow pattern first), then confirmed with the user via
+      AskUserQuestion on three open design forks before building: Excel
+      day-columns map to the 12 Xiiso slots **automatically, in
+      chronological order** (not a manual per-column picker); the 301
+      (at the time; actually 77 in the live dev DB) existing students'
+      `full_name` gets **auto-split** on migration (word 1/word
+      2/remainder), correctable afterward via the edit form; the 3-column
+      split applies to **students only**, not lecturers/admins (the
+      screenshot's own Lecturer line is one free-text string).
+      - **Schema** (`migrations/2026_08_students_name_parts.sql`, mirrored
+        into `admas_attendance_schema.sql`): added `students.first_name`/
+        `father_name` (required) and `grandfather_name` (nullable — not
+        every real name has 3 parts), backfilled from the existing
+        `full_name` via `SUBSTRING_INDEX` (confirmed first, via a live
+        query, that every one of the 77 existing students' names is
+        cleanly 3 words — so no separate PHP backfill script was needed,
+        simplifying the originally-planned approach), then converted
+        `full_name` itself into a **MariaDB `GENERATED ALWAYS AS
+        (TRIM(CONCAT_WS(' ', first_name, father_name,
+        grandfather_name))) STORED`** column. This was the key design
+        decision from planning: of ~25 files that read `students.full_name`
+        across the app (dashboards, reports, notifications, attendance
+        rosters, `admin/courses.php`'s lecturer dropdown, etc.), only
+        `admin/students.php` and `admin/students_import.php` ever *wrote*
+        it — making it generated means those ~23 read-only files needed
+        **zero code changes**, they keep resolving `full_name` exactly as
+        before. Applied and verified against the live dev DB via `SHOW
+        CREATE TABLE` and a full-table diff of all 77 rows' computed
+        `full_name` against their original value (byte-identical). A
+        `mysqldump` backup was taken immediately before running this
+        migration, per the security audit's own recommendation earlier in
+        this file.
+      - **`admin/students.php`**: the single "Full Name" input became
+        three (First Name/Father's Name required, Grandfather's Name
+        optional); the create/update handlers now insert/update the three
+        physical columns instead of `full_name` (which MySQL/MariaDB
+        rejects explicit values for on a generated column); the edit-GET
+        SELECT and search filter (`WHERE first_name LIKE ? OR father_name
+        LIKE ? OR grandfather_name LIKE ? OR full_name LIKE ?`) were
+        updated to match; the list table's Full Name column needed **no
+        change** at all, it still just reads `full_name`.
+        `generate_student_username()` (in `includes/lecturer_accounts.php`,
+        untouched) is now called with `$firstName` directly instead of the
+        old concatenated full name — its existing "first word of whatever
+        string it's given" logic already does exactly the right thing
+        without modification.
+      - **`admin/students_import.php`**: the single Full Name header
+        match became three (`find_import_column()` synonym lists for
+        "First Names"/"Father's"/"G.Father's", matching the real
+        tracker's exact wording plus Somali synonyms), the downloadable
+        template regenerated with the new 3-column header, and the
+        confirm-insert writes the three columns the same way as the
+        manual form.
+      - **New `attendance_import.php`** (app root,
+        `require_role(['system_admin', 'dean', 'lecturer'])`, same
+        shared-file/role-scoping convention as `attendance.php`) — bulk
+        historical-attendance import matching the real tracker's exact
+        layout. Course list reuses `attendance.php`'s exact
+        system_admin/dean query shapes (so "what can I import into" can
+        never drift from "what can I mark attendance for"); the lecturer
+        branch deliberately differs (any course they've *ever* held an
+        offering for, not just their current one, since this page exists
+        specifically for historical backfill) — actual write permission
+        for the picked course+semester is independently re-verified via
+        the existing `user_can_write_course_attendance()` at both Preview
+        and Confirm, so a permissive course list is never the real
+        security boundary. Upload → preview → confirm flow mirrors
+        `admin/students_import.php`'s proven shape (parsed rows stashed in
+        `$_SESSION['attendance_import_preview']`, confirm reads them back
+        rather than re-parsing). Column detection: scans for the "REG/NO"
+        header cell to skip the ADMAS UNIVERSITY/Faculty/Course
+        Name/Lecturer banner rows above it; since a real tracker may
+        vertically merge REG/NO/names/P/A/% across two header rows (band
+        labels sharing the REG/NO row, bare day-numbers on the row below)
+        rather than putting everything on one row, the day-number row is
+        auto-detected by checking which of the REG/NO row or the row below
+        it has more cells that look like bare 1-31 day-numbers, and the
+        month-band labels are read from whichever of those two rows isn't
+        the day-number row (forward-filled leftward per column, since
+        PhpSpreadsheet's `toArray()` only populates the top-left cell of a
+        merged band). Detected dates are sorted chronologically and the
+        first 12 mapped straight to Xiiso 1–12 (generating the semester's
+        session rows first via the existing `generate_sessions_for_semester()`
+        if needed); anything past 12 is dropped with a visible warning
+        listing the skipped dates. REG/NO is matched against
+        `students.student_no` directly (case-insensitive/trim, same
+        convention as the students importer) — unmatched rows are flagged
+        as skippable errors, not a hard failure. On Confirm: any mapped
+        Xiiso session whose `date` is still `NULL` gets it filled in from
+        the file; a session that already has a *different* date keeps its
+        existing date (flagged as a warning on the preview page, never
+        silently overwritten) — every actual attendance write reuses the
+        existing shared `save_attendance_record()` primitive (the same one
+        `attendance.php`'s classic save and `ajax/save_attendance_cell.php`
+        already use), so this import can never diverge from how a manual
+        mark is recorded. Redirects to the course's own Xiiso Grid report
+        on success. Added to `includes/nav_items.php` as "Import
+        Attendance" for the same three roles.
+      - **Xiiso grid sky-blue borders** — new `build_xiiso_chunks()` in
+        `includes/attendance_helpers.php` (sibling to the existing
+        `build_month_groups()`) groups a semester's sessions into fixed
+        bands of 4 by position (Xiiso 1–4/5–8/9–12, independent of actual
+        calendar dates) for a colspan band row, reusing the already-
+        existing `.grid-month-band`/`.col-group-end` CSS classes (no new
+        CSS needed for the table-based views) plus one small new
+        `.badge-divider` rule for `student/xiiso_grid.php`'s Present/
+        Absent/Average badge-pill row (which isn't a table there). Applied
+        to all three Xiiso-grid render sites: `reports.php`'s
+        `build_xiiso_grid_report()` (every-4-session divider plus
+        individual dividers after the P and A columns, and a new colspan
+        band header row above the existing one); `attendance.php`'s Grid
+        View (layered on top of its pre-existing calendar-month band row —
+        the two groupings are independent and don't conflict — plus
+        adding the previously-missing `col-group-end` to its P/A/%
+        columns); `student/xiiso_grid.php` (had zero grouping
+        infrastructure before this — added the same two-row band+session
+        header and wrapped its summary badges in `.badge-divider`).
+      - **Verified end-to-end via real HTTP requests** against the live
+        app with a temporary `system_admin` account: created a student via
+        the new 3-field form and confirmed the generated `full_name`,
+        derived username, and search-by-father's-name all worked; edited
+        the same student's 3 name fields and confirmed the change
+        propagated to both `students.full_name` (generated) and
+        `users.full_name` (computed concatenation); downloaded the
+        regenerated students-import template and confirmed its 3
+        name-header columns; ran a students import with one fully-valid,
+        one valid-without-grandfather, and one invalid (blank name) row
+        and confirmed exactly 2 imported with the invalid row correctly
+        skipped. For the attendance importer: built a test `.xlsx`
+        replicating the real tracker's two-row-header/merged-band
+        structure (REG/NO + 3 names + P/A/% on one row, bare day-numbers
+        on the row below, spanning Feb/Mar month bands) against a real
+        course with 36 real enrollments and a semester that (as it turned
+        out) already had its 12 session dates assigned from earlier
+        testing — confirmed the preview correctly detected and
+        chronologically mapped all 6 test dates to Xiiso 1–6, and
+        correctly flagged+preserved the semester's existing (different)
+        session dates rather than overwriting them; confirmed on Confirm
+        that both test students' present/absent marks landed in the
+        `attendance` table exactly matching the source file, correctly
+        keyed to the *existing* session dates (proving the
+        keep-existing-date safety behavior actually works, not just that
+        it's coded); confirmed the Xiiso Grid report, `attendance.php`'s
+        Grid View, and (logged in as the enrolled test student directly,
+        after a forced password change) `student/xiiso_grid.php` all
+        render the new sky-blue band/border/divider classes with zero PHP
+        warnings/notices/fatals, and that the student's own grid correctly
+        displayed the imported Present/Absent marks. All temporary
+        accounts, students, the course enrollment, and the imported
+        attendance rows were deleted afterward; `students` count confirmed
+        back to the exact pre-session baseline (77) — the pre-existing
+        session dates and the 36 real enrollments on the test course were
+        left untouched throughout.
+
+### admin/students_import.php: Skip Arbitrary Title Banners Too
+- [x] Follow-up to the Student Name Split/Attendance Import session above.
+      `admin/students_import.php` already had a mechanism to skip a leading
+      "Field:", "value" block (e.g. "Faculty:" / "Informatic" — used when a
+      whole sheet shares one Faculty/Department/Academic Year/Semester/
+      Shift for every student), but that peeling loop stops at the first
+      row that doesn't match a known field label — so a plain decorative
+      title banner above the table (university name, "YEAR: 1", a sheet
+      title — the same kind of banner `attendance_import.php` already
+      skips) would have been wrongly treated as the header row itself,
+      breaking the import. Added a second skip-loop after the existing
+      one: keeps advancing past any row that doesn't actually contain a
+      Student-No/REG-No-like or First-Name-like cell (reusing the same
+      `find_import_column()` candidate lists used for real column
+      matching) until it finds the real header row. The existing "Field:",
+      "value" batch-default behavior is untouched — this only fires once
+      that loop has already stopped, so both mechanisms compose instead of
+      conflicting.
+      **Verified end-to-end via real HTTP requests** with a temporary
+      `system_admin` account: a file with a 4-row decorative banner (no
+      "Field:" pattern at all) above the real header now previews
+      correctly (regression-tested: was previously going to fail); a file
+      using the pre-existing "Field:", "value" batch-default pattern still
+      previews correctly with the same row-number/defaults behavior as
+      before (no regression). Neither test file was actually confirmed/
+      inserted (preview-only, by design, to isolate this from the
+      DB-writing path), so no cleanup of `students`/`users` rows was
+      needed; the temporary admin account was deleted afterward.
+
+### attendance.php: Removed Single-Session Form, Grid View Is Now the Only View
+- [x] Discussed with the user before writing any code (they explicitly asked
+      to "wait" on this one first): removed the older "classic"
+      single-session marking form from `attendance.php` entirely — the
+      interactive Xiiso Grid (click a cell to mark Present/Absent) is now
+      the only way to mark attendance on this page, shown directly on
+      load, no more List View/Grid View toggle.
+      - **Real gap found and fixed before removing anything**: the classic
+        form's roster query filtered by `students.shift`, but the Grid's
+        own roster query (`get_xiiso_grid_data()`) didn't filter by shift
+        at all — removing the classic form outright would have silently
+        merged Morning/Afternoon/Weekend students into one roster for any
+        department running multiple shifts through the same course. Added
+        an optional `?string $shift = null` parameter to
+        `get_xiiso_grid_data()` (`includes/attendance_helpers.php`) that
+        adds `AND s.shift = ?` to both the enrollment and department-
+        fallback roster queries only when set — `reports.php`'s own call
+        site is untouched (still passes no shift, unaffected).
+      - **Semester also became user-selectable** (previously the Grid
+        always silently used `get_current_semester()`, with no way to view
+        or correct a past semester's grid): `attendance.php` now resolves
+        whichever `semester_id` is in the querystring (validated to
+        belong to the selected course's own faculty) and only falls back
+        to that faculty's current semester when none is specified.
+      - **Found and fixed a real correctness bug this surfaced**:
+        `ajax/save_attendance_cell.php` (the endpoint every grid-cell
+        click actually saves through) always independently re-resolved
+        `get_current_semester()` itself, completely ignoring whatever
+        semester the on-screen grid was displaying — so if Semester
+        selection had shipped without this fix, clicking any cell on a
+        non-current semester's grid would have failed every time
+        ("Invalid Xiiso session"), since the submitted `session_id` would
+        never match the *current* semester's own session list. Fixed by
+        having the endpoint accept and validate an explicit `semester_id`
+        from the client (checked against the course's faculty) instead of
+        ever silently substituting "whichever semester happens to be
+        current right now" — `assets/js/attendance_grid.js` now reads
+        `data-semester-id` off the grid `<table>` (added alongside the
+        pre-existing `data-course-id`) and includes it in every save
+        request.
+      - **Read-only rendering for semesters/courses outside write scope**:
+        `attendance.php` now computes
+        `user_can_write_course_attendance($conn, $role, $currentUser,
+        $courseId, $semesterId)` once per page load (the exact same
+        function the AJAX endpoint already used to reject unauthorized
+        saves) and disables every grid cell plus shows a "Read-only" badge
+        and banner when false — e.g. a lecturer can still view a semester
+        they no longer (or don't yet) hold a `course_offerings` row for,
+        matching how `reports.php` already lets roles view data outside
+        their write scope, but can no longer be misled into thinking a
+        click will save when the server would reject it anyway.
+      - **New picker**: Faculty (unchanged) → Department filter (unchanged,
+        client-side only) → Course (unchanged) → **Semester** (new — every
+        semester belonging to the selected course's faculty, not just
+        current, populated client-side via a `courseFacultyIdMap` /
+        `semestersByFacultyId` JS cascade with no page reload, the same
+        pattern `attendance_import.php` already established) → **Shift**
+        (new — optional, blank = every shift) → one "Load Grid" submit.
+        Changing Course no longer immediately reloads the page (the old
+        Grid View's behavior) — it now just repopulates the Semester
+        dropdown's options client-side (pre-selecting that faculty's
+        current semester as the default), so Course/Semester/Shift can all
+        be set before a single reload, avoiding a double round-trip.
+      - **Fixed a stale deep-link**: `lecturer/courses.php`'s "Take
+        Attendance" quick-link (from the pending-Xiiso-sessions widget) was
+        building a URL with `load=1&session_id=X&academic_year_id=Y` —
+        parameters that belonged only to the now-deleted classic form.
+        Updated it to link with `course_id` + `semester_id` + `shift`
+        instead (the Grid View shows the whole semester at once, so a
+        specific pending session id is no longer a meaningful target).
+        Grepped the rest of the codebase for other `attendance.php?...`
+        links (`lecturer/dashboard.php`) and confirmed those only ever
+        used the still-valid `course_id` param, nothing else to fix.
+      - **Verified end-to-end via real HTTP requests** against the live
+        app: confirmed `attendance.php` loads cleanly with no course
+        selected, and with a course selected (defaults to that faculty's
+        current semester, 432 grid cells for a real 36-student/12-session
+        course); confirmed the Shift filter correctly returns 0 cells for
+        a shift no enrolled student has and the full roster for the shift
+        they're actually in; confirmed selecting an explicit non-current
+        semester via `?semester_id=` renders that semester's own sessions;
+        saved a real cell via AJAX with the new `semester_id` field and
+        confirmed the DB row; confirmed a crafted AJAX request pairing a
+        real session with the *wrong* semester_id was rejected ("Invalid
+        Xiiso session") with zero DB change; built a temporary lecturer +
+        temporary course + two `course_offerings` rows (one for a semester
+        they hold, one they don't) and confirmed the grid renders fully
+        writable (no Read-only badge, real AJAX save succeeds) for the
+        held semester and fully disabled (Read-only badge + banner, AJAX
+        save rejected with HTTP 403) for the one they don't; confirmed a
+        temporary dean scoped to a real faculty sees the correct scope
+        banner and full write access within their own faculty. All
+        temporary users/lecturer/course/offerings/attendance rows were
+        deleted afterward, and the one real `course_offerings` row
+        (course 23 / semester 9) that was temporarily reassigned during
+        the writable-lecturer test was explicitly restored to its original
+        lecturer — confirmed via a direct row check, not just "delete and
+        hope."
+      - Deliberately left untouched: `STATUS_LABELS`/`GRID_STATUS_LABELS`
+        constants in `includes/attendance_helpers.php` (still used
+        elsewhere — `GRID_STATUS_LABELS` by the AJAX endpoint itself); the
+        `.view-toggle-btn` CSS rule in `assets/css/app.css` (now unused by
+        this page specifically, left in place as harmless dead CSS rather
+        than risk touching a shared stylesheet rule for a purely cosmetic
+        cleanup).
+
+### Clickable, Modernized KPI Dashboard Cards
+- [x] Every role's dashboard KPI cards (`admin/dashboard.php`,
+      `dean/dashboard.php`, `head_academic/dashboard.php`,
+      `registration/dashboard.php`, `lecturer/dashboard.php`,
+      `student/dashboard.php`) are now clickable links to the most relevant
+      management/report page for that stat, and the shared `.kpi-card`/
+      `.kpi-icon`/`.admas-card` CSS in `assets/css/app.css` was restyled for
+      a more modern look — a colored left accent bar per card (matching its
+      icon's color family via new `.accent-sky`/`.accent-navy`/
+      `.accent-green`/`.accent-amber` classes), a bolder/tighter `.kpi-value`,
+      a hover lift (`translateY(-4px)` + deeper shadow + sky-blue border) with
+      an icon micro-rotation and a fade-in `.kpi-arrow` chevron, applied only
+      to `<a class="kpi-card">` elements (not `<div>`-based ones, so
+      non-clickable KPI cards like `notifications.php`'s three still render
+      cleanly with no dead hover affordance). `.admas-card` itself also
+      gained a subtle border + refined shadow/transition, and `.alert-row`
+      (the Attendance Alerts / Low Attendance widgets) got a rounded
+      sky-tinted hover state — both improvements apply everywhere those
+      classes are already used (dashboards, `reports.php`'s panels,
+      `notifications.php`), no per-page changes needed for those two.
+      Link targets, chosen per-role based on what page/filter is actually
+      reachable for that role (verified against `includes/nav_items.php` and
+      each target page's own `require_role()`, not assumed):
+      - **admin/dashboard.php**: Total Students → `admin/students.php`,
+        Total Lecturers → `admin/lecturers.php`, Active Courses →
+        `admin/courses.php`, Avg Attendance Today → `reports.php`.
+      - **dean/dashboard.php**: Students/Lecturers in Faculty →
+        `admin/students.php`/`admin/lecturers.php` (both already
+        dean-faculty-scoped), Departments → `admin/departments.php`, Avg
+        Attendance Today → `reports.php`.
+      - **head_academic/dashboard.php**: this role has no Students/
+        Faculties/Departments management page of its own, so Faculties/
+        Departments/Students link into `reports.php` pre-filtered via
+        `?report_type=faculty_summary` / `department_summary` (confirmed
+        `reports.php` reads `report_type` from `$_GET` directly, so the
+        query-string pre-selects the right report on load); University Avg
+        Attendance Today → plain `reports.php`.
+      - **registration/dashboard.php**: Total Registered Students and Added
+        This Month both → `admin/students.php` (registration's own
+        university-wide student management page); Faculties/Departments →
+        `reports.php?report_type=faculty_summary`/`department_summary`
+        (registration has Reports access limited to exactly these two
+        types, matching its no-Attendance-access scope).
+      - **lecturer/dashboard.php**: My Courses and Total Students both →
+        `lecturer/courses.php`; Sessions Recorded → `reports.php`.
+      - **student/dashboard.php**: My Attendance % →
+        `student/attendance_history.php`; Enrolled Courses and Courses
+        Below Threshold both → `student/courses.php`.
+      **Verified end-to-end via real HTTP requests**, not just by reading
+      the code: created one temporary account per role, logged each in via
+      curl with a per-role cookie jar, confirmed every dashboard returns
+      `200` with zero PHP warnings/notices/fatals, extracted every rendered
+      `kpi-card` `href` from the actual HTML response (not the source code)
+      to confirm they matched what was intended, then followed each of
+      those 17 links (with `-L` redirect-following) for its own role's
+      cookie jar and confirmed the *final* URL after any redirect was still
+      the intended target page — not a bounce to `unauthorized.php` or
+      `login.php` — for every single link across all 6 roles. All 6
+      temporary accounts were deleted afterward; `users` count confirmed
+      back to the 85 baseline.
+
 ### Deferred Decisions
 - **Student ID as username/password scheme**: scoped but paused before
   implementation — the user's request assumed a "Student ID" field

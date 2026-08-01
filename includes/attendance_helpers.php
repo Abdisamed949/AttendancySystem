@@ -257,32 +257,60 @@ function user_can_write_course_attendance(mysqli $conn, string $role, array $cur
  * display codes '1'/'0'/'L'/'E' and computes P/A/%) and attendance.php's
  * interactive Grid View (which renders raw statuses into clickable cells)
  * so the two can never drift on roster-selection logic.
+ *
+ * $shift is optional (null = every shift, unchanged from before this
+ * parameter existed — reports.php doesn't pass it) — attendance.php's Grid
+ * View passes the admin/lecturer's own Shift filter selection so a
+ * department with multiple shifts sharing one course doesn't show them all
+ * mixed into one roster.
  */
-function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId): array
+function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): array
 {
     $sessions = get_sessions_for_semester($conn, $semesterId);
 
-    $stmt = $conn->prepare(
-        "SELECT s.id, s.student_no, s.full_name
-         FROM course_enrollments ce
-         JOIN students s ON s.id = ce.student_id
-         WHERE ce.course_id = ? AND s.status = 'active'
-         ORDER BY s.student_no"
-    );
-    $stmt->bind_param('i', $courseId);
+    if ($shift !== null && $shift !== '') {
+        $stmt = $conn->prepare(
+            "SELECT s.id, s.student_no, s.full_name
+             FROM course_enrollments ce
+             JOIN students s ON s.id = ce.student_id
+             WHERE ce.course_id = ? AND s.status = 'active' AND s.shift = ?
+             ORDER BY s.student_no"
+        );
+        $stmt->bind_param('is', $courseId, $shift);
+    } else {
+        $stmt = $conn->prepare(
+            "SELECT s.id, s.student_no, s.full_name
+             FROM course_enrollments ce
+             JOIN students s ON s.id = ce.student_id
+             WHERE ce.course_id = ? AND s.status = 'active'
+             ORDER BY s.student_no"
+        );
+        $stmt->bind_param('i', $courseId);
+    }
     $stmt->execute();
     $students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 
     if (empty($students)) {
-        $stmt = $conn->prepare(
-            "SELECT s.id, s.student_no, s.full_name
-             FROM students s
-             JOIN courses c ON c.department_id = s.department_id
-             WHERE c.id = ? AND s.status = 'active'
-             ORDER BY s.student_no"
-        );
-        $stmt->bind_param('i', $courseId);
+        if ($shift !== null && $shift !== '') {
+            $stmt = $conn->prepare(
+                "SELECT s.id, s.student_no, s.full_name
+                 FROM students s
+                 JOIN courses c ON c.department_id = s.department_id
+                 WHERE c.id = ? AND s.status = 'active' AND s.shift = ?
+                 ORDER BY s.student_no"
+            );
+            $stmt->bind_param('is', $courseId, $shift);
+        } else {
+            $stmt = $conn->prepare(
+                "SELECT s.id, s.student_no, s.full_name
+                 FROM students s
+                 JOIN courses c ON c.department_id = s.department_id
+                 WHERE c.id = ? AND s.status = 'active'
+                 ORDER BY s.student_no"
+            );
+            $stmt->bind_param('i', $courseId);
+        }
         $stmt->execute();
         $students = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
@@ -342,4 +370,34 @@ function build_month_groups(array $sessions): array
     }
 
     return $groups;
+}
+
+/**
+ * Groups a semester's sessions (as returned by get_sessions_for_semester(),
+ * already ordered by session_number) into fixed-size bands by position
+ * (Xiiso 1-4, 5-8, 9-12), independent of each session's calendar date —
+ * used to add a sky-blue divider every 4 Xiiso columns on the grid views,
+ * matching the university's own paper/Excel tracker's banded layout.
+ */
+function build_xiiso_chunks(array $sessions, int $chunkSize = 4): array
+{
+    $chunks = [];
+
+    foreach (array_values($sessions) as $index => $session) {
+        $chunkIndex = intdiv($index, $chunkSize);
+        if (!isset($chunks[$chunkIndex])) {
+            $startNumber = $chunkIndex * $chunkSize + 1;
+            $endNumber = $startNumber + $chunkSize - 1;
+            $chunks[$chunkIndex] = [
+                'label' => 'Xiiso ' . $startNumber . '–' . $endNumber,
+                'span' => 0,
+                'session_ids' => [],
+            ];
+        }
+
+        $chunks[$chunkIndex]['span']++;
+        $chunks[$chunkIndex]['session_ids'][] = (int) $session['id'];
+    }
+
+    return array_values($chunks);
 }

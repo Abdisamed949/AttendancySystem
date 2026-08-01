@@ -253,10 +253,10 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                             <span class="text-muted fw-normal">(<?= htmlspecialchars($semesterRow['name']) ?>)</span>
                         </h6>
                         <div class="d-flex gap-2 align-items-center">
-                            <span class="badge-pill badge-present">Present: <?= $presentCount ?></span>
-                            <span class="badge-pill badge-absent">Absent: <?= $absentCount ?></span>
+                            <span class="badge-divider"><span class="badge-pill badge-present">Present: <?= $presentCount ?></span></span>
+                            <span class="badge-divider"><span class="badge-pill badge-absent">Absent: <?= $absentCount ?></span></span>
                             <?php if ($attendancePct !== null): ?>
-                                <span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= number_format($attendancePct, 1) ?>%</span>
+                                <span class="badge-divider"><span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= number_format($attendancePct, 1) ?>%</span></span>
                             <?php endif; ?>
                         </div>
                     </div>
@@ -264,11 +264,25 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
 
                 <div class="admas-card p-4">
                     <div class="table-responsive">
+                        <?php
+                        $xiisoBandChunks = build_xiiso_chunks($sessions);
+                        $xiisoChunkEndSessionIds = [];
+                        foreach ($xiisoBandChunks as $chunk) {
+                            if (!empty($chunk['session_ids'])) {
+                                $xiisoChunkEndSessionIds[end($chunk['session_ids'])] = true;
+                            }
+                        }
+                        ?>
                         <table class="table admas-table align-middle text-center mb-0">
                             <thead>
                                 <tr>
+                                    <?php foreach ($xiisoBandChunks as $chunk): ?>
+                                        <th class="grid-month-band col-group-end" colspan="<?= (int) $chunk['span'] ?>"><?= htmlspecialchars($chunk['label']) ?></th>
+                                    <?php endforeach; ?>
+                                </tr>
+                                <tr>
                                     <?php foreach ($sessions as $s): ?>
-                                        <th>
+                                        <th class="<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? 'col-group-end' : '' ?>">
                                             <?= htmlspecialchars($s['label']) ?>
                                             <div class="text-muted small fw-normal">
                                                 <?= $s['date'] ? htmlspecialchars(date('M j', strtotime((string) $s['date']))) : '—' ?>
@@ -281,7 +295,7 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                 <tr>
                                     <?php foreach ($sessions as $s): ?>
                                         <?php $status = $marksBySessionId[(int) $s['id']] ?? null; ?>
-                                        <td class="p-2">
+                                        <td class="p-2<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? ' col-group-end' : '' ?>">
                                             <?php if ($status === 'present'): ?>
                                                 <span class="badge-pill badge-present">Present</span>
                                             <?php elseif ($status === 'absent'): ?>

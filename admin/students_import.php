@@ -55,10 +55,10 @@ function normalize_shift_input(string $input): ?string
 if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->fromArray(['Student No', 'Full Name', 'Email', 'Academic Year', 'Faculty', 'Department', 'Semester', 'Shift'], null, 'A1');
-    $sheet->fromArray(['1472/23', 'Amina Hassan', 'amina.hassan@admas.edu.so', '2025/2026', 'Engineering & IT', 'Computer Science', 'Semester 1', 'Morning Shift'], null, 'A2');
-    $sheet->getStyle('A1:H1')->getFont()->setBold(true);
-    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as $col) {
+    $sheet->fromArray(['Student No', 'First Name', "Father's Name", "Grandfather's Name", 'Academic Year', 'Faculty', 'Department', 'Semester', 'Shift'], null, 'A1');
+    $sheet->fromArray(['1472/23', 'Amina', 'Hassan', 'Ali', '2025/2026', 'Engineering & IT', 'Computer Science', 'Semester 1', 'Morning Shift'], null, 'A2');
+    $sheet->getStyle('A1:I1')->getFont()->setBold(true);
+    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'] as $col) {
         $sheet->getColumnDimension($col)->setAutoSize(true);
     }
 
@@ -221,6 +221,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $tableStart++;
                         }
 
+                        // Some real sheets also have a decorative title banner above
+                        // the table (university name, faculty, course/lecturer info —
+                        // same idea as attendance_import.php's own banner-skipping),
+                        // which won't match the "Field:", "value" pattern above and
+                        // isn't blank either. Keep advancing past any row that doesn't
+                        // actually look like the real header row (i.e. doesn't contain
+                        // a Student No/REG-No-like or First Name-like cell anywhere in
+                        // it) until the real header row is found.
+                        $looksLikeHeaderRow = static function (array $row): bool {
+                            $normalizedCells = array_map(
+                                static fn ($h) => str_replace('-', '', mb_strtolower(trim((string) $h))),
+                                $row
+                            );
+                            $studentNoCandidates = ['student no', 'studentno', 'id', 'idga ardayga', 'idga', 'lambarka ardayga', 'lambarka', 'reg no', 'regno', 'reg/no'];
+                            $firstNameCandidates = ['first names', 'first name', 'firstname', 'magaca koowaad', 'magaca hore'];
+
+                            return find_import_column($normalizedCells, $studentNoCandidates) !== false
+                                || find_import_column($normalizedCells, $firstNameCandidates) !== false;
+                        };
+                        while ($tableStart < count($rows) && !$looksLikeHeaderRow($rows[$tableStart])) {
+                            $tableStart++;
+                        }
+
                         if ($tableStart >= count($rows)) {
                             $errorMessage = 'No student table was found in the uploaded file.';
                         } else {
@@ -233,16 +256,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         // for them without needing to rename columns first. Hyphens
                         // are stripped from both sides above, so "ID-ga"/"id ga"/
                         // "idga" all match the same candidate.
-                        $studentNoCol = find_import_column($headerRow, ['student no', 'studentno', 'id', 'idga ardayga', 'idga', 'lambarka ardayga', 'lambarka']);
-                        $nameCol = find_import_column($headerRow, ['full name', 'name', 'magaca buuxa', 'magaca']);
-                        $emailCol = find_import_column($headerRow, ['email', 'emailka', 'iimaylka']);
+                        $studentNoCol = find_import_column($headerRow, ['student no', 'studentno', 'id', 'idga ardayga', 'idga', 'lambarka ardayga', 'lambarka', 'reg no', 'regno', 'reg/no']);
+                        $firstNameCol = find_import_column($headerRow, ['first names', 'first name', 'firstname', 'magaca koowaad', 'magaca hore']);
+                        $fatherNameCol = find_import_column($headerRow, ["father's", "father's name", 'fathers name', 'father name', 'magaca aabaha']);
+                        $grandfatherNameCol = find_import_column($headerRow, ["g.father's", "g father's", "grandfather's", 'grandfather', 'grandfathers name', "grandfather's name", 'magaca awoowaha']);
                         $yearCol = find_import_column($headerRow, ['academic year', 'sanadka waxbarasho', 'sanadka waxbarashada', 'sanadka']);
                         $facultyCol = find_import_column($headerRow, ['faculty', 'kulliyadda', 'kulliyad']);
                         $departmentCol = find_import_column($headerRow, ['department', 'department name', 'waaxda', 'waax']);
                         $semesterCol = find_import_column($headerRow, ['semester', 'semesterka']);
                         $shiftCol = find_import_column($headerRow, ['shift', 'shiftka']);
 
-                        $missingRequired = $studentNoCol === false || $nameCol === false
+                        $missingRequired = $studentNoCol === false || $firstNameCol === false || $fatherNameCol === false
                             || ($yearCol === false && $batchDefaults['academic_year'] === '')
                             || ($facultyCol === false && $batchDefaults['faculty'] === '')
                             || ($departmentCol === false && $batchDefaults['department'] === '')
@@ -250,20 +274,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             || ($shiftCol === false && $batchDefaults['shift'] === '');
 
                         if ($missingRequired) {
-                            $errorMessage = 'The file must have "Student No" (or "ID-ga Ardayga") and "Full Name" (or "Magaca Buuxa") columns, plus Academic Year, Faculty, Department, Semester and Shift — either as columns in the table, or as "Field:", "value" rows above it.';
+                            $errorMessage = 'The file must have "Student No" (or "REG/NO"), "First Names", and "Father\'s Name" columns, plus Academic Year, Faculty, Department, Semester and Shift — either as columns in the table, or as "Field:", "value" rows above it. "Grandfather\'s Name" is optional.';
                         } else {
                             $seenStudentNosInFile = [];
 
                             foreach ($dataRows as $row) {
                                 $rowNumber++;
                                 $studentNo = strtoupper(trim((string) ($row[$studentNoCol] ?? '')));
-                                $fullName = trim((string) ($row[$nameCol] ?? ''));
+                                $firstName = trim((string) ($row[$firstNameCol] ?? ''));
+                                $fatherName = trim((string) ($row[$fatherNameCol] ?? ''));
+                                $grandfatherName = $grandfatherNameCol !== false ? trim((string) ($row[$grandfatherNameCol] ?? '')) : '';
+                                $fullName = trim($firstName . ' ' . $fatherName . ' ' . $grandfatherName);
 
-                                if ($studentNo === '' && $fullName === '') {
+                                if ($studentNo === '' && $firstName === '' && $fatherName === '') {
                                     continue;
                                 }
 
-                                $emailInput = $emailCol !== false ? trim((string) ($row[$emailCol] ?? '')) : '';
                                 $yearInput = $yearCol !== false ? trim((string) ($row[$yearCol] ?? '')) : '';
                                 if ($yearInput === '') {
                                     $yearInput = $batchDefaults['academic_year'];
@@ -296,9 +322,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 if ($studentNo === '') {
                                     $status = 'error';
                                     $message = 'Missing Student No';
-                                } elseif ($fullName === '') {
+                                } elseif ($firstName === '') {
                                     $status = 'error';
-                                    $message = 'Missing Full Name';
+                                    $message = 'Missing First Name';
+                                } elseif ($fatherName === '') {
+                                    $status = 'error';
+                                    $message = "Missing Father's Name";
                                 } elseif ($yearInput === '') {
                                     $status = 'error';
                                     $message = 'Missing Academic Year';
@@ -370,22 +399,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     }
                                 }
 
-                                if ($status === 'ok' && $emailInput !== '' && !filter_var($emailInput, FILTER_VALIDATE_EMAIL)) {
-                                    $status = 'error';
-                                    $message = 'Invalid email address';
-                                }
-
-                                if ($status === 'ok' && $emailInput !== '') {
-                                    $emailCheckStmt = $conn->prepare('SELECT id FROM users WHERE email = ?');
-                                    $emailCheckStmt->bind_param('s', $emailInput);
-                                    $emailCheckStmt->execute();
-                                    if ($emailCheckStmt->get_result()->fetch_assoc()) {
-                                        $status = 'error';
-                                        $message = 'Email already in use by another account';
-                                    }
-                                    $emailCheckStmt->close();
-                                }
-
                                 if ($status === 'ok') {
                                     if (isset($seenStudentNosInFile[$studentNo])) {
                                         $status = 'error';
@@ -409,8 +422,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $previewRows[] = [
                                     'row' => $rowNumber,
                                     'student_no' => $studentNo,
+                                    'first_name' => $firstName,
+                                    'father_name' => $fatherName,
+                                    'grandfather_name' => $grandfatherName,
                                     'full_name' => $fullName,
-                                    'email' => $emailInput,
                                     'year_input' => $yearInput,
                                     'academic_year_id' => $academicYearId,
                                     'faculty_input' => $facultyInput,
@@ -462,27 +477,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn->begin_transaction();
             try {
                 $studentNo = $row['student_no'];
-                $username = generate_student_username($conn, $row['full_name'], $studentNo);
+                $username = generate_student_username($conn, $row['first_name'], $studentNo);
                 $tempPassword = $studentNo;
                 $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
-                $emailParam = $row['email'] !== '' ? $row['email'] : null;
 
                 $insertUserStmt = $conn->prepare(
-                    'INSERT INTO users (username, password_hash, full_name, email, role_id, status) VALUES (?, ?, ?, ?, ?, "active")'
+                    'INSERT INTO users (username, password_hash, full_name, role_id, status) VALUES (?, ?, ?, ?, "active")'
                 );
-                $insertUserStmt->bind_param('ssssi', $username, $passwordHash, $row['full_name'], $emailParam, $studentRoleId);
+                $insertUserStmt->bind_param('sssi', $username, $passwordHash, $row['full_name'], $studentRoleId);
                 $insertUserStmt->execute();
                 $newUserId = (int) $conn->insert_id;
                 $insertUserStmt->close();
 
                 $insertStudentStmt = $conn->prepare(
-                    'INSERT INTO students (student_no, full_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, "active")'
+                    'INSERT INTO students (student_no, first_name, father_name, grandfather_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "active")'
                 );
+                $grandfatherParam = $row['grandfather_name'] !== '' ? $row['grandfather_name'] : null;
                 $insertStudentStmt->bind_param(
-                    'ssiiiiis',
+                    'ssssiiiiis',
                     $studentNo,
-                    $row['full_name'],
+                    $row['first_name'],
+                    $row['father_name'],
+                    $grandfatherParam,
                     $newUserId,
                     $row['academic_year_id'],
                     $row['faculty_id'],
@@ -568,16 +585,17 @@ $invalidCount = count($previewRows) - $validCount;
                     <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Upload File</h6>
 
                     <div class="alert alert-light border small mb-3">
-                        The file must have column headers: <strong>Student No</strong> (the student's existing
-                        admission/ID number — must be unique), <strong>Full Name</strong>, <strong>Academic Year</strong>,
+                        The file must have column headers: <strong>Student No</strong> (or "REG/NO" — the student's
+                        existing admission/ID number, must be unique), <strong>First Names</strong>,
+                        <strong>Father's Name</strong>, <strong>Academic Year</strong>,
                         <strong>Faculty</strong>, <strong>Department</strong>, <strong>Semester</strong> (must match
                         an existing semester name within that Faculty), and
-                        <strong>Shift</strong> (Morning Shift / Afternoon Shift / Weekend). <strong>Email</strong> is
-                        optional. A username and temporary password will be generated automatically from the Student
-                        No for each imported student.
+                        <strong>Shift</strong> (Morning Shift / Afternoon Shift / Weekend). <strong>Grandfather's
+                        Name</strong> is optional. A username and temporary password
+                        will be generated automatically from the Student No for each imported student.
                         <br>
-                        Column headers may also be written in Somali (e.g. "Magaca Buuxa" for Full Name, "ID-ga Ardayga"
-                        for Student No, "Kulliyadda" for Faculty, "Waaxda" for Department).
+                        Column headers may also be written in Somali (e.g. "Magaca Koowaad" for First Name,
+                        "ID-ga Ardayga" for Student No, "Kulliyadda" for Faculty, "Waaxda" for Department).
                         <br>
                         <a href="?action=template" class="fw-semibold">
                             <i class="bi bi-download"></i> Download a starter template (.xlsx)
@@ -614,7 +632,9 @@ $invalidCount = count($previewRows) - $validCount;
                                 <tr>
                                     <th>Row</th>
                                     <th>Student No</th>
-                                    <th>Full Name</th>
+                                    <th>First Name</th>
+                                    <th>Father's Name</th>
+                                    <th>G.Father's Name</th>
                                     <th>Academic Year</th>
                                     <th>Faculty</th>
                                     <th>Department</th>
@@ -628,7 +648,9 @@ $invalidCount = count($previewRows) - $validCount;
                                     <tr>
                                         <td><?= (int) $r['row'] ?></td>
                                         <td><?= htmlspecialchars($r['student_no']) ?></td>
-                                        <td><?= htmlspecialchars($r['full_name']) ?></td>
+                                        <td><?= htmlspecialchars($r['first_name']) ?></td>
+                                        <td><?= htmlspecialchars($r['father_name']) ?></td>
+                                        <td><?= htmlspecialchars($r['grandfather_name']) ?></td>
                                         <td><?= htmlspecialchars($r['year_input']) ?></td>
                                         <td><?= htmlspecialchars($r['faculty_input']) ?></td>
                                         <td><?= htmlspecialchars($r['department_input']) ?></td>

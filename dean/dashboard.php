@@ -184,40 +184,44 @@ if ($currentAcademicYearId > 0) {
             <!-- KPI Cards -->
             <div class="row g-3 mb-4">
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-people-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($studentsInFaculty) ?></div>
                             <div class="kpi-label">Students in Faculty</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-person-badge-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($lecturersInFaculty) ?></div>
                             <div class="kpi-label">Lecturers in Faculty</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments.php" class="admas-card kpi-card accent-green h-100">
                         <div class="kpi-icon bg-green"><i class="bi bi-diagram-3-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($departmentsInFaculty) ?></div>
                             <div class="kpi-label">Departments</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="admas-card kpi-card accent-amber h-100">
                         <div class="kpi-icon bg-amber"><i class="bi bi-graph-up-arrow"></i></div>
                         <div>
                             <div class="kpi-value"><?= $avgAttendanceToday === null ? '—' : number_format($avgAttendanceToday, 1) . '%' ?></div>
                             <div class="kpi-label">Avg Attendance Today</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
             </div>
 

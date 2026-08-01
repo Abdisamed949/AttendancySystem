@@ -41,6 +41,8 @@ function nav_items(): array
         ['label' => 'Attendance History', 'icon' => 'bi-clock-history', 'file' => 'attendance_history.php', 'roles' => ['student']],
         // Attendance lives at the app root (shared by all three roles below), not under any one role folder.
         ['label' => 'Attendance', 'icon' => 'bi-calendar2-check', 'file' => 'attendance.php', 'path' => 'attendance.php', 'roles' => ['system_admin', 'dean', 'lecturer']],
+        // Bulk historical-attendance import lives at the app root, same shared-file convention as Attendance above.
+        ['label' => 'Import Attendance', 'icon' => 'bi-file-earmark-spreadsheet', 'file' => 'attendance_import.php', 'path' => 'attendance_import.php', 'roles' => ['system_admin', 'dean', 'lecturer']],
         // Semester/Xiiso session management lives at the app root (shared across roles), same pattern as Attendance above.
         // Dean sees/manages only their own faculty's semesters (enforced in semesters.php itself).
         ['label' => 'Semesters', 'icon' => 'bi-calendar3-week', 'file' => 'semesters.php', 'path' => 'semesters.php', 'roles' => ['system_admin', 'head_academic', 'dean']],

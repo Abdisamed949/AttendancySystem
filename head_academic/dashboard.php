@@ -96,40 +96,44 @@ while ($row = $fscRes->fetch_assoc()) {
             <!-- KPI Cards -->
             <div class="row g-3 mb-4">
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php?report_type=faculty_summary" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-bank"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($totalFaculties) ?></div>
                             <div class="kpi-label">Faculties</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php?report_type=department_summary" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-diagram-3-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($totalDepartments) ?></div>
                             <div class="kpi-label">Departments</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php?report_type=department_summary" class="admas-card kpi-card accent-green h-100">
                         <div class="kpi-icon bg-green"><i class="bi bi-people-fill"></i></div>
                         <div>
                             <div class="kpi-value"><?= number_format($totalStudents) ?></div>
                             <div class="kpi-label">Students (University-wide)</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
                 <div class="col-sm-6 col-xl-3">
-                    <div class="admas-card kpi-card h-100">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="admas-card kpi-card accent-amber h-100">
                         <div class="kpi-icon bg-amber"><i class="bi bi-graph-up-arrow"></i></div>
                         <div>
                             <div class="kpi-value"><?= $universityAvgAttendance === null ? '—' : number_format($universityAvgAttendance, 1) . '%' ?></div>
                             <div class="kpi-label">University Avg Attendance Today</div>
                         </div>
-                    </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
                 </div>
             </div>
 

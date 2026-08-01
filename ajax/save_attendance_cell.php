@@ -37,6 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $courseId = (int) ($_POST['course_id'] ?? 0);
+$semesterId = (int) ($_POST['semester_id'] ?? 0);
 $sessionId = (int) ($_POST['session_id'] ?? 0);
 $studentId = (int) ($_POST['student_id'] ?? 0);
 $status = (string) ($_POST['status'] ?? '');
@@ -46,9 +47,25 @@ if ($courseFacultyId === null) {
     respond(false, 'Invalid course.');
 }
 
-$semester = get_current_semester($conn, $courseFacultyId);
+// The Grid View lets an admin/dean/lecturer view and mark ANY semester
+// belonging to the course's faculty, not just the current one (matching
+// attendance_import.php's own historical-backfill scope) — so this must
+// validate the specific semester the client says it's editing, never
+// silently substitute "whichever semester is current right now".
+$semStmt = $conn->prepare(
+    "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
+            ay.label AS academic_year_label
+     FROM semesters s
+     JOIN academic_years ay ON ay.id = s.academic_year_id
+     WHERE s.id = ? AND s.faculty_id = ?"
+);
+$semStmt->bind_param('ii', $semesterId, $courseFacultyId);
+$semStmt->execute();
+$semester = $semStmt->get_result()->fetch_assoc();
+$semStmt->close();
+
 if ($semester === null) {
-    respond(false, "No current semester is set for this course's faculty.");
+    respond(false, 'Invalid semester for this course.');
 }
 
 $semesterSessions = get_sessions_for_semester($conn, (int) $semester['id']);
