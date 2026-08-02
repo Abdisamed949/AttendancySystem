@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/attendance_helpers.php';
 
 require_role(['system_admin', 'dean']);
 
@@ -30,11 +31,6 @@ if ($role === 'dean') {
     }
 }
 
-const SHIFT_LABELS = [
-    'morning' => 'Morning Shift',
-    'afternoon' => 'Afternoon Shift',
-    'weekend' => 'Weekend',
-];
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -239,7 +235,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!$offeringSemesterRow) {
                 $validationError = 'Please select a valid semester for the selected department\'s faculty.';
-            } elseif (!array_key_exists($offeringShift, SHIFT_LABELS)) {
+            } elseif (!array_key_exists($offeringShift, OFFERING_SHIFT_LABELS)) {
                 $validationError = 'Please select a shift for the new offering.';
             } elseif ($offeringLecturerId > 0) {
                 // Any active lecturer system-wide may be assigned, not just
@@ -283,7 +279,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $conn->commit();
                     $_SESSION['flash_success'] = $offeringCreated
-                        ? ('Course added successfully, with an offering for "' . $offeringSemesterRow['name'] . '" (' . SHIFT_LABELS[$offeringShift] . ').')
+                        ? ('Course added successfully, with an offering for "' . $offeringSemesterRow['name'] . '" (' . OFFERING_SHIFT_LABELS[$offeringShift] . ').')
                         : 'Course added successfully. Use "Manage Offerings" to assign a lecturer for a semester.';
                 } catch (Throwable $e) {
                     $conn->rollback();
@@ -394,23 +390,18 @@ if ($role === 'dean') {
     $departments = $deptStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $deptStmt->close();
 
-    // "Current Offering" per course: that course's own faculty's current
-    // semester's course_offerings row (if any), never a permanent column —
-    // NULL current_semester_name means the faculty has no current semester
-    // set at all; NULL current_lecturer_name with a semester set means an
-    // offering exists but is unassigned.
+    // Course list only — no offering/semester columns. "Current Offering"
+    // is resolved separately below (see the 3-query note further down):
+    // a faculty can have more than one concurrently-current semester, and
+    // a course can now have more than one shift-offering per semester, so
+    // a single flat LEFT JOIN here would fan out into duplicate course
+    // rows once either of those is true.
     $courseStmt = $conn->prepare(
         "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
-                d.name AS department_name, f.name AS faculty_name,
-                cur_se.name AS current_semester_name, ay.label AS current_academic_year_label,
-                ol.full_name AS current_lecturer_name, co.shift AS current_shift, co.start_date AS current_start_date, co.end_date AS current_end_date
+                d.name AS department_name, f.name AS faculty_name, d.faculty_id
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
-         LEFT JOIN semesters cur_se ON cur_se.faculty_id = d.faculty_id AND cur_se.is_current = 1
-         LEFT JOIN academic_years ay ON ay.id = cur_se.academic_year_id
-         LEFT JOIN course_offerings co ON co.course_id = c.id AND co.semester_id = cur_se.id
-         LEFT JOIN lecturers ol ON ol.id = co.lecturer_id
          WHERE d.faculty_id = ?
          ORDER BY d.name, c.code"
     );
@@ -428,16 +419,10 @@ if ($role === 'dean') {
 
     $courses = $conn->query(
         "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
-                d.name AS department_name, f.name AS faculty_name,
-                cur_se.name AS current_semester_name, ay.label AS current_academic_year_label,
-                ol.full_name AS current_lecturer_name, co.shift AS current_shift, co.start_date AS current_start_date, co.end_date AS current_end_date
+                d.name AS department_name, f.name AS faculty_name, d.faculty_id
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
-         LEFT JOIN semesters cur_se ON cur_se.faculty_id = d.faculty_id AND cur_se.is_current = 1
-         LEFT JOIN academic_years ay ON ay.id = cur_se.academic_year_id
-         LEFT JOIN course_offerings co ON co.course_id = c.id AND co.semester_id = cur_se.id
-         LEFT JOIN lecturers ol ON ol.id = co.lecturer_id
          ORDER BY f.name, d.name, c.code"
     )->fetch_all(MYSQLI_ASSOC);
 }
@@ -445,6 +430,97 @@ if ($role === 'dean') {
 $departmentsByFaculty = [];
 foreach ($departments as $dept) {
     $departmentsByFaculty[$dept['faculty_name']][] = $dept;
+}
+
+// ---------------------------------------------------------------------
+// "Current Offering" per course — built as 2 more queries instead of
+// folding into the course list above, since a faculty can have multiple
+// concurrently-current semesters and a course can now have multiple
+// shift-offerings per semester; either alone would fan out a flat JOIN
+// into duplicate course rows, and combined they'd compound.
+// ---------------------------------------------------------------------
+$courseIdsForOfferings = array_map(static fn ($c) => (int) $c['id'], $courses);
+
+// Every faculty each course actually has a real course_offerings row in,
+// not just its own catalog/home faculty — a course can now be cross-listed
+// into a different faculty's own semester track (see the Multi-Faculty
+// Course Offerings plan), and this column should surface that too.
+$offeringFacultyIdsByCourseForList = [];
+if (!empty($courseIdsForOfferings)) {
+    $cIdPlaceholders = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
+    $offFacListStmt = $conn->prepare(
+        "SELECT DISTINCT co.course_id, se.faculty_id
+         FROM course_offerings co
+         JOIN semesters se ON se.id = co.semester_id
+         WHERE co.course_id IN ({$cIdPlaceholders})"
+    );
+    $offFacListStmt->bind_param(str_repeat('i', count($courseIdsForOfferings)), ...$courseIdsForOfferings);
+    $offFacListStmt->execute();
+    $offFacListRes = $offFacListStmt->get_result();
+    while ($row = $offFacListRes->fetch_assoc()) {
+        $offeringFacultyIdsByCourseForList[(int) $row['course_id']][] = (int) $row['faculty_id'];
+    }
+    $offFacListStmt->close();
+}
+
+$facultyIdsForOfferings = [];
+foreach ($courses as $c) {
+    $facultyIdsForOfferings[] = (int) $c['faculty_id'];
+    foreach ($offeringFacultyIdsByCourseForList[(int) $c['id']] ?? [] as $fid) {
+        $facultyIdsForOfferings[] = $fid;
+    }
+}
+$facultyIdsForOfferings = array_values(array_unique($facultyIdsForOfferings));
+
+$currentSemestersByFacultyId = [];
+if (!empty($facultyIdsForOfferings)) {
+    $placeholders = implode(',', array_fill(0, count($facultyIdsForOfferings), '?'));
+    $semStmt = $conn->prepare(
+        "SELECT f.id AS faculty_id, f.name AS faculty_name, se.id AS semester_id, se.name AS semester_name, ay.label AS academic_year_label
+         FROM faculties f
+         JOIN semesters se ON se.faculty_id = f.id AND se.is_current = 1
+         JOIN academic_years ay ON ay.id = se.academic_year_id
+         WHERE f.id IN ({$placeholders})
+         ORDER BY se.name"
+    );
+    $semStmt->bind_param(str_repeat('i', count($facultyIdsForOfferings)), ...$facultyIdsForOfferings);
+    $semStmt->execute();
+    $semRes = $semStmt->get_result();
+    while ($row = $semRes->fetch_assoc()) {
+        $currentSemestersByFacultyId[(int) $row['faculty_id']][] = $row;
+    }
+    $semStmt->close();
+}
+
+$offeringsByCourseSemester = [];
+if (!empty($courseIdsForOfferings) && !empty($currentSemestersByFacultyId)) {
+    $semesterIdsForOfferings = [];
+    foreach ($currentSemestersByFacultyId as $semList) {
+        foreach ($semList as $sem) {
+            $semesterIdsForOfferings[] = (int) $sem['semester_id'];
+        }
+    }
+    $semesterIdsForOfferings = array_values(array_unique($semesterIdsForOfferings));
+
+    $coursePlaceholders = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
+    $semesterPlaceholders = implode(',', array_fill(0, count($semesterIdsForOfferings), '?'));
+    $offStmt = $conn->prepare(
+        "SELECT co.course_id, co.semester_id, co.shift, ol.full_name AS lecturer_name, co.start_date, co.end_date
+         FROM course_offerings co
+         LEFT JOIN lecturers ol ON ol.id = co.lecturer_id
+         WHERE co.course_id IN ({$coursePlaceholders}) AND co.semester_id IN ({$semesterPlaceholders})
+         ORDER BY co.shift"
+    );
+    $offStmt->bind_param(
+        str_repeat('i', count($courseIdsForOfferings)) . str_repeat('i', count($semesterIdsForOfferings)),
+        ...array_merge($courseIdsForOfferings, $semesterIdsForOfferings)
+    );
+    $offStmt->execute();
+    $offRes = $offStmt->get_result();
+    while ($row = $offRes->fetch_assoc()) {
+        $offeringsByCourseSemester[(int) $row['course_id']][(int) $row['semester_id']][] = $row;
+    }
+    $offStmt->close();
 }
 
 $facultyIdByDepartmentId = [];
@@ -572,10 +648,13 @@ foreach ($offeringLecturers as $lec) {
                             <div class="d-flex gap-2">
                                 <button type="button" id="bulkDeleteCoursesBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role === 'system_admin'): ?>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses_import.php" class="btn btn-outline-secondary btn-sm">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings_search.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" title="Cross-list a course whose catalog home is a different faculty into <?= $role === 'dean' ? 'your own faculty' : 'any faculty' ?>'s semester">
+                                    <i class="bi bi-signpost-2"></i> Add Existing Course
+                                </a>
                                 <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                     <i class="bi bi-plus-lg"></i> Add Course
                                 </a>
@@ -618,32 +697,61 @@ foreach ($offeringLecturers as $lec) {
                                                 <td><?= htmlspecialchars($c['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                                 <td>
-                                                    <?php if (!$c['current_semester_name']): ?>
+                                                    <?php
+                                                    // Every faculty this course is actually offered in (home + any
+                                                    // cross-listed/guest faculties, see the Multi-Faculty Course
+                                                    // Offerings plan), not just its own catalog faculty.
+                                                    $courseRelevantFacultyIds = array_values(array_unique(array_merge(
+                                                        [(int) $c['faculty_id']],
+                                                        $offeringFacultyIdsByCourseForList[(int) $c['id']] ?? []
+                                                    )));
+                                                    $courseCurrentSemesters = [];
+                                                    foreach ($courseRelevantFacultyIds as $relFacId) {
+                                                        foreach ($currentSemestersByFacultyId[$relFacId] ?? [] as $sem) {
+                                                            $sem['__faculty_id'] = $relFacId;
+                                                            $courseCurrentSemesters[] = $sem;
+                                                        }
+                                                    }
+                                                    ?>
+                                                    <?php if (empty($courseCurrentSemesters)): ?>
                                                         <span class="text-muted fst-italic">No current semester</span>
-                                                    <?php elseif ($c['current_lecturer_name']): ?>
-                                                        <?= htmlspecialchars($c['current_lecturer_name']) ?>
-                                                        <?php if ($c['current_shift'] && array_key_exists($c['current_shift'], SHIFT_LABELS)): ?>
-                                                            <span class="text-muted">(<?= htmlspecialchars(SHIFT_LABELS[$c['current_shift']]) ?>)</span>
-                                                        <?php endif; ?>
-                                                        <div class="text-muted small"><?= htmlspecialchars($c['current_semester_name'] . ' (' . $c['current_academic_year_label'] . ')') ?></div>
-                                                        <?php if ($c['current_start_date'] || $c['current_end_date']): ?>
-                                                            <div class="text-muted small"><?= htmlspecialchars(($c['current_start_date'] ?? '?') . ' to ' . ($c['current_end_date'] ?? '?')) ?></div>
-                                                        <?php endif; ?>
                                                     <?php else: ?>
-                                                        <span class="text-muted fst-italic">Unassigned</span>
-                                                        <?php if ($c['current_shift'] && array_key_exists($c['current_shift'], SHIFT_LABELS)): ?>
-                                                            <span class="text-muted">(<?= htmlspecialchars(SHIFT_LABELS[$c['current_shift']]) ?>)</span>
-                                                        <?php endif; ?>
-                                                        <div class="text-muted small"><?= htmlspecialchars($c['current_semester_name'] . ' (' . $c['current_academic_year_label'] . ')') ?></div>
-                                                        <?php if ($c['current_start_date'] || $c['current_end_date']): ?>
-                                                            <div class="text-muted small"><?= htmlspecialchars(($c['current_start_date'] ?? '?') . ' to ' . ($c['current_end_date'] ?? '?')) ?></div>
-                                                        <?php endif; ?>
+                                                        <?php foreach ($courseCurrentSemesters as $sem): ?>
+                                                            <?php
+                                                            $semOfferings = $offeringsByCourseSemester[(int) $c['id']][(int) $sem['semester_id']] ?? [];
+                                                            $isGuestFacultySem = (int) $sem['__faculty_id'] !== (int) $c['faculty_id'];
+                                                            ?>
+                                                            <div class="mb-1">
+                                                                <?php if ($isGuestFacultySem): ?>
+                                                                    <span class="badge-pill badge-warning">Guest: <?= htmlspecialchars($sem['faculty_name']) ?></span>
+                                                                <?php endif; ?>
+                                                                <?php if (empty($semOfferings)): ?>
+                                                                    <span class="text-muted fst-italic">No offering yet</span>
+                                                                <?php else: ?>
+                                                                    <?php foreach ($semOfferings as $off): ?>
+                                                                        <div>
+                                                                            <?php if ($off['shift'] !== 'any'): ?>
+                                                                                <span class="text-muted"><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$off['shift']] ?? $off['shift']) ?>:</span>
+                                                                            <?php endif; ?>
+                                                                            <?= $off['lecturer_name'] ? htmlspecialchars($off['lecturer_name']) : '<span class="text-muted fst-italic">Unassigned</span>' ?>
+                                                                            <?php if ($off['start_date'] || $off['end_date']): ?>
+                                                                                <span class="text-muted small">(<?= htmlspecialchars(($off['start_date'] ?? '?') . ' to ' . ($off['end_date'] ?? '?')) ?>)</span>
+                                                                            <?php endif; ?>
+                                                                        </div>
+                                                                    <?php endforeach; ?>
+                                                                <?php endif; ?>
+                                                                <div class="text-muted small"><?= htmlspecialchars($sem['semester_name'] . ' (' . $sem['academic_year_label'] . ')') ?></div>
+                                                            </div>
+                                                        <?php endforeach; ?>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= (int) $c['credit_hours'] ?></td>
                                                 <td>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon" title="Manage Offerings">
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon text-sky" title="Manage Offerings">
                                                         <i class="bi bi-calendar2-week"></i>
+                                                    </a>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon text-sky" title="Enroll Students">
+                                                        <i class="bi bi-person-check"></i>
                                                     </a>
                                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php?edit=<?= (int) $c['id'] ?>" class="btn-icon" title="Edit">
                                                         <i class="bi bi-pencil"></i>
@@ -742,7 +850,7 @@ foreach ($offeringLecturers as $lec) {
                                         <label for="offeringShiftSelect" class="form-label">Shift</label>
                                         <select class="form-select" id="offeringShiftSelect" name="offering_shift">
                                             <option value="">Select shift</option>
-                                            <?php foreach (SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
+                                            <?php foreach (OFFERING_SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
                                                 <option value="<?= htmlspecialchars($shiftValue) ?>" <?= $formValues['offering_shift'] === $shiftValue ? 'selected' : '' ?>>
                                                     <?= htmlspecialchars($shiftLabel) ?>
                                                 </option>

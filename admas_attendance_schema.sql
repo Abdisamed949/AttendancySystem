@@ -31,6 +31,7 @@ CREATE TABLE faculties (
   id                  INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   name                VARCHAR(150) NOT NULL,
   semesters_per_year  TINYINT UNSIGNED NOT NULL DEFAULT 3,  -- e.g. 3 for most faculties, 2 for Health; display-only (see migrations/2026_08_faculties_semesters_per_year.sql)
+  total_semesters     TINYINT UNSIGNED NOT NULL DEFAULT 8,  -- whole program length in semesters (e.g. 4 years x 2/year = 8); drives the Semester dropdown options on semesters.php (see migrations/2026_08_faculties_total_semesters.sql)
   dean_user_id        INT UNSIGNED NULL,   -- FK added after users table exists
   created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -113,9 +114,10 @@ CREATE TABLE semesters (
   faculty_id        INT UNSIGNED NULL,              -- NULL = not yet assigned to a faculty (must be set via semesters.php before it can be marked current)
   context_department_id INT UNSIGNED NULL,          -- display-only note of which department this was created for — NOT scoping; the semester still applies to the whole faculty_id above. Never read by get_current_semester() or any scoping logic.
   name              VARCHAR(50) NOT NULL,           -- e.g. 'Semester 3'
-  start_date        DATE NOT NULL,
-  end_date          DATE NOT NULL,
-  is_current        TINYINT(1) NOT NULL DEFAULT 0,
+  start_date        DATE NULL,                      -- optional reference dates only — no longer drives is_current
+  end_date          DATE NULL,
+  is_current        TINYINT(1) NOT NULL DEFAULT 0,   -- kept in sync with status = 'current' whenever status changes
+  status            ENUM('waiting', 'current', 'ended') NOT NULL DEFAULT 'waiting', -- set by hand via semesters.php's Start/End/Waiting buttons, not derived from dates
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_semesters_academic_year
     FOREIGN KEY (academic_year_id) REFERENCES academic_years(id),
@@ -127,10 +129,10 @@ CREATE TABLE semesters (
   UNIQUE KEY uq_semester_name_per_faculty_year (faculty_id, academic_year_id, name)
 ) ENGINE=InnoDB;
 
--- "Current" is a per-faculty concept, not global: each faculty may have
--- exactly one current semester at a time — enforce in application logic
--- (set is_current = 0 for all semesters WHERE faculty_id = <target>, then
--- set the chosen one to 1, inside a transaction). A semester with
+-- "Current" is set by hand (semesters.php's Start/End/Waiting buttons), not
+-- derived from calendar dates. More than one semester can be "current" at
+-- once, including within the same faculty (e.g. two concurrent batches) —
+-- nothing here auto-clears another semester's status. A semester with
 -- faculty_id IS NULL can never be marked current.
 
 -- ---------------------------------------------------------------------
@@ -195,8 +197,9 @@ CREATE TABLE course_offerings (
   id           INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   course_id    INT UNSIGNED NOT NULL,
   semester_id  INT UNSIGNED NOT NULL,
-  lecturer_id  INT UNSIGNED NULL,                 -- NULL = unassigned for that semester
-  shift        ENUM('morning','afternoon','weekend') NULL, -- informational only — NOT part of the unique key below; see migrations/2026_08_course_offerings_shift.sql for why
+  lecturer_id  INT UNSIGNED NULL,                 -- NULL = unassigned for that semester+shift
+  roster_department_id INT UNSIGNED NULL,         -- which department's students form THIS offering's roster; NULL = fall back to courses.department_id (the default, unchanged behavior — only set explicitly for a guest-faculty/cross-listed offering, see migrations/2026_08_course_offerings_roster_department.sql)
+  shift        ENUM('morning','afternoon','weekend','any') NOT NULL DEFAULT 'any', -- 'any' = applies to every shift; part of the unique key below, so a course can have one offering per shift within the same semester (see migrations/2026_08_course_offerings_multi_shift.sql)
   start_date   DATE NULL,                         -- this course's actual teaching-period start within the semester; optional
   end_date     DATE NULL,                         -- and end — both set together, whenever known
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -206,7 +209,9 @@ CREATE TABLE course_offerings (
     FOREIGN KEY (semester_id) REFERENCES semesters(id) ON DELETE CASCADE,
   CONSTRAINT fk_offerings_lecturer
     FOREIGN KEY (lecturer_id) REFERENCES lecturers(id) ON DELETE SET NULL,
-  UNIQUE KEY uq_course_per_semester (course_id, semester_id)
+  CONSTRAINT fk_offerings_roster_department
+    FOREIGN KEY (roster_department_id) REFERENCES departments(id) ON DELETE SET NULL,
+  UNIQUE KEY uq_course_semester_shift (course_id, semester_id, shift)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------

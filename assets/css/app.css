@@ -30,6 +30,25 @@
     --admas-scope-text: #7dd3fc;
 }
 
+/* Bootstrap's default .form-label/.form-text colors are never overridden by
+   our theme variables, so in dark mode they render near-black text on the
+   dark navy background — effectively invisible. Restyle labels as a
+   sky-blue pill with white text (always readable regardless of what's
+   behind them) and route the small helper captions through our own muted
+   text variable instead. */
+[data-theme="dark"] .form-label {
+    display: inline-block;
+    background: var(--admas-sky);
+    color: #ffffff;
+    font-weight: 600;
+    padding: 0.28rem 0.7rem;
+    border-radius: 6px;
+}
+
+[data-theme="dark"] .form-text {
+    color: var(--admas-text-muted);
+}
+
 body {
     background: var(--admas-bg);
     font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
@@ -463,6 +482,24 @@ a.kpi-card:hover .kpi-arrow {
     white-space: nowrap;
 }
 
+/* Bootstrap's .table sets its own --bs-table-bg/--bs-table-color (white /
+   near-black by default) directly on the <table> element itself — since we
+   never touch those Bootstrap variables, the table painted a solid white
+   background over the dark card behind it in dark mode, and any cell with
+   no explicit inline color (e.g. a plain Student No column) fell back to
+   Bootstrap's own dark text, which then read fine by accident while any
+   cell we DID color via var(--admas-text) (light gray, meant for a dark
+   background) turned invisible against that same accidental white. Routing
+   both through our own surface/text variables fixes every list table in
+   the app at once, not just this one. */
+table.admas-table {
+    --bs-table-bg: var(--admas-surface);
+    --bs-table-color: var(--admas-text);
+    --bs-table-border-color: var(--admas-border);
+    background-color: var(--admas-surface);
+    color: var(--admas-text);
+}
+
 table.admas-table thead th {
     text-transform: uppercase;
     font-size: 0.72rem;
@@ -579,6 +616,15 @@ table.admas-table td.col-summary {
 .btn-icon.text-danger:hover {
     background: rgba(220, 38, 38, 0.08);
     color: #dc2626;
+}
+
+.btn-icon.text-sky {
+    color: var(--admas-sky);
+}
+
+.btn-icon.text-sky:hover {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
 }
 
 @media (max-width: 991.98px) {

@@ -82,22 +82,34 @@ if (!empty($_SESSION['flash_error'])) {
 
 $academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
 $faculties = $role === 'dean'
-    ? array_filter($conn->query('SELECT id, name, semesters_per_year FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC), static fn ($f) => (int) $f['id'] === $deanFacultyId)
-    : $conn->query('SELECT id, name, semesters_per_year FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+    ? array_filter($conn->query('SELECT id, name, semesters_per_year, total_semesters FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC), static fn ($f) => (int) $f['id'] === $deanFacultyId)
+    : $conn->query('SELECT id, name, semesters_per_year, total_semesters FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 $semestersPerYearByFacultyId = [];
+$totalSemestersByFacultyId = [];
 foreach ($faculties as $f) {
     $semestersPerYearByFacultyId[(int) $f['id']] = (int) $f['semesters_per_year'];
-}
-$nextStartDateByFacultyId = [];
-foreach ($faculties as $f) {
-    $nextStartDateByFacultyId[(int) $f['id']] = next_semester_start_date_for_faculty($conn, (int) $f['id']);
+    $totalSemestersByFacultyId[(int) $f['id']] = (int) $f['total_semesters'];
 }
 
-$generateFormValues = [
+$createFormValues = [
     'academic_year_id' => '',
     'faculty_id' => $role === 'dean' ? (string) $deanFacultyId : '',
+    'name' => '',
     'start_date' => '',
 ];
+
+const SEMESTER_STATUSES = ['waiting', 'current', 'ended'];
+
+// Edit mode: the Create Semester card doubles as the Edit Semester card,
+// same toggle-by-GET-param convention as admin/departments.php. On a fresh
+// GET load with ?edit=1, it's pre-filled from $selectedSemester once that's
+// resolved further below (never trusted from request input directly — the
+// values come from the already role-scoped $semesters list). On a failed
+// update_semester POST, $editMode/$createFormValues are set directly by
+// that handler instead, and $forcedSelectedSemesterId keeps the right
+// semester's detail panel open for the re-rendered form.
+$editMode = isset($_GET['edit']);
+$forcedSelectedSemesterId = null;
 
 /**
  * Shared by the bulk "Delete Selected" action over a semester's Xiiso
@@ -156,10 +168,10 @@ function delete_session_row(mysqli $conn, int $sessionId, int $semesterId): arra
 function delete_semester_row(mysqli $conn, int $semesterId, string $role, int $deanFacultyId): array
 {
     if ($role === 'dean') {
-        $semStmt = $conn->prepare('SELECT id, name, faculty_id, is_current FROM semesters WHERE id = ? AND faculty_id = ?');
+        $semStmt = $conn->prepare('SELECT id, name, faculty_id, status FROM semesters WHERE id = ? AND faculty_id = ?');
         $semStmt->bind_param('ii', $semesterId, $deanFacultyId);
     } else {
-        $semStmt = $conn->prepare('SELECT id, name, faculty_id, is_current FROM semesters WHERE id = ?');
+        $semStmt = $conn->prepare('SELECT id, name, faculty_id, status FROM semesters WHERE id = ?');
         $semStmt->bind_param('i', $semesterId);
     }
     $semStmt->execute();
@@ -172,8 +184,8 @@ function delete_semester_row(mysqli $conn, int $semesterId, string $role, int $d
 
     $label = (string) $semRow['name'];
 
-    if ((int) $semRow['is_current'] === 1) {
-        return ['ok' => false, 'message' => $label . ' is the current semester for this faculty — set a different semester as current before deleting it.'];
+    if ($semRow['status'] === 'current') {
+        return ['ok' => false, 'message' => $label . ' is the current semester for this faculty — set it to Waiting or Ended before deleting it.'];
     }
 
     $blockers = [];
@@ -225,17 +237,19 @@ function delete_semester_row(mysqli $conn, int $semesterId, string $role, int $d
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
 
-    if ($action === 'generate_next_semester') {
+    if ($action === 'create_semester') {
         // A Dean's faculty is always the session's own faculty_id — never the
         // posted value — so a crafted faculty_id cannot create a semester in
         // a faculty they don't oversee.
         $facultyId = $role === 'dean' ? $deanFacultyId : (int) ($_POST['faculty_id'] ?? 0);
         $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
-        $startDateOverride = trim((string) ($_POST['start_date'] ?? ''));
-        $generateFormValues = [
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $startDateInput = trim((string) ($_POST['start_date'] ?? ''));
+        $createFormValues = [
             'faculty_id' => (string) $facultyId,
             'academic_year_id' => (string) $academicYearId,
-            'start_date' => $startDateOverride,
+            'name' => $name,
+            'start_date' => $startDateInput,
         ];
 
         $facultyValid = false;
@@ -253,37 +267,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        // Start Date is always typed by hand (never auto-suggested/chained
+        // from a previous semester) — it drives the automatic End Date + 12
+        // Xiiso date fill-in below.
+        $startDate = null;
+        $endDate = null;
+        $validSemesterNames = $facultyValid ? semester_name_options_for_faculty($totalSemestersByFacultyId[$facultyId] ?? 0) : [];
         $validationError = '';
         if (!$facultyValid) {
             $validationError = 'Please select a valid faculty.';
         } elseif (!$academicYearValid) {
             $validationError = 'Please select a valid academic year.';
+        } elseif (!in_array($name, $validSemesterNames, true)) {
+            $validationError = 'Please select which semester this is from the dropdown.';
+        } elseif ($startDateInput === '') {
+            $validationError = 'Please provide a start date.';
+        } elseif (!DateTime::createFromFormat('Y-m-d', $startDateInput)) {
+            $validationError = 'Please provide a valid start date.';
+        } else {
+            $dupStmt = $conn->prepare('SELECT id FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND name = ?');
+            $dupStmt->bind_param('iis', $facultyId, $academicYearId, $name);
+            $dupStmt->execute();
+            if ($dupStmt->get_result()->fetch_assoc()) {
+                $validationError = 'This faculty already has a semester with this same name and academic year.';
+            }
+            $dupStmt->close();
+
+            if ($validationError === '' && $startDateInput !== '') {
+                $startDate = $startDateInput;
+                $endDate = semester_end_date_from_start($startDate);
+            }
         }
 
-        // The Start Date field is always editable client-side (pre-filled
-        // with the suggested chained date, but the admin can override it —
-        // e.g. to skip ahead if there's a gap since the last semester
-        // ended) — so whatever was actually posted wins. Only fall back to
-        // computing the chained date server-side if nothing usable was
-        // posted (e.g. JS-disabled).
-        $startDate = null;
         if ($validationError === '') {
-            $startDate = $startDateOverride;
-            if ($startDate === '' || !DateTime::createFromFormat('Y-m-d', $startDate)) {
-                $startDate = next_semester_start_date_for_faculty($conn, $facultyId);
-            }
-            if ($startDate === null || $startDate === '') {
-                $validationError = 'This is the first semester for this faculty — please provide a start date.';
-            } elseif (!DateTime::createFromFormat('Y-m-d', $startDate)) {
-                $validationError = 'Please provide a valid start date.';
-            }
-        }
-
-        if ($validationError === '') {
-            $semesterNumber = next_semester_number_for_faculty($conn, $facultyId);
-            $name = 'Semester ' . $semesterNumber;
-            $endDate = semester_end_date_from_start($startDate);
-
             $conn->begin_transaction();
             try {
                 $insertStmt = $conn->prepare(
@@ -297,8 +313,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 generate_sessions_for_semester($conn, $newSemesterId);
 
                 $conn->commit();
-                refresh_semester_current_flags($conn);
-                $_SESSION['flash_success'] = '"' . $name . '" created (' . $startDate . ' to ' . $endDate . ') with all 12 Xiiso sessions dated automatically.';
+                $_SESSION['flash_success'] = $startDate !== null
+                    ? '"' . $name . '" created (' . $startDate . ' to ' . $endDate . ') with all 12 Xiiso dates filled in automatically.'
+                    : '"' . $name . '" created with all 12 Xiiso sessions — set its status and Xiiso dates below.';
                 redirect_to('semesters.php?semester_id=' . $newSemesterId);
             } catch (Throwable $e) {
                 $conn->rollback();
@@ -307,6 +324,153 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
+    } elseif ($action === 'update_semester') {
+        $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
+
+        $currentStmt = $conn->prepare('SELECT faculty_id, academic_year_id, name, start_date FROM semesters WHERE id = ?');
+        $currentStmt->bind_param('i', $semesterId);
+        $currentStmt->execute();
+        $currentRow = $currentStmt->get_result()->fetch_assoc();
+        $currentStmt->close();
+
+        if (!$currentRow) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
+
+        // A Dean's faculty is always the session's own faculty_id — never the
+        // posted value — same lock as create_semester above.
+        $facultyId = $role === 'dean' ? $deanFacultyId : (int) ($_POST['faculty_id'] ?? 0);
+        $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $startDateInput = trim((string) ($_POST['start_date'] ?? ''));
+        $createFormValues = [
+            'faculty_id' => (string) $facultyId,
+            'academic_year_id' => (string) $academicYearId,
+            'name' => $name,
+            'start_date' => $startDateInput,
+        ];
+
+        $facultyValid = false;
+        foreach ($faculties as $f) {
+            if ((int) $f['id'] === $facultyId) {
+                $facultyValid = true;
+                break;
+            }
+        }
+        $academicYearValid = false;
+        foreach ($academicYears as $ay) {
+            if ((int) $ay['id'] === $academicYearId) {
+                $academicYearValid = true;
+                break;
+            }
+        }
+
+        // Same required, hand-typed Start Date as create_semester — a value
+        // only ever fills in still-empty Xiiso dates
+        // (generate_sessions_for_semester() never overwrites a date that's
+        // already set), so re-submitting the same or a new Start Date on an
+        // already-dated semester is always safe.
+        $startDate = null;
+        $endDate = null;
+        $validSemesterNames = $facultyValid ? semester_name_options_for_faculty($totalSemestersByFacultyId[$facultyId] ?? 0) : [];
+        $validationError = '';
+        if (!$facultyValid) {
+            $validationError = 'Please select a valid faculty.';
+        } elseif (!$academicYearValid) {
+            $validationError = 'Please select a valid academic year.';
+        } elseif (!in_array($name, $validSemesterNames, true)) {
+            $validationError = 'Please select which semester this is from the dropdown.';
+        } elseif ($startDateInput === '') {
+            $validationError = 'Please provide a start date.';
+        } elseif (!DateTime::createFromFormat('Y-m-d', $startDateInput)) {
+            $validationError = 'Please provide a valid start date.';
+        } else {
+            $dupStmt = $conn->prepare('SELECT id FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND name = ? AND id != ?');
+            $dupStmt->bind_param('iisi', $facultyId, $academicYearId, $name, $semesterId);
+            $dupStmt->execute();
+            if ($dupStmt->get_result()->fetch_assoc()) {
+                $validationError = 'Another semester already has this same Faculty, Academic Year, and Name.';
+            }
+            $dupStmt->close();
+
+            if ($validationError === '' && $startDateInput !== '') {
+                $startDate = $startDateInput;
+                $endDate = semester_end_date_from_start($startDate);
+            }
+        }
+
+        // Changing Faculty on a semester that already has course_offerings
+        // or students pointing at it would silently orphan them
+        // (course_offerings' faculty match against courses' own
+        // department, students' own faculty — both computed elsewhere,
+        // neither updates itself when a semester's faculty_id changes
+        // underneath it), so that specific change is blocked once real data
+        // depends on it — same "block, don't corrupt" convention as
+        // delete_semester_row() below. Academic Year is purely a label
+        // (semester_year_number()'s "Year N" display, report filters) —
+        // nothing scopes course_offerings/attendance/students by it, so
+        // correcting a semester's Academic Year (e.g. it was picked wrong
+        // when the semester was created) stays allowed even with real data
+        // already attached. Renaming stays allowed regardless of either.
+        $facultyChanged = $validationError === '' && $facultyId !== (int) $currentRow['faculty_id'];
+
+        if ($facultyChanged) {
+            $blockers = [];
+
+            $offeringCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_offerings WHERE semester_id = ?');
+            $offeringCountStmt->bind_param('i', $semesterId);
+            $offeringCountStmt->execute();
+            $offeringCount = (int) ($offeringCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+            $offeringCountStmt->close();
+            if ($offeringCount > 0) {
+                $blockers[] = $offeringCount . ' course offering' . ($offeringCount === 1 ? '' : 's');
+            }
+
+            $studentCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM students WHERE semester_id = ?');
+            $studentCountStmt->bind_param('i', $semesterId);
+            $studentCountStmt->execute();
+            $studentCount = (int) ($studentCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+            $studentCountStmt->close();
+            if ($studentCount > 0) {
+                $blockers[] = $studentCount . ' student' . ($studentCount === 1 ? '' : 's') . ' assigned';
+            }
+
+            if (!empty($blockers)) {
+                $validationError = 'Cannot change Faculty: this semester still has ' . implode(', ', $blockers) . '. You can still rename it or correct its Academic Year.';
+            }
+        }
+
+        if ($validationError === '') {
+            if ($startDate !== null) {
+                $updateStmt = $conn->prepare('UPDATE semesters SET faculty_id = ?, academic_year_id = ?, name = ?, start_date = ?, end_date = ? WHERE id = ?');
+                $updateStmt->bind_param('iisssi', $facultyId, $academicYearId, $name, $startDate, $endDate, $semesterId);
+            } else {
+                $updateStmt = $conn->prepare('UPDATE semesters SET faculty_id = ?, academic_year_id = ?, name = ? WHERE id = ?');
+                $updateStmt->bind_param('iisi', $facultyId, $academicYearId, $name, $semesterId);
+            }
+            $updateStmt->execute();
+            $updateStmt->close();
+
+            if ($startDate !== null) {
+                // Only fills whichever of the 12 Xiiso sessions still have no
+                // date at all — never touches one already set, whether that
+                // was auto-filled before or typed in by hand.
+                generate_sessions_for_semester($conn, $semesterId);
+                $_SESSION['flash_success'] = 'Semester updated (' . $startDate . ' to ' . $endDate . ') — any still-empty Xiiso dates were filled in automatically.';
+            } else {
+                $_SESSION['flash_success'] = 'Semester updated.';
+            }
+            redirect_to('semesters.php?semester_id=' . $semesterId);
+        }
+
+        $errorMessage = $validationError;
+        $editMode = true;
+        $forcedSelectedSemesterId = $semesterId;
     } elseif ($action === 'assign_faculty') {
         // Not applicable to Dean: a Dean's own semesters always already have
         // faculty_id set at creation (locked to their own faculty above), so
@@ -354,18 +518,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $dupStmt->close();
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
-    } elseif ($action === 'start_now') {
-        // Manual shortcut for a semester whose Start Date was set wrong
-        // (future, or otherwise not covering today) — moves start_date to
-        // today so is_current picks it up on the very next
-        // refresh_semester_current_flags() call, without touching the
-        // date-derived "current" system itself (no separate flag is set).
+    } elseif ($action === 'set_status') {
+        // The three manual states (Waiting / Current / Ended) are set
+        // directly by whichever button was clicked — no date arithmetic,
+        // no automatic recompute. Nothing here clears another semester's
+        // status, so more than one semester (even within the same faculty)
+        // can be "current" at once if the admin/dean chooses that.
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        $newStatus = (string) ($_POST['status'] ?? '');
         if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
             $_SESSION['flash_error'] = 'Selected semester does not exist.';
             redirect_to('semesters.php');
         }
-        $semStmt = $conn->prepare('SELECT name, end_date FROM semesters WHERE id = ?');
+
+        if (!in_array($newStatus, SEMESTER_STATUSES, true)) {
+            $_SESSION['flash_error'] = 'Invalid status.';
+            redirect_to('semesters.php?semester_id=' . $semesterId);
+        }
+
+        $semStmt = $conn->prepare('SELECT name FROM semesters WHERE id = ?');
         $semStmt->bind_param('i', $semesterId);
         $semStmt->execute();
         $semRow = $semStmt->get_result()->fetch_assoc();
@@ -373,46 +544,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (!$semRow) {
             $_SESSION['flash_error'] = 'Selected semester does not exist.';
-        } elseif ($semRow['end_date'] < date('Y-m-d')) {
-            $_SESSION['flash_error'] = 'This semester\'s End Date is already in the past — delete it and generate a new one instead.';
         } else {
-            $updateStmt = $conn->prepare('UPDATE semesters SET start_date = CURDATE() WHERE id = ?');
-            $updateStmt->bind_param('i', $semesterId);
+            $isCurrent = $newStatus === 'current' ? 1 : 0;
+            $updateStmt = $conn->prepare('UPDATE semesters SET status = ?, is_current = ? WHERE id = ?');
+            $updateStmt->bind_param('sii', $newStatus, $isCurrent, $semesterId);
             $updateStmt->execute();
             $updateStmt->close();
-            refresh_semester_current_flags($conn);
 
-            $_SESSION['flash_success'] = '"' . $semRow['name'] . '" now starts today and is current.';
-        }
-        redirect_to('semesters.php?semester_id=' . $semesterId);
-    } elseif ($action === 'end_now') {
-        // Manual shortcut to close a semester out today (e.g. once its
-        // attendance is finished), instead of waiting for its originally
-        // computed End Date. Same mechanism as start_now — only the date
-        // boundary moves, is_current is still recomputed from it.
-        $semesterId = (int) ($_POST['semester_id'] ?? 0);
-        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
-            $_SESSION['flash_error'] = 'Selected semester does not exist.';
-            redirect_to('semesters.php');
-        }
-        $semStmt = $conn->prepare('SELECT name, start_date FROM semesters WHERE id = ?');
-        $semStmt->bind_param('i', $semesterId);
-        $semStmt->execute();
-        $semRow = $semStmt->get_result()->fetch_assoc();
-        $semStmt->close();
-
-        if (!$semRow) {
-            $_SESSION['flash_error'] = 'Selected semester does not exist.';
-        } elseif ($semRow['start_date'] > date('Y-m-d')) {
-            $_SESSION['flash_error'] = 'This semester has not started yet.';
-        } else {
-            $updateStmt = $conn->prepare('UPDATE semesters SET end_date = CURDATE() WHERE id = ?');
-            $updateStmt->bind_param('i', $semesterId);
-            $updateStmt->execute();
-            $updateStmt->close();
-            refresh_semester_current_flags($conn);
-
-            $_SESSION['flash_success'] = '"' . $semRow['name'] . '" ends today and is no longer current.';
+            $statusLabel = ['waiting' => 'Waiting', 'current' => 'Current', 'ended' => 'Ended'][$newStatus];
+            $_SESSION['flash_success'] = '"' . $semRow['name'] . '" set to ' . $statusLabel . '.';
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'generate_sessions') {
@@ -513,14 +653,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 if ($role === 'dean') {
     $semListStmt = $conn->prepare(
-        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current,
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status,
                 ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          JOIN faculties f ON f.id = s.faculty_id
          LEFT JOIN departments cd ON cd.id = s.context_department_id
          WHERE s.faculty_id = ?
-         ORDER BY ay.label DESC, s.start_date DESC"
+         ORDER BY ay.label DESC, s.id DESC"
     );
     $semListStmt->bind_param('i', $deanFacultyId);
     $semListStmt->execute();
@@ -528,17 +668,17 @@ if ($role === 'dean') {
     $semListStmt->close();
 } else {
     $semesters = $conn->query(
-        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current,
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status,
                 ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          LEFT JOIN faculties f ON f.id = s.faculty_id
          LEFT JOIN departments cd ON cd.id = s.context_department_id
-         ORDER BY (s.faculty_id IS NULL), f.name, ay.label DESC, s.start_date DESC"
+         ORDER BY (s.faculty_id IS NULL), f.name, ay.label DESC, s.id DESC"
     )->fetch_all(MYSQLI_ASSOC);
 }
 
-$selectedSemesterId = (int) ($_GET['semester_id'] ?? 0);
+$selectedSemesterId = $forcedSelectedSemesterId ?? (int) ($_GET['semester_id'] ?? 0);
 if ($selectedSemesterId === 0 && !empty($semesters)) {
     $selectedSemesterId = (int) $semesters[0]['id'];
 }
@@ -553,6 +693,19 @@ foreach ($semesters as $s) {
 }
 if ($selectedSemester) {
     $selectedSemesterSessions = get_sessions_for_semester($conn, $selectedSemesterId);
+}
+
+// Pre-fill the Create/Edit card from the (already role-scoped) selected
+// semester only on a fresh GET load — a failed update_semester POST above
+// already set $createFormValues from what the admin actually typed, which
+// must win over re-fetching the unchanged DB row here.
+if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== null) {
+    $createFormValues = [
+        'faculty_id' => (string) $selectedSemester['faculty_id'],
+        'academic_year_id' => (string) $selectedSemester['academic_year_id'],
+        'name' => $selectedSemester['name'],
+        'start_date' => (string) ($selectedSemester['start_date'] ?? ''),
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -604,27 +757,34 @@ if ($selectedSemester) {
             <div class="row g-4">
                 <div class="col-lg-5">
                     <div class="admas-card p-4 mb-4">
-                        <h6 class="small text-uppercase text-muted mb-2">Generate Next Semester</h6>
+                        <h6 class="small text-uppercase text-muted mb-2"><?= $editMode ? 'Edit Semester' : 'Create Semester' ?></h6>
                         <p class="text-muted small mb-2">
-                            Every semester runs 3 months (12 Xiiso). Pick a faculty and academic year — the semester
-                            number, dates, and all 12 Xiiso dates are filled in automatically, chained from that
-                            faculty's last semester. You can still edit individual Xiiso dates afterward.
+                            <?php if ($editMode): ?>
+                                Update this semester's Faculty, Academic Year, or name. Its status and Xiiso dates are
+                                set separately, in the panel on the right.
+                            <?php else: ?>
+                                Pick a faculty and academic year, and state which semester this is. After creating it,
+                                set its status (Waiting / Current / Ended) and its 12 Xiiso dates below.
+                            <?php endif; ?>
                         </p>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="d-flex flex-column gap-2">
-                            <input type="hidden" name="action" value="generate_next_semester">
+                            <input type="hidden" name="action" value="<?= $editMode ? 'update_semester' : 'create_semester' ?>">
+                            <?php if ($editMode): ?>
+                                <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
+                            <?php endif; ?>
 
                             <div>
                                 <label class="form-label small mb-1">Faculty</label>
                                 <?php if ($role === 'dean'): ?>
-                                    <select class="form-select form-select-sm" id="semesterFacultySelect" disabled>
+                                    <select class="form-select form-select-sm" disabled>
                                         <option selected value="<?= (int) $deanFacultyId ?>"><?= htmlspecialchars($deanFacultyName) ?></option>
                                     </select>
                                     <div class="form-text">Locked to your own faculty.</div>
                                 <?php else: ?>
-                                    <select class="form-select form-select-sm" id="semesterFacultySelect" name="faculty_id" required onchange="admasUpdateNextStartDate(this.value)">
+                                    <select class="form-select form-select-sm" name="faculty_id" id="semesterFacultySelect" required onchange="admasUpdateSemesterNameOptions(this.value)">
                                         <option value="">Select faculty</option>
                                         <?php foreach ($faculties as $f): ?>
-                                            <option value="<?= (int) $f['id'] ?>" <?= (string) $f['id'] === $generateFormValues['faculty_id'] ? 'selected' : '' ?>>
+                                            <option value="<?= (int) $f['id'] ?>" <?= (string) $f['id'] === $createFormValues['faculty_id'] ? 'selected' : '' ?>>
                                                 <?= htmlspecialchars($f['name']) ?>
                                             </option>
                                         <?php endforeach; ?>
@@ -632,11 +792,25 @@ if ($selectedSemester) {
                                 <?php endif; ?>
                             </div>
                             <div>
+                                <label class="form-label small mb-1">Semester</label>
+                                <?php $initialFacultyId = $role === 'dean' ? $deanFacultyId : (int) $createFormValues['faculty_id']; ?>
+                                <select class="form-select form-select-sm" name="name" id="semesterNameSelect" required <?= $initialFacultyId <= 0 ? 'disabled' : '' ?>>
+                                    <?php if ($initialFacultyId <= 0): ?>
+                                        <option value="">Select faculty first</option>
+                                    <?php else: ?>
+                                        <option value="">Select semester</option>
+                                        <?php foreach (semester_name_options_for_faculty($totalSemestersByFacultyId[$initialFacultyId] ?? 0) as $opt): ?>
+                                            <option value="<?= htmlspecialchars($opt) ?>" <?= $opt === $createFormValues['name'] ? 'selected' : '' ?>><?= htmlspecialchars($opt) ?></option>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </select>
+                            </div>
+                            <div>
                                 <label class="form-label small mb-1">Academic Year</label>
                                 <select class="form-select form-select-sm" name="academic_year_id" required <?= empty($academicYears) ? 'disabled' : '' ?>>
                                     <option value="">Select year</option>
                                     <?php foreach ($academicYears as $ay): ?>
-                                        <option value="<?= (int) $ay['id'] ?>" <?= (string) $ay['id'] === $generateFormValues['academic_year_id'] ? 'selected' : '' ?>>
+                                        <option value="<?= (int) $ay['id'] ?>" <?= (string) $ay['id'] === $createFormValues['academic_year_id'] ? 'selected' : '' ?>>
                                             <?= htmlspecialchars($ay['label']) ?>
                                         </option>
                                     <?php endforeach; ?>
@@ -647,13 +821,22 @@ if ($selectedSemester) {
                             </div>
                             <div>
                                 <label class="form-label small mb-1">Start Date</label>
-                                <input type="date" class="form-control form-control-sm" id="semesterStartDateInput" name="start_date"
-                                       value="<?= htmlspecialchars($generateFormValues['start_date']) ?>" <?= $role === 'dean' ? 'required' : '' ?>>
-                                <div class="form-text" id="semesterStartDateHelp">&nbsp;</div>
+                                <input type="date" class="form-control form-control-sm" name="start_date"
+                                       value="<?= htmlspecialchars($createFormValues['start_date']) ?>" required>
+                                <div class="form-text">End Date and all 12 Xiiso dates are filled in automatically (3 months from this date) — you can still edit individual Xiiso dates afterward.</div>
                             </div>
-                            <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($academicYears) ? 'disabled' : '' ?>>
-                                <i class="bi bi-magic"></i> Generate Next Semester
-                            </button>
+                            <div class="d-flex gap-2 mt-2">
+                                <button type="submit" class="btn btn-primary text-nowrap" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($academicYears) ? 'disabled' : '' ?>>
+                                    <?php if ($editMode): ?>
+                                        <i class="bi bi-check-lg"></i> Update Semester
+                                    <?php else: ?>
+                                        <i class="bi bi-plus-lg"></i> Create Semester
+                                    <?php endif; ?>
+                                </button>
+                                <?php if ($editMode): ?>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= $selectedSemesterId ?>" class="btn btn-outline-secondary text-nowrap">Cancel</a>
+                                <?php endif; ?>
+                            </div>
                         </form>
                     </div>
 
@@ -698,35 +881,22 @@ if ($selectedSemester) {
                                                 </td>
                                                 <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
                                                 <td>
-                                                    <?php if ((int) $s['is_current'] === 1): ?>
+                                                    <?php if ($s['status'] === 'current'): ?>
                                                         <span class="badge-pill badge-active">Current</span>
-                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="mt-1"
-                                                              onclick="event.stopPropagation();"
-                                                              onsubmit="event.stopPropagation(); return confirm('End this semester today?');">
-                                                            <input type="hidden" name="action" value="end_now">
-                                                            <input type="hidden" name="semester_id" value="<?= (int) $s['id'] ?>">
-                                                            <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-2" style="font-size: 0.72rem;">
-                                                                <i class="bi bi-stop-fill"></i> End
-                                                            </button>
-                                                        </form>
-                                                    <?php elseif ($s['end_date'] < date('Y-m-d')): ?>
+                                                    <?php elseif ($s['status'] === 'ended'): ?>
                                                         <span class="badge-pill badge-inactive">Ended</span>
                                                     <?php else: ?>
                                                         <span class="badge-pill badge-neutral">Waiting</span>
-                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="mt-1"
-                                                              onclick="event.stopPropagation();"
-                                                              onsubmit="event.stopPropagation(); return confirm('Start this semester today?');">
-                                                            <input type="hidden" name="action" value="start_now">
-                                                            <input type="hidden" name="semester_id" value="<?= (int) $s['id'] ?>">
-                                                            <button type="submit" class="btn btn-outline-success btn-sm py-0 px-2" style="font-size: 0.72rem;">
-                                                                <i class="bi bi-play-fill"></i> Start
-                                                            </button>
-                                                        </form>
                                                     <?php endif; ?>
                                                 </td>
                                                 <?php if ($role === 'system_admin' || $role === 'dean'): ?>
                                                     <td class="text-end">
-                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php"
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= (int) $s['id'] ?>&edit=1"
+                                                           class="btn-icon" title="Edit semester" aria-label="Edit semester"
+                                                           onclick="event.stopPropagation();">
+                                                            <i class="bi bi-pencil"></i>
+                                                        </a>
+                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="d-inline"
                                                               onclick="event.stopPropagation();"
                                                               onsubmit="event.stopPropagation(); return confirm('Delete this semester? This cannot be undone.');">
                                                             <input type="hidden" name="action" value="delete_semester">
@@ -758,8 +928,12 @@ if ($selectedSemester) {
                                     <h6 class="fw-bold mb-1" style="color: var(--admas-text);">
                                         <?= htmlspecialchars($selectedSemester['name']) ?>
                                         <span class="text-muted fw-normal">(<?= htmlspecialchars($selectedSemester['academic_year_label']) ?>)</span>
-                                        <?php if ((int) $selectedSemester['is_current'] === 1): ?>
+                                        <?php if ($selectedSemester['status'] === 'current'): ?>
                                             <span class="badge-pill badge-active">Active now</span>
+                                        <?php elseif ($selectedSemester['status'] === 'ended'): ?>
+                                            <span class="badge-pill badge-inactive">Ended</span>
+                                        <?php else: ?>
+                                            <span class="badge-pill badge-neutral">Waiting</span>
                                         <?php endif; ?>
                                     </h6>
                                     <p class="text-muted small mb-0">
@@ -767,7 +941,9 @@ if ($selectedSemester) {
                                         <?php if ($selectedSemester['context_department_name']): ?>
                                             <span class="fst-italic">(<?= htmlspecialchars($selectedSemester['context_department_name']) ?>)</span>
                                         <?php endif; ?>
-                                        &middot; <?= htmlspecialchars($selectedSemester['start_date']) ?> to <?= htmlspecialchars($selectedSemester['end_date']) ?>
+                                        <?php if ($selectedSemester['start_date'] || $selectedSemester['end_date']): ?>
+                                            &middot; <?= htmlspecialchars($selectedSemester['start_date'] ?? '—') ?> to <?= htmlspecialchars($selectedSemester['end_date'] ?? '—') ?>
+                                        <?php endif; ?>
                                         <?php $selYear = semester_year_number($selectedSemester['name'], $semestersPerYearByFacultyId[(int) $selectedSemester['faculty_id']] ?? 3); ?>
                                         <?php if ($selYear !== null): ?>
                                             &middot; Year <?= $selYear ?>
@@ -775,24 +951,30 @@ if ($selectedSemester) {
                                     </p>
                                 </div>
                                 <div class="d-flex gap-2 flex-wrap">
-                                    <?php if ((int) $selectedSemester['is_current'] !== 1 && $selectedSemester['end_date'] >= date('Y-m-d')): ?>
-                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('Start this semester today? Its Start Date will move to today.');">
-                                            <input type="hidden" name="action" value="start_now">
-                                            <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
-                                            <button type="submit" class="btn btn-outline-success btn-sm">
-                                                <i class="bi bi-play-fill"></i> Start Current
-                                            </button>
-                                        </form>
-                                    <?php endif; ?>
-                                    <?php if ((int) $selectedSemester['is_current'] === 1): ?>
-                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('End this semester today? It will stop being current from tomorrow.');">
-                                            <input type="hidden" name="action" value="end_now">
-                                            <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
-                                            <button type="submit" class="btn btn-outline-danger btn-sm">
-                                                <i class="bi bi-stop-fill"></i> End Semester
-                                            </button>
-                                        </form>
-                                    <?php endif; ?>
+                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('Set this semester to Current?');">
+                                        <input type="hidden" name="action" value="set_status">
+                                        <input type="hidden" name="status" value="current">
+                                        <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
+                                        <button type="submit" class="btn btn-sm <?= $selectedSemester['status'] === 'current' ? 'btn-success' : 'btn-outline-success' ?>" <?= $selectedSemester['status'] === 'current' ? 'disabled' : '' ?>>
+                                            <i class="bi bi-play-fill"></i> Start
+                                        </button>
+                                    </form>
+                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('Set this semester to Ended?');">
+                                        <input type="hidden" name="action" value="set_status">
+                                        <input type="hidden" name="status" value="ended">
+                                        <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
+                                        <button type="submit" class="btn btn-sm <?= $selectedSemester['status'] === 'ended' ? 'btn-danger' : 'btn-outline-danger' ?>" <?= $selectedSemester['status'] === 'ended' ? 'disabled' : '' ?>>
+                                            <i class="bi bi-stop-fill"></i> End
+                                        </button>
+                                    </form>
+                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('Set this semester to Waiting?');">
+                                        <input type="hidden" name="action" value="set_status">
+                                        <input type="hidden" name="status" value="waiting">
+                                        <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
+                                        <button type="submit" class="btn btn-sm <?= $selectedSemester['status'] === 'waiting' ? 'btn-secondary' : 'btn-outline-secondary' ?>" <?= $selectedSemester['status'] === 'waiting' ? 'disabled' : '' ?>>
+                                            <i class="bi bi-hourglass-split"></i> Waiting
+                                        </button>
+                                    </form>
                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">
                                         <input type="hidden" name="action" value="generate_sessions">
                                         <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
@@ -800,6 +982,9 @@ if ($selectedSemester) {
                                             <i class="bi bi-magic"></i> Generate Sessions
                                         </button>
                                     </form>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= $selectedSemesterId ?>&edit=1" class="btn btn-outline-secondary btn-sm">
+                                        <i class="bi bi-pencil"></i> Edit
+                                    </a>
                                 </div>
                             </div>
 
@@ -892,36 +1077,48 @@ if ($selectedSemester) {
             });
         });
 
-        // "Generate Next Semester" form: Start Date auto-fills (and locks)
-        // to the day after that faculty's last semester ended; a faculty
-        // with no semesters yet gets an empty, editable Start Date since
-        // there's nothing to chain from.
-        const nextStartDateByFacultyId = <?= json_encode($nextStartDateByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        // Semester dropdown options depend on the selected Faculty's own
+        // Total Semesters — rebuilt client-side on Faculty change so no page
+        // reload is needed (server-side validation re-checks this regardless
+        // of what the client sends).
+        const semesterOptionsByFacultyId = <?php
+            $semesterOptionsByFacultyId = [];
+            foreach ($faculties as $f) {
+                $semesterOptionsByFacultyId[(int) $f['id']] = semester_name_options_for_faculty((int) $f['total_semesters']);
+            }
+            echo json_encode($semesterOptionsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT);
+        ?>;
 
-        function admasUpdateNextStartDate(facultyId) {
-            const input = document.getElementById('semesterStartDateInput');
-            const help = document.getElementById('semesterStartDateHelp');
-            if (!input || !help) {
+        function admasUpdateSemesterNameOptions(facultyId) {
+            const select = document.getElementById('semesterNameSelect');
+            if (!select) {
                 return;
             }
-            const chained = nextStartDateByFacultyId[facultyId];
-            if (chained) {
-                input.value = chained;
-                input.required = false;
-                help.textContent = 'Suggested date, right after this faculty\'s last semester ended. You can change it.';
-            } else {
-                input.value = '';
-                input.required = true;
-                help.textContent = facultyId ? 'First semester for this faculty — pick a start date.' : ' ';
-            }
-        }
+            const options = semesterOptionsByFacultyId[facultyId] || [];
+            select.innerHTML = '';
 
-        window.addEventListener('DOMContentLoaded', () => {
-            const facultySelect = document.getElementById('semesterFacultySelect');
-            if (facultySelect) {
-                admasUpdateNextStartDate(facultySelect.value);
+            if (options.length === 0) {
+                const placeholder = document.createElement('option');
+                placeholder.value = '';
+                placeholder.textContent = facultyId ? 'No semesters configured for this faculty' : 'Select faculty first';
+                select.appendChild(placeholder);
+                select.disabled = true;
+                return;
             }
-        });
+
+            select.disabled = false;
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = 'Select semester';
+            select.appendChild(placeholder);
+
+            options.forEach((name) => {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                select.appendChild(opt);
+            });
+        }
     </script>
 </body>
 </html>

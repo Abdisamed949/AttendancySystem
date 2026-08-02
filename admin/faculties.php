@@ -53,6 +53,7 @@ $reopenId = 0;
 $reopenName = '';
 $reopenDeanId = 0;
 $reopenSemestersPerYear = 3;
+$reopenTotalSemesters = 8;
 
 // ---------------------------------------------------------------------
 // Handle POST actions: create, update, delete
@@ -65,6 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim((string) ($_POST['name'] ?? ''));
         $deanUserId = (int) ($_POST['dean_user_id'] ?? 0);
         $semestersPerYear = (int) ($_POST['semesters_per_year'] ?? 0);
+        $totalSemesters = (int) ($_POST['total_semesters'] ?? 0);
 
         $validationError = '';
 
@@ -74,6 +76,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Invalid faculty selected for editing.';
         } elseif ($semestersPerYear < 1 || $semestersPerYear > 6) {
             $validationError = 'Semesters per year must be between 1 and 6.';
+        } elseif ($totalSemesters < 1 || $totalSemesters > 30) {
+            $validationError = 'Total semesters must be between 1 and 30.';
         }
 
         if ($validationError === '') {
@@ -98,14 +102,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $deanCheckStmt->close();
         }
 
+        // Shrinking Total Semesters below a semester number this faculty
+        // already has would make that semester's own name fall outside the
+        // Semester dropdown's valid range on semesters.php — blocked, same
+        // "don't silently orphan existing data" convention used elsewhere.
+        if ($validationError === '' && $action === 'update') {
+            $maxUsedStmt = $conn->prepare(
+                "SELECT COALESCE(MAX(CAST(REGEXP_REPLACE(name, '[^0-9]', '') AS UNSIGNED)), 0) AS max_used
+                 FROM semesters WHERE faculty_id = ?"
+            );
+            $maxUsedStmt->bind_param('i', $facultyId);
+            $maxUsedStmt->execute();
+            $maxUsed = (int) ($maxUsedStmt->get_result()->fetch_assoc()['max_used'] ?? 0);
+            $maxUsedStmt->close();
+
+            if ($totalSemesters < $maxUsed) {
+                $validationError = "Total Semesters can't be less than {$maxUsed} — this faculty already has a semester numbered that high.";
+            }
+        }
+
         if ($validationError === '') {
             $conn->begin_transaction();
             try {
                 $deanParam = $deanUserId > 0 ? $deanUserId : null;
 
                 if ($action === 'create') {
-                    $insertStmt = $conn->prepare('INSERT INTO faculties (name, semesters_per_year, dean_user_id) VALUES (?, ?, ?)');
-                    $insertStmt->bind_param('sii', $name, $semestersPerYear, $deanParam);
+                    $insertStmt = $conn->prepare('INSERT INTO faculties (name, semesters_per_year, total_semesters, dean_user_id) VALUES (?, ?, ?, ?)');
+                    $insertStmt->bind_param('siii', $name, $semestersPerYear, $totalSemesters, $deanParam);
                     $insertStmt->execute();
                     $facultyId = (int) $conn->insert_id;
                     $insertStmt->close();
@@ -116,8 +139,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $releaseStmt->execute();
                     $releaseStmt->close();
 
-                    $updateStmt = $conn->prepare('UPDATE faculties SET name = ?, semesters_per_year = ?, dean_user_id = ? WHERE id = ?');
-                    $updateStmt->bind_param('siii', $name, $semestersPerYear, $deanParam, $facultyId);
+                    $updateStmt = $conn->prepare('UPDATE faculties SET name = ?, semesters_per_year = ?, total_semesters = ?, dean_user_id = ? WHERE id = ?');
+                    $updateStmt->bind_param('siiii', $name, $semestersPerYear, $totalSemesters, $deanParam, $facultyId);
                     $updateStmt->execute();
                     $updateStmt->close();
                 }
@@ -146,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $reopenName = $name;
         $reopenDeanId = $deanUserId;
         $reopenSemestersPerYear = $semestersPerYear > 0 ? $semestersPerYear : 3;
+        $reopenTotalSemesters = $totalSemesters > 0 ? $totalSemesters : 8;
     } elseif ($action === 'delete') {
         $facultyId = (int) ($_POST['faculty_id'] ?? 0);
 
@@ -181,7 +205,7 @@ $deanListStmt->close();
 
 $faculties = [];
 $listStmt = $conn->prepare(
-    "SELECT f.id, f.name, f.semesters_per_year,
+    "SELECT f.id, f.name, f.semesters_per_year, f.total_semesters,
             (SELECT du.id FROM users du WHERE du.faculty_id = f.id AND du.role_id = ? LIMIT 1) AS dean_id,
             (SELECT du.full_name FROM users du WHERE du.faculty_id = f.id AND du.role_id = ? LIMIT 1) AS dean_name,
             (SELECT COUNT(*) FROM departments d WHERE d.faculty_id = f.id) AS dept_count,
@@ -273,7 +297,7 @@ $listStmt->close();
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Faculties</h6>
                     <button type="button" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"
-                            onclick='openFacultyModal("create", 0, "", 0, 3)'>
+                            onclick='openFacultyModal("create", 0, "", 0, 3, 8)'>
                         <i class="bi bi-plus-lg"></i> Add Faculty
                     </button>
                 </div>
@@ -285,6 +309,7 @@ $listStmt->close();
                                 <th>Faculty Name</th>
                                 <th>Dean</th>
                                 <th>Semesters/Year</th>
+                                <th>Total Semesters</th>
                                 <th>Departments</th>
                                 <th>Students</th>
                                 <th>Actions</th>
@@ -293,7 +318,7 @@ $listStmt->close();
                         <tbody>
                             <?php if (empty($faculties)): ?>
                                 <tr>
-                                    <td colspan="6" class="text-center text-muted py-4">No faculties have been created yet.</td>
+                                    <td colspan="7" class="text-center text-muted py-4">No faculties have been created yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($faculties as $f): ?>
@@ -307,11 +332,12 @@ $listStmt->close();
                                             <?php endif; ?>
                                         </td>
                                         <td><?= (int) $f['semesters_per_year'] ?></td>
+                                        <td><?= (int) $f['total_semesters'] ?></td>
                                         <td><?= (int) $f['dept_count'] ?></td>
                                         <td><?= number_format((int) $f['student_count']) ?></td>
                                         <td>
                                             <button type="button" class="btn-icon" title="Edit"
-                                                    onclick='openFacultyModal("edit", <?= (int) $f['id'] ?>, <?= json_encode($f['name'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= (int) ($f['dean_id'] ?? 0) ?>, <?= (int) $f['semesters_per_year'] ?>)'>
+                                                    onclick='openFacultyModal("edit", <?= (int) $f['id'] ?>, <?= json_encode($f['name'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= (int) ($f['dean_id'] ?? 0) ?>, <?= (int) $f['semesters_per_year'] ?>, <?= (int) $f['total_semesters'] ?>)'>
                                                 <i class="bi bi-pencil"></i>
                                             </button>
                                             <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/faculties.php" style="display:inline;"
@@ -357,6 +383,12 @@ $listStmt->close();
                             <div class="form-text">e.g. 3 for most faculties, 2 for a Health faculty on a longer semester calendar.</div>
                         </div>
 
+                        <div class="mb-3">
+                            <label for="facultyTotalSemestersInput" class="form-label">Total Semesters</label>
+                            <input type="number" class="form-control" id="facultyTotalSemestersInput" name="total_semesters" required min="1" max="30" value="8">
+                            <div class="form-text">How many semesters this faculty's whole program runs for (e.g. 4 years &times; 2/year = 8). Drives the Semester dropdown when creating semesters.</div>
+                        </div>
+
                         <div class="mb-1">
                             <label for="facultyDeanSelect" class="form-label">Dean</label>
                             <select class="form-select" id="facultyDeanSelect" name="dean_user_id">
@@ -381,12 +413,13 @@ $listStmt->close();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        function openFacultyModal(mode, facultyId, name, deanId, semestersPerYear) {
+        function openFacultyModal(mode, facultyId, name, deanId, semestersPerYear, totalSemesters) {
             document.getElementById('facultyModalLabel').textContent = mode === 'edit' ? 'Edit Faculty' : 'Add Faculty';
             document.getElementById('facultyFormAction').value = mode === 'edit' ? 'update' : 'create';
             document.getElementById('facultyFormId').value = facultyId || 0;
             document.getElementById('facultyNameInput').value = name || '';
             document.getElementById('facultySemestersPerYearInput').value = semestersPerYear || 3;
+            document.getElementById('facultyTotalSemestersInput').value = totalSemesters || 8;
 
             const select = document.getElementById('facultyDeanSelect');
             Array.from(select.options).forEach((opt) => {
@@ -407,7 +440,8 @@ $listStmt->close();
                 <?= (int) $reopenId ?>,
                 <?= json_encode($reopenName) ?>,
                 <?= (int) $reopenDeanId ?>,
-                <?= (int) $reopenSemestersPerYear ?>
+                <?= (int) $reopenSemestersPerYear ?>,
+                <?= (int) $reopenTotalSemesters ?>
             );
         });
         <?php endif; ?>

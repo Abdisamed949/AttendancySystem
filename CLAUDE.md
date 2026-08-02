@@ -2768,6 +2768,223 @@ data/configuration task for the university admin, not further code work.
         than risk touching a shared stylesheet rule for a purely cosmetic
         cleanup).
 
+### Xiiso Grid Report Export: Borders, Meta Line, Logo Fix
+- [x] User asked (after I explained what was/wasn't currently possible,
+      without writing code first, per their request) for two of three
+      export gaps to be closed on `reports.php`'s Xiiso Attendance Grid
+      report — the third (auto-computing "this is faculty X's Nth
+      semester/Year Y" since `semesters.name` is free text with no ordinal
+      column) was left as a future decision, not built.
+      - **Sky-blue column-group borders + P/A/% accent in PDF/Excel
+        exports**: the on-screen grid already computes `group_end`/
+        `summary`/`header_accent` flags per column (`build_xiiso_grid_report()`
+        via `build_xiiso_chunks()`), but both export builders were
+        rendering every column identically, ignoring those flags entirely.
+        Fixed in `render_report_pdf_html()` (new `.col-group-end`/
+        `.col-summary` CSS rules in the PDF's own embedded `<style>` block,
+        applied via the same flags on each `<th>`/`<td>`) and in the Excel
+        export branch (a new per-column loop after the row-writing loop
+        applies a sky-blue header fill for summary/header_accent columns,
+        a light sky-blue tint fill down the P/A/% data columns, and a
+        medium sky-blue right border at every `group_end` column — using
+        the newly-imported `PhpOffice\PhpSpreadsheet\Style\Border`).
+        Both are additive: only `build_xiiso_grid_report()`'s columns ever
+        set these flags, so the other 3 report types are unaffected (empty
+        checks default false) — confirmed via a live regression export of
+        all 3 other report types after the change.
+      - **Faculty/Department/Academic Year/Lecturer added to the export
+        meta line**: this data was already being computed and shown
+        on-screen (`render_scope_breadcrumb()` + `render_offering_summary()`/
+        `get_offering_summary()`) but `$reportMetaLine` — the only piece of
+        that context actually passed into the PDF/Excel builders — only
+        ever said "Course: ... | Semester: ...". Extended it to also pull
+        `department_name`/`faculty_name` from `$xiisoCourseById`,
+        `academic_year_label` from `$xiisoSemesterById`, and the assigned
+        lecturer's name via a new `get_offering_summary()` call (falls back
+        to "Unassigned" when the course_offerings row has no lecturer_id
+        set yet) — one shared variable, so both exports and the on-screen
+        title line all picked it up automatically.
+      - **PDF logo half cut off, fixed**: root cause was the `<img>` tag
+        only setting its size via CSS (`.header img { width: 56px; height:
+        56px; }`) with no matching HTML `width`/`height` attributes —
+        confirmed by decompressing a real exported PDF's content stream:
+        without the fix, dompdf doesn't reliably constrain an embedded
+        base64 image to a CSS-only size, so the real 474×474 logo file
+        (confirmed via `getimagesize()`) was being placed at closer to
+        native size and clipped by the header's `overflow: hidden`. Added
+        `width="56" height="56"` directly on the `<img>` tag; re-verified
+        by decompressing the regenerated PDF's content stream and
+        confirming the image's placement matrix now scales it to exactly
+        42×42pt (56px × dompdf's 0.75 px→pt factor) — small enough to sit
+        fully inside the header, no clipping.
+      **Verified end-to-end**, not just by reading the code: created a
+      temporary system_admin account, exported both PDF and Excel for a
+      real course/semester/lecturer combination (LA — linear Algebra /
+      Semester 8 / lecturer "suldaan naaji"), and inspected the actual
+      generated files rather than trusting the code alone — decompressed
+      the PDF's content streams to confirm the sky-blue color operator is
+      actually painted (3 streams) and the logo's placement matrix is
+      42×42pt as expected; re-opened the Excel file with PhpSpreadsheet's
+      own reader and printed back every header cell's fill color and
+      right-border style (confirmed sky-blue 0EA5E9 fill + medium
+      sky-blue border on exactly the expected columns: Student No/Full
+      Name/P/A/%, and a border at every 4th Xiiso session) and the A1–A3
+      meta rows (confirmed Department/Faculty/Semester/Academic
+      Year/Lecturer all present and correct). Re-exported all 3 other
+      report types (course_attendance/department_summary/faculty_summary,
+      both PDF and Excel) afterward as a regression check — all 6 still
+      200 and valid files, confirming the shared export code path wasn't
+      broken for the report types that don't set these new column flags.
+      Both temporary accounts were deleted afterward; `users` count
+      confirmed back to the 85 baseline.
+
+### Course Import: Optional Per-Row Semester Offering (Academic Year/Semester/Shift/Lecturer) + Banner Skip
+- [x] `admin/courses_import.php` extended with four new **optional** columns —
+      Academic Year, Semester, Shift, Lecturer — mirroring two existing
+      patterns rather than inventing a new UI: `admin/courses.php`'s manual
+      "Add Course + Optional First Offering" opt-in rule (a Semester left
+      blank = catalog-only course, exactly as before), and
+      `admin/students_import.php`'s per-row column pattern (no separate
+      pre-upload dropdowns — a course belonging to Semester 2 and one
+      belonging to Semester 9 can sit in the same file, each row resolving
+      its own). Explicitly chosen over a separate "Bulk Assign Courses to a
+      Semester" page after the user pushed back that a new page with its
+      own Faculty/Department/Semester dropdowns would be "another window" —
+      the simpler answer was to extend the one import flow that already
+      exists.
+      - **Resolution rule**: the whole offering group is validated only when
+        a row's Semester cell is non-empty (opt-in, per-row). When it is:
+        Academic Year and Shift become required for that row (clear
+        per-row error if either is missing), Lecturer stays optional
+        (defaults to Unassigned). Semester is resolved via a new
+        `(faculty_id, academic_year_id, name)` lookup —
+        **includes Academic Year in the key**, unlike
+        `students_import.php`'s simpler `(faculty_id, name)`-only lookup,
+        specifically because the same Semester name can legitimately repeat
+        across different academic years for one faculty and the user asked
+        for Academic Year to disambiguate that. Faculty itself is never a
+        separate column — it's resolved from the row's already-resolved
+        Department. Shift accepts either the raw enum value or the
+        friendly label (`normalize_shift_input_for_course()`, a local
+        duplicate of `students_import.php`'s own `normalize_shift_input()`,
+        matching that file's existing local-helper convention rather than
+        extracting a new shared one). Lecturer matches by full name against
+        any active lecturer system-wide (not department-restricted — same
+        "common courses across faculties" reasoning already used by
+        `admin/courses.php`'s own offering-lecturer field).
+      - **Banner skip**: added the same `$looksLikeHeaderRow`-style loop
+        used in `admin/students_import.php` (checks for a Code-like or
+        Name-like cell before treating a row as the real header), so
+        decorative title rows above the real table (university name, a
+        department note, etc.) no longer break the import.
+      - **Confirm step**: the existing course-insert transaction now also
+        inserts one `course_offerings` row per valid row that resolved a
+        Semester (plain `INSERT`, not upsert — these are always brand-new
+        `course_id`s within the same import, so no existing offering could
+        conflict). Flash message now reports courses imported *and*
+        offerings created separately.
+      - **Preview table**: replaced the removed single "Lecturer" column
+        (dropped in an earlier session) with one combined "Offering" column
+        showing "Semester · Year · Shift · Lecturer" or an em dash for a
+        catalog-only row — kept as one column rather than four separate
+        ones to avoid widening an already 6-column table, matching the
+        user's explicit priority that the UI stay simple.
+      - **Template** regenerated with the 4 new example columns (one row
+        with a full offering filled in, one without, mirroring the two
+        real usage patterns).
+      **Verified end-to-end via live HTTP requests** with a temporary
+      system_admin account and a 7-row test file (including 3 decorative
+      banner rows above the real header, to prove banner-skip): confirmed
+      the template downloads as a valid 8-column `.xlsx`; confirmed preview
+      correctly flagged, with the exact expected message, every error case
+      tested — missing Academic Year when Semester was given, unknown
+      semester name, invalid shift, unknown lecturer, unknown department —
+      while the two valid rows (one catalog-only, one with a full real
+      offering against real "Semester 9"/"2023/2024"/"Abdirahman Mohamed"
+      data) both showed "Ready to import"; confirmed the Offering column
+      rendered "Semester 9 (2023/2024) · Afternoon Shift · Abdirahman
+      Mohamed" correctly; confirmed Confirm imported exactly 2 courses,
+      created exactly 1 course_offerings row, and skipped exactly 5 —
+      matching the flash message — then verified directly in the database
+      that the offering row's `semester_id`/`lecturer_id`/`shift` were all
+      exactly correct. Cleaned up afterward: the 2 test courses, the 1 test
+      offering, and the temp account were deleted; `users` count confirmed
+      back to the 85 baseline.
+
+### Dark Mode Follow-up: Form Label Contrast
+- [x] User reported that on `admin/profile.php` (and, by the same shared
+      markup, every other role's `profile.php`) in dark mode, field labels
+      like "Current Password"/"New Password"/"Username" were essentially
+      invisible. Root cause: Bootstrap's `.form-label`/`.form-text` classes
+      have no explicit color rule of their own in `app.css` — they were
+      inheriting the browser/Bootstrap default near-black text color, which
+      the original Dark Mode pass never touched (that pass only rewrote
+      *our own* hardcoded inline `style="color: #0b1f3a"` occurrences, not
+      Bootstrap's own unstyled defaults) — near-black text on the dark navy
+      page background reads as blank.
+      Fixed with two new rules scoped to `[data-theme="dark"]` in
+      `assets/css/app.css` (light mode is untouched — this was reported and
+      confirmed as a dark-mode-only issue): `.form-label` becomes a
+      sky-blue pill with bold white text (matching the user's explicit
+      request), and `.form-text` (the small helper captions like "At least
+      8 characters.") now reads `var(--admas-text-muted)` instead of
+      Bootstrap's default. Pure CSS, zero PHP changes — confirmed via grep
+      that `class="form-label"` is used consistently (98 occurrences across
+      23 files: every `*/profile.php`, every `admin/*.php` CRUD form,
+      `login.php`, `forgot_password.php`, `reset_password.php`,
+      `attendance_import.php`, `semesters.php`, etc.), so this one CSS
+      change fixes the contrast issue app-wide instead of needing a
+      per-file edit.
+      **Also clarified, no code change needed**: the user separately asked
+      that dark/night mode not be something the System Administrator can
+      force on for every user — confirmed by re-reading
+      `includes/topbar.php`/`assets/js/theme_toggle.js` and grepping
+      `admin/settings.php` for any theme-related setting that this was
+      never built as an admin-wide control to begin with. The toggle has
+      always been a purely individual `localStorage` preference (see the
+      original "Dark / Night Mode" entry above) — each user's own choice,
+      with no admin override path existing anywhere in the codebase.
+
+### Dark Mode Follow-up #2: Table Row Backgrounds (Grid View Student Names Invisible)
+- [x] User reported (with a screenshot of `attendance.php`'s Xiiso Grid View
+      in dark mode) that student full names were washed out/unreadable,
+      while the Student No column right next to them looked fine — a subtle
+      giveaway that pointed away from a simple "wrong text color" bug.
+      Root cause, found by reading `table.admas-table`'s markup: the
+      **Full Name** `<td>` has always had an explicit
+      `style="color: var(--admas-text);"` (correct, light-gray-on-dark in
+      dark mode) — but the **Student No** `<td>` right next to it has no
+      color styling at all, and still looked fine. That only makes sense if
+      the table's actual background was still white, not the dark card
+      surface behind it: Bootstrap 5.3's `.table` class sets its own
+      `background-color: var(--bs-table-bg)` directly on the `<table>`
+      element (defaulting to white), and this app never redefines that
+      Bootstrap variable — so the table painted a solid white rectangle
+      over the dark `.admas-card` behind it. Student No's default dark
+      Bootstrap text then read fine by accident (dark-on-white), while Full
+      Name's intentionally light dark-mode color (meant for a dark
+      background) became invisible on that same accidental white.
+      **This bug wasn't unique to this one page** — every table anywhere in
+      the app using the shared `admas-table` class (student/lecturer/course
+      lists, reports, notifications, this grid, etc.) had the identical
+      white-table-on-dark-card problem; it simply wasn't as noticeable
+      elsewhere because most other tables' body-text columns don't set an
+      explicit color and were "accidentally" reading fine against that
+      unintended white background — a "correct-looking" table for the
+      wrong reason.
+      Fixed by pointing Bootstrap's own table variables at our theme
+      variables directly on `table.admas-table` in `assets/css/app.css`
+      (`--bs-table-bg`, `--bs-table-color`, `--bs-table-border-color`, plus
+      an explicit `background-color`/`color` for browsers/paths that don't
+      resolve the CSS-variable indirection), **not** scoped to
+      `[data-theme="dark"]` this time — in light mode `--admas-surface` is
+      already white and `--admas-text` already dark navy, so this is a
+      no-op there and only changes dark-mode behavior. One shared CSS rule,
+      zero PHP changes, fixes every `admas-table` instance across the whole
+      app at once (striped/hover row tints and cell borders also inherit
+      correctly since Bootstrap derives those from the same `--bs-table-*`
+      variables).
+
 ### Clickable, Modernized KPI Dashboard Cards
 - [x] Every role's dashboard KPI cards (`admin/dashboard.php`,
       `dean/dashboard.php`, `head_academic/dashboard.php`,
@@ -2828,6 +3045,1188 @@ data/configuration task for the university admin, not further code work.
       `login.php` — for every single link across all 6 roles. All 6
       temporary accounts were deleted afterward; `users` count confirmed
       back to the 85 baseline.
+
+### lecturer/courses.php: Explicit Faculty/Academic Year/Shift Columns
+- [x] The "My Courses" table already *queried* `faculty_name` and
+      `academic_year_label` (used as small sub-text under Course/Semester)
+      and `co.shift AS offering_shift` (queried but not displayed at all).
+      The user asked for these to be their own visible columns, motivated
+      by a real scenario this app already supports at the data level but
+      wasn't surfacing clearly: a lecturer can hold `course_offerings`
+      rows for the same course across two different faculties at once
+      (each faculty running its own concurrent current semester), and each
+      needs to be told apart at a glance.
+      - Split the table into `Course | Semester | Faculty | Department |
+        Academic Year | Shift | Students | Sessions | Pending Xiiso`
+        instead of nesting Faculty under Course and Academic Year under
+        Semester. Added the same local `SHIFT_LABELS` constant already
+        used by `admin/courses.php`/`admin/students.php`/`attendance.php`/
+        `lecturer/dashboard.php` (friendly label, em dash if the offering
+        has no shift set yet) — no shared query changes were needed, since
+        every value was already selected by the existing SQL
+        (`lecturer/courses.php`'s own query joins `course_offerings` +
+        `semesters` + `academic_years` + `faculties` per row already).
+      - **Noted, not changed**: a *same-semester* multi-shift assignment
+        (one lecturer teaching the same course's Morning and Afternoon
+        shift within one semester) is not representable today —
+        `course_offerings`' unique key is `(course_id, semester_id)`,
+        `shift` is informational-only, a deliberate decision from the
+        earlier "Add Course + Optional First Offering" session (making
+        shift part of the identity would have silently broken every
+        write-authorization check keyed off `(course_id, semester_id,
+        lecturer_id)`). The cross-faculty case this session targeted
+        *is* fully representable and now correctly displayed; the
+        same-semester-different-shift case remains a known, previously
+        documented architectural boundary, not something this display
+        change could or should paper over.
+      - **Verified end-to-end via real HTTP requests**: created a
+        temporary second faculty/department/semester (needed real
+        `start_date`/`end_date` bracketing today — discovered along the
+        way that `refresh_semester_current_flags()`, called from
+        `includes/auth.php` on every request, recomputes every semester's
+        `is_current` from `CURDATE() BETWEEN start_date AND end_date` on
+        every page load, silently resetting a manually-set `is_current`
+        flag back to 0 for any semester with `NULL` dates — not a bug,
+        existing intended behavior, just something the test fixture had
+        to account for) plus a temporary lecturer holding two
+        `course_offerings` rows — one in Informatics/Information
+        Technology (Semester 9, Morning) and one in the temporary faculty
+        (Afternoon) — and confirmed both rows rendered with the correct,
+        independent Faculty/Semester/Academic Year/Shift values, with zero
+        PHP warnings/notices/fatals. All temporary rows (course_offerings,
+        lecturer, user, course, semester, department, faculty) were
+        deleted afterward; `users` count confirmed back to the 85
+        baseline.
+
+### lecturer/dashboard.php: Same Column Expansion + Reordered Above Pending Xiiso
+- [x] Follow-up to the `lecturer/courses.php` column-expansion above, applied
+      to the "My Assigned Courses" table on `lecturer/dashboard.php` too —
+      same `Course | Semester | Faculty | Department | Academic Year |
+      Shift | Students | Last Session` columns. The dashboard's own query
+      was missing `faculty_name`/`department_name`/`semester_name`/
+      `offering_shift` entirely (it only ever selected
+      `academic_year_label` + `semester_id`, plus a separate
+      last-marked-attendance subquery for Shift) — added a
+      `JOIN faculties f ON f.id = d.faculty_id` and the four missing
+      columns to the `SELECT`/`GROUP BY`, and switched the Shift column
+      from "whichever shift the most recent attendance row happened to be
+      marked under" to `co.shift` (the offering's own assigned shift,
+      matching `lecturer/courses.php`'s definition — more correct anyway,
+      since an offering's shift shouldn't depend on whether attendance has
+      been marked yet).
+      - Also reordered the two dashboard cards per the user's explicit
+        request: "My Assigned Courses" now renders **above** "Pending
+        Xiiso Sessions" (previously the reverse) — the assigned-courses
+        list is what visually proves to a supervisor/evaluator that the
+        system is in real use, so it should be the first thing seen, not
+        buried under a pending-work warning card.
+      - **Verified end-to-end via a real HTTP request**: created a
+        temporary lecturer with one `course_offerings` row (course 24 /
+        Semester 9 / Morning), confirmed the dashboard renders "My
+        Assigned Courses" before "Pending Xiiso Sessions" in the actual
+        HTML order, and confirmed the course row shows all 8 columns
+        correctly (Semester 9 / Informatics / Information Technology /
+        2023/2024 / Morning Shift / 36 students / Never) with zero real
+        PHP warnings/notices/fatals (the only "warning" text in the raw
+        HTML was the pre-existing `text-warning`/`badge-warning` CSS
+        classes on the Pending Xiiso card, not an error). Temporary
+        lecturer/user/offering rows deleted afterward; `users` count
+        confirmed back to the 85 baseline.
+
+### semesters.php: Manual Semester Creation + Manual Start/End/Waiting Status
+- [x] Replaced the automatic "Generate Next Semester" flow (auto-numbered
+      from the faculty's last semester, auto-chained Start Date, dates
+      driving `is_current` via a `CURDATE() BETWEEN start_date AND
+      end_date` recompute on every request) with fully manual control, per
+      explicit request: creation should be by hand, not automatic, and the
+      semester's status should be a deliberate choice — three buttons,
+      Start / End / Waiting — not something calendar dates decide.
+      - **Schema** (`migrations/2026_08_semesters_manual_status.sql`,
+        mirrored into `admas_attendance_schema.sql`): `semesters.start_date`
+        /`end_date` changed from `NOT NULL` to `NULL` (now optional
+        reference-only fields, no longer load-bearing); new
+        `status ENUM('waiting', 'current', 'ended') NOT NULL DEFAULT
+        'waiting'` column. `is_current` (`TINYINT`) is kept as a physical
+        column in sync with `status` on every write (`is_current = 1` iff
+        `status = 'current'`) specifically so every *other* file that reads
+        `WHERE is_current = 1` (dashboards, `attendance.php`, `reports.php`,
+        `notifications.php`, `ajax/save_attendance_cell.php`, etc.) needed
+        **zero changes** — confirmed by grep that `is_current` is written in
+        exactly one place now (`semesters.php`'s new `set_status` action)
+        and read everywhere else unchanged. Backfilled existing rows'
+        `status` from their prior computed state
+        (`is_current` → `current`, past `end_date` → `ended`, else
+        `waiting`) so nothing visually flipped the moment the migration ran
+        — took a `mysqldump` safety backup first, per this file's own
+        established convention for schema changes.
+      - **`includes/semester_helpers.php`**: removed
+        `refresh_semester_current_flags()` (the automatic per-request
+        recompute — now dead code once nothing calls it),
+        `next_semester_number_for_faculty()`, `next_semester_start_date_for_faculty()`,
+        and `semester_end_date_from_start()` (all three only ever served the
+        removed auto-chaining flow). `get_current_semester()` now queries
+        `WHERE s.status = 'current'` instead of `is_current = 1` (same
+        result today since the two are kept in sync, but `status` is now
+        the actual source of truth) and tie-breaks concurrent-current
+        semesters by `ORDER BY s.id DESC` instead of `start_date DESC`,
+        since start dates are no longer guaranteed to exist.
+      - **`includes/auth.php`**: removed the
+        `refresh_semester_current_flags(db())` call that used to run on
+        every single request before any page's own queries — status
+        changes now happen only when a user explicitly clicks one of the
+        three buttons, never silently in the background.
+      - **`semesters.php`**: "Generate Next Semester" replaced by "Create
+        Semester" — the form is now exactly the three fields requested:
+        **Faculty** (Dean locked to their own), **Semester** (a plain
+        required text input, e.g. "Semester 1" — typed by hand, no
+        auto-suggested/pre-filled value, matching "gacan lagu qoraa"), and
+        **Academic Year**. No Start Date field at all. On submit
+        (`create_semester` action): validates Faculty/Academic Year exist,
+        Semester name is non-empty, and pre-checks the
+        `(faculty_id, academic_year_id, name)` uniqueness constraint with a
+        friendly message before the DB would reject it; inserts with
+        `start_date`/`end_date` left `NULL` and `status = 'waiting'`
+        (the column default), then still calls
+        `generate_sessions_for_semester()` to create the 12 Xiiso rows —
+        that function was already null-safe when a semester has no dates
+        (leaves the 12 rows' own `date` columns `NULL`, filled in later one
+        by one via the pre-existing "Save Dates" table), so no change was
+        needed there.
+      - **Old `start_now`/`end_now` actions replaced by one `set_status`
+        action** taking an explicit `status` value (`waiting`/`current`/
+        `ended`), validated against the enum, dean-ownership-checked the
+        same way every other write action on this page already is. Setting
+        one semester's status never touches any other semester's row — a
+        faculty can still have more than one concurrently "current"
+        semester if the admin/dean chooses that (unchanged intent from the
+        old date-driven system, just explicit now instead of incidental).
+      - **UI**: the "All Semesters" list's Current column is now a plain
+        status badge (Current/Ended/Waiting) with no inline action
+        buttons — the three actual buttons (**Start**, **End**, **Waiting**,
+        in that order) live in the detail panel on the right, always all
+        three shown together (not contextually swapped in/out like the old
+        Start Current/End Semester pair), with whichever one matches the
+        semester's current status rendered solid-colored and `disabled` so
+        it's clear at a glance which state is active. `delete_semester_row()`
+        blocks deletion using `status === 'current'` instead of the old
+        `is_current` int check (same rule, now reading the real source of
+        truth). The detail header's dates line
+        (`start_date to end_date`) is now null-safe — hidden entirely if
+        both are still unset, shown with `—` for whichever one is missing
+        otherwise.
+      - **Verified end-to-end via real HTTP requests** against the live
+        app with a temporary `system_admin` account: confirmed the Create
+        Semester form renders with exactly the three requested fields and
+        no Start Date field; created "Semester TEST-QA" and confirmed in
+        the database it landed with `status = 'waiting'`, `start_date`/
+        `end_date` both `NULL`, and 12 real `sessions` rows (all with
+        `date IS NULL`, ready for manual entry); clicked all three status
+        transitions in sequence (Start → Current, End → Ended, Waiting →
+        back to Waiting) and confirmed each one persisted correctly with
+        `is_current` staying in sync; set it Current again alongside the
+        real pre-existing "Semester 9" (also Current) and confirmed
+        **both** stayed Current simultaneously — no auto-clearing — proving
+        the multi-concurrent-current behavior survived the move to manual
+        control; confirmed creating a second semester with the exact same
+        Faculty+Name+Academic Year was rejected with a friendly duplicate
+        message; confirmed deletion was correctly blocked while status was
+        Current with the new message text, then succeeded once set back to
+        Waiting; loaded the semester's own detail page and confirmed all
+        three buttons render with the currently-active one shown
+        solid/disabled. **Regression-checked every other consumer of
+        `get_current_semester()`** (now reading `status` instead of
+        `is_current`) by loading `admin/dashboard.php`, `attendance.php`
+        (with a real course), `reports.php`, and `notifications.php` as the
+        same temporary admin — all 200 with zero PHP warnings/notices/
+        fatals, confirming the `is_current`-stays-in-sync design actually
+        avoided breaking any of these unmodified files. All temporary
+        accounts and the test semester (+ its 12 sessions) were deleted
+        afterward; `users` count confirmed back to the 85 baseline, and the
+        real "Semester 9" was confirmed still `status = 'current'`
+        throughout and afterward, untouched by any of this session's
+        actions.
+
+### semesters.php: Edit Semester
+- [x] Added an Edit button, follow-up to the manual Create Semester feature
+      above — a semester's Faculty/Semester name/Academic Year could
+      previously only be set once, at creation, with no way to fix a typo
+      or a wrong pick afterward short of deleting and recreating it (which
+      would also lose its 12 Xiiso sessions and any dates already entered).
+      - The "Create Semester" card now doubles as "Edit Semester", same
+        toggle-by-GET-param convention already used by
+        `admin/departments.php` (`?edit=1` on top of the existing
+        `?semester_id=X` selection — no new id-carrying query param
+        needed, since the page already has a role-scoped "selected
+        semester" concept to pre-fill from). An "Edit" pencil-icon link
+        was added to the detail panel's action bar, next to
+        Start/End/Waiting/Generate Sessions.
+      - New `update_semester` POST action, validated the same way as
+        `create_semester` (valid Faculty/Academic Year, non-empty name,
+        duplicate `(faculty_id, academic_year_id, name)` pre-checked with
+        a friendly message) plus dean-ownership-checked like every other
+        write action on this page.
+      - **Deliberately restricted, not fully open**: changing Faculty or
+        Academic Year on a semester that already has `course_offerings` or
+        `students` pointing at it is blocked with a clear message (e.g.
+        "Cannot change Faculty or Academic Year: this semester still has 1
+        course offering. You can still rename it.") — both of those
+        tables' own faculty-scoping is computed *elsewhere* from the
+        semester's `faculty_id` at read time (a course's own department's
+        faculty, a student's own faculty), so silently changing it out
+        from under existing offerings/students would orphan them logically
+        without anything visibly breaking until someone went looking.
+        Renaming (keeping the same Faculty + Academic Year) is always
+        allowed regardless of dependents — same "block the risky part,
+        allow the safe part" shape as `delete_semester_row()`'s own
+        blockers just above it in this file.
+      - **Verified end-to-end via real HTTP requests** with a temporary
+        `system_admin` account: confirmed `?semester_id=X&edit=1` renders
+        the card pre-filled with that semester's real Faculty/Name/
+        Academic Year and the "Update Semester"/"Cancel" buttons;
+        renamed a test semester and confirmed the DB row updated;
+        attempted to change its Academic Year after giving it a real
+        `course_offerings` row and confirmed it was rejected with the
+        exact blocker message and zero DB change, then confirmed a
+        rename-only edit on that same still-has-a-dependent semester
+        succeeded (proving the block is specific to Faculty/Year, not a
+        blanket lock); confirmed renaming to collide with another existing
+        semester's `(faculty, year, name)` was rejected and the form
+        re-rendered in Edit mode with the attempted (rejected) name still
+        showing, not silently reset. Also tested cross-role security with
+        a temporary Dean account (scoped to Informatics) and a temporary
+        second faculty: confirmed the Dean could edit their own faculty's
+        semester (a crafted `faculty_id=999` in the POST was correctly
+        ignored/forced back to their own faculty, matching `create_semester`'s
+        existing lock), and confirmed a crafted edit against a semester
+        belonging to the temporary other faculty was rejected outright with
+        zero DB change (redirected to the plain semester list, not the
+        target semester). All temporary semesters, the temporary faculty,
+        the temporary course offering, and both temporary accounts were
+        deleted afterward; `users` (85) and `faculties` (1) counts
+        confirmed back to baseline, and the three real semesters
+        (9/10/12) confirmed untouched throughout.
+      - **Follow-up**: the Edit link had originally only been placed in the
+        detail panel on the right (next to Start/End/Waiting/Generate
+        Sessions), requiring a click into a semester before reaching it.
+        Added a matching pencil-icon `<a>` link to each row of the "All
+        Semesters" list on the left too, right next to the existing
+        Delete trash-icon button (same `?semester_id=X&edit=1` link, same
+        `.btn-icon` class already used for icon-links elsewhere in this
+        app, e.g. `admin/course_offerings.php`'s "Manage Offerings" link) —
+        so editing no longer requires opening the detail panel first.
+        Start/End/Waiting were deliberately left out of the list rows and
+        kept detail-panel-only: they sit naturally next to the Xiiso
+        session list they affect, and cluttering every list row with three
+        more buttons alongside Edit+Delete would work against the
+        UI-simplicity concern already raised earlier in this project.
+        Verified live with a temporary `system_admin` account: confirmed
+        the Edit icon renders on all 3 real semester rows and correctly
+        opens that exact semester in Edit mode pre-filled. Temporary
+        account deleted afterward; `users` count confirmed back to 85.
+
+### semesters.php: Manual Start Date Auto-Fills the 12 Xiiso Dates
+- [x] Follow-up correction to the manual-status rewrite above: the user
+      clarified that removing the Start Date field entirely had gone
+      further than intended — they still want a hand-typed Start Date
+      (not auto-suggested/chained from a previous semester, that part
+      stays removed), used purely as a convenience to auto-fill the End
+      Date and all 12 Xiiso dates at once, instead of typing all 12 one by
+      one via the "Save Dates" table every time.
+      - Restored `semester_end_date_from_start()` in
+        `includes/semester_helpers.php` (deleted in the manual-status
+        rewrite; `compute_session_dates()`/`generate_sessions_for_semester()`
+        were never touched, so no other changes were needed there).
+      - Added a "Start Date" field back to the Create/Edit Semester card,
+        with a helper line explaining exactly what it does: "End Date and
+        all 12 Xiiso dates are filled in automatically (3 months from this
+        date) — you can still edit individual Xiiso dates afterward."
+        **Required, not optional** — the user tried it as optional first,
+        then explicitly asked for it to be made compulsory instead; the
+        HTML `required` attribute and the server-side validation (`Please
+        provide a start date.` when blank) were both updated together on
+        both `create_semester` and `update_semester`, so a semester can no
+        longer be created (or have its Faculty/Academic Year/Name edited)
+        without one.
+      - `create_semester`: when a Start Date is given, computes End Date
+        and stores both on the new row before calling
+        `generate_sessions_for_semester()` (which then auto-fills all 12
+        Xiiso dates from them, exactly like the old auto-chained flow
+        used to, just from a hand-typed date instead of a computed one).
+      - `update_semester`: the same field, reused for **filling in gaps
+        later**, not overwriting anything — submitting a Start Date on an
+        already-existing semester recomputes End Date and calls
+        `generate_sessions_for_semester()` again, which (per its own
+        existing, unchanged `date IS NULL` guard) only fills whichever of
+        the 12 Xiiso sessions are still empty; any session already dated
+        — whether from an earlier auto-fill or typed in by hand — is never
+        touched. Leaving the field blank on an edit leaves all existing
+        dates alone entirely (blank does not mean "clear").
+      - **Verified end-to-end via real HTTP requests** with a temporary
+        `system_admin` account: created a semester with Start Date
+        `2026-09-01` and confirmed End Date (`2026-11-30`) and all 12
+        Xiiso dates were computed and stored correctly, evenly spaced
+        across the 3 months exactly as `compute_session_dates()` always
+        produced; created a second semester with no Start Date, manually
+        set just Xiiso 3's own date by hand, then edited the semester
+        adding Start Date `2026-01-01` and confirmed the other 11 sessions
+        were auto-filled from it while Xiiso 3's hand-set date was left
+        completely untouched — proving the "never overwrite an existing
+        date" guarantee holds through the Edit path too, not just at
+        creation. Both temporary semesters (and their sessions) and the
+        temporary account were deleted afterward; `users` count confirmed
+        back to the 85 baseline.
+      - **Follow-up**: Start Date was built optional first (per the
+        original phrasing of the request); the user then explicitly asked
+        for it to be compulsory instead. Made it `required` on both the
+        HTML input and both POST handlers (`create_semester` rejects with
+        "Please provide a start date." when blank; `update_semester` the
+        same). Verified live with a temporary `system_admin` account: a
+        create request with no `start_date` was rejected with zero DB
+        change, and the identical request with a valid `start_date`
+        succeeded exactly as before. Temporary semester and account
+        deleted afterward; `users` count confirmed back to 85.
+
+### Faculty Total Semesters + Semester Dropdown on semesters.php
+- [x] The "Semester" field on `semesters.php`'s Create/Edit card was a free
+      text input ("e.g. Semester 1") — the user asked instead for a
+      dropdown, populated per-faculty from how many semesters that
+      faculty's whole program actually has, cascading the same way the
+      Faculty→Department pickers already do elsewhere in the app.
+      Investigated first via `AskUserQuestion` (three options: cap at the
+      faculty's existing "Semesters Per Year" setting; a new field
+      multiplied by an assumed program length; or a flat 1–12 for every
+      faculty) — the user's real answer clarified the actual need: a *new*
+      per-faculty field, set when registering/editing a Faculty, for "how
+      many semesters this faculty will have in total" — distinct from the
+      existing `semesters_per_year` (which only feeds the "Year N" display
+      calculation and was never a total).
+      - **Schema** (`migrations/2026_08_faculties_total_semesters.sql`,
+        mirrored into `admas_attendance_schema.sql`): new
+        `faculties.total_semesters TINYINT UNSIGNED NOT NULL DEFAULT 8`.
+        A safety backfill raises it above the default for any faculty that
+        already has a semester numbered higher than 8 — live data had
+        Informatics at `semesters_per_year = 3` but an existing
+        "Semester 9", so a flat default-8 rollout would have made that
+        real semester's own name fall outside its own faculty's future
+        dropdown range; the backfill (`MAX(digits extracted from that
+        faculty's semester names)`, via `REGEXP_REPLACE`) correctly raised
+        Informatics to `9`, confirmed against live data before proceeding.
+        Took a `mysqldump` safety backup first, per this file's own
+        established convention.
+      - **`admin/faculties.php`**: added a required "Total Semesters"
+        number input (1–30) to the Add/Edit Faculty modal, alongside the
+        existing "Semesters per Year" field, plus a new "Total Semesters"
+        column on the All Faculties table. **Shrink guard**: lowering an
+        existing faculty's Total Semesters below the highest semester
+        number it already has is blocked server-side ("Total Semesters
+        can't be less than 9 — this faculty already has a semester
+        numbered that high.") — same live `MAX(...)` check as the
+        migration's own backfill, re-run on every update rather than only
+        once at migration time, so this can never regress later either.
+      - **`semesters.php`**: new `semester_name_options_for_faculty(int
+        $totalSemesters): array` generates `["Semester 1", ...,
+        "Semester {N}"]` fresh on every render (not stored), so raising a
+        faculty's Total Semesters immediately unlocks more dropdown
+        options with no further migration needed. The Semester field is
+        now `<select name="name">`, cascaded from Faculty exactly like the
+        existing Faculty→Department pattern elsewhere
+        (`admin/students.php` etc.): disabled with a "Select faculty
+        first" placeholder until a Faculty is chosen (system_admin/
+        head_academic), or immediately populated for the Dean's own
+        (locked) faculty. A new
+        `semesterOptionsByFacultyId`/`admasUpdateSemesterNameOptions()` JS
+        pair rebuilds the options client-side on Faculty change — no page
+        reload, same convention as every other Faculty-cascaded dropdown
+        in this app. **Server-side re-validates the submitted name is one
+        of that faculty's actual valid options** on both `create_semester`
+        and `update_semester` ("Please select which semester this is from
+        the dropdown." if not) — the dropdown narrows the UI, but a
+        crafted out-of-range value is still rejected regardless of what
+        the client sent, same defense-in-depth convention used everywhere
+        else in this file.
+      - **Verified end-to-end via real HTTP requests** with temporary
+        `system_admin` and `dean` (Informatics) accounts: confirmed
+        `admin/faculties.php` renders the new field/column with no PHP
+        warnings; confirmed `semesters.php`'s Semester select starts
+        disabled with 0 options until a Faculty is picked, and the
+        rendered `semesterOptionsByFacultyId` JS map correctly listed
+        exactly 9 options for Informatics; created a real semester via
+        "Semester 4" and confirmed it saved correctly; confirmed a crafted
+        `name=Semester 999` POST was rejected with the exact expected
+        message and zero DB row created; confirmed lowering Informatics'
+        Total Semesters to 5 was blocked (value stayed 9 in the DB) while
+        raising it to 12 succeeded; confirmed the Dean's own Semester
+        dropdown rendered enabled (not locked/disabled, since their
+        Faculty never changes) with the correct 9-option list, and that a
+        crafted `faculty_id=999` in their create POST was still correctly
+        forced back to their own faculty (existing lock, unaffected by
+        this change) with the semester actually created under Informatics,
+        not the crafted id. All temporary semesters/accounts were deleted
+        afterward, Informatics' `total_semesters` was restored to `9`, and
+        `users` count confirmed back to the 85 baseline.
+
+### Data Fix: Semester 8 Lecturer Assignments + Placeholder Attendance (not a code change)
+- [x] The user reported "Unassigned" lecturers on `student/courses.php` for
+      most Information Technology courses. Investigation (direct SQL, no
+      code read needed since the bug was in the data, not the logic)
+      found the real cause: 5 courses' `course_offerings` rows (IT803,
+      IT804, LA, SB, SD) were correctly assigned to real, active
+      lecturers, but tied to `semester_id = 10` ("Semester 8", `status =
+      'ended'`) — while `student/courses.php` defaults to whichever
+      semester is `is_current` ("Semester 9"), so the lecturer lookup
+      (scoped per-semester by design, on purpose — see the Course
+      Offerings work earlier in this log) found nothing for Semester 9 and
+      showed "Unassigned". 3 further courses (IS, IT801, IT802) had no
+      lecturer recorded even under Semester 8 — confirmed via the user as
+      intentional (deferred to a future semester's assignment), not a bug.
+      **First attempt was a misread of the user's intent** — added 5 new
+      `course_offerings` rows under Semester 9 (same lecturers, carried
+      forward), which the user then clarified was *not* what they wanted:
+      Semester 8 was always the intended/correct semester for these 5
+      courses, and the real requirement was for students to be able to
+      see Semester 8 (a semester they've already completed) in their own
+      history — which those 5 courses already technically supported at
+      the `course_offerings` level. The 5 mistaken Semester-9 rows were
+      deleted immediately once this was clarified (`course_offerings`
+      table backed up via `mysqldump` both before adding and before
+      removing them).
+      - **Real root cause of "students can't see Semester 8 at all"**:
+        `student/courses.php`'s Semester dropdown is built from `attendance
+        -> sessions -> semesters WHERE student_id = ?` — a semester only
+        appears in a student's own history if they have actual attendance
+        rows in it. Semester 8 had **zero** attendance records at all
+        (confirmed via direct count), regardless of the correct
+        `course_offerings` already existing — so no student could ever see
+        it, independent of the lecturer-assignment question above.
+      - **Resolution, per the user's explicit choice (they don't have the
+        real historical attendance data on hand)**: generated
+        **placeholder attendance** for Semester 8's 12 Xiiso sessions
+        across the 5 courses, via a one-off script
+        (`generate_semester8_placeholder_attendance.php`, scratchpad only
+        — not part of the app/repo). Roster per course: `course_enrollments`
+        first (IT803/IT804: 36 each; LA/SB: 77 each), department fallback
+        to Information Technology's 77 active students when a course had
+        zero enrollment rows (SD) — same discovery order
+        `attendance.php`'s own roster resolution already uses. Each
+        student got a real row per session (~88% present / 12% absent, an
+        arbitrary but plausible-looking split — the schema only has these
+        two statuses, confirmed live via `SHOW CREATE TABLE attendance`,
+        not the four originally planned in this file's own early spec),
+        `recorded_by_user_id` set to that course's actual Semester-8
+        lecturer's own user account (not a generic admin id), `shift`
+        taken from each student's own `students.shift`. 3,636 rows
+        inserted total (432 + 432 + 924 + 924 + 924), `mysqldump` backup
+        of the `attendance` table taken immediately before running it.
+      - **This is explicitly placeholder/simulated data, not a real
+        historical record** — flagged here so a future session doesn't
+        mistake it for genuine attendance if this ever needs auditing or
+        reconciling against a real paper record later.
+      - **Verified via direct SQL replicating `student/courses.php`'s own
+        query logic exactly** (not a full HTTP login, to avoid resetting a
+        real student's password): confirmed a real enrolled student (id
+        158, IT803) now has both "Semester 9" and "Semester 8" in their
+        semester-history query, and that Semester 8 correctly resolves
+        lecturer "abdukadir ali" with a real present/absent split
+        (10/12 present) instead of "Unassigned" / no records.
+
+### student/courses.php: Semester Box Picker (Faculty Total Semesters)
+- [x] Replaced the plain Semester `<select>` dropdown on `student/courses.php`
+      with a row of clickable "Semester N" boxes — one per semester number
+      from 1 through the student's own faculty's `total_semesters` (the
+      field added earlier this session), not just the semesters the
+      student happened to already have attendance rows in. A semester
+      number with no real `semesters` row yet for that faculty renders as
+      a **disabled, greyed-out box** ("Not created yet" tooltip) instead
+      of being silently omitted — the student can see the shape of their
+      whole program (e.g. all 9 boxes for Informatics) even before every
+      semester has been entered into the system.
+      - Moved `semester_name_options_for_faculty()` out of `semesters.php`
+        into the shared `includes/semester_helpers.php` (it's now used by
+        two pages, not one) — `semesters.php` itself needed no other
+        change since it already `require_once`s that file.
+      - New logic in `student/courses.php`: resolves the student's own
+        `faculties.total_semesters`, builds the full "Semester
+        1".."Semester {N}" list via the shared helper, and matches each
+        name against that faculty's real `semesters` rows (keyed by name)
+        to find a real `semester_id` where one exists. Default selection
+        prefers whichever created semester has `status = 'current'`;
+        falls back to the highest-numbered *created* semester if none is
+        current yet (e.g. a faculty that hasn't started its next semester)
+        — replacing the old "most recent semester with attendance history"
+        default, since a semester with real course_offerings but zero
+        attendance yet (like Semester 8's original state, before the
+        placeholder-data fix above) should still be reachable and
+        selectable, not invisible.
+      - Clicking a box navigates via a plain `?semester_id=X` link (no JS
+        needed) — active box shown in solid sky-blue, others as outline
+        buttons, unavailable ones as a disabled `<span>` at reduced
+        opacity. The course list/lecturer/attendance-% logic underneath
+        was not touched at all — it already keyed everything off
+        `$filterSemesterId`, which this change only affects how the value
+        is chosen from.
+      - **Verified end-to-end via a real HTTP request** with a temporary
+        student account in Informatics (department scoped, one course
+        enrollment): confirmed all 9 boxes rendered for the faculty's
+        `total_semesters = 9`, with Semesters 1–5 and 7 correctly shown as
+        disabled ("not created yet" — no real semester row exists for
+        those numbers in this faculty yet), Semester 6 enabled (a real,
+        if unused, semester row), Semester 8 and Semester 9 both enabled,
+        and Semester 9 pre-selected/highlighted by default (its own
+        `status = 'current'`); clicked into Semester 8 via the box link
+        and confirmed the course list correctly switched to show
+        "abdukadir ali" as lecturer with "No records yet" (this temporary
+        student had no attendance rows, unlike the real students covered
+        by the earlier placeholder-attendance fix) — proving the
+        semester_id resolution and course-fetch logic still work correctly
+        end-to-end through the new picker. Zero PHP warnings/notices/
+        fatals throughout. Temporary student, its user account, and its
+        course enrollment were deleted afterward; no stray `temp_*`
+        accounts remained (confirmed via a direct username search) — the
+        `users` count settling at 86 instead of the prior 85 reflects a
+        genuine new real registration between sessions, not test-data
+        leakage.
+
+### Data Fix + Real Bug: Courses Bleeding Across Semesters on student/courses.php
+- [x] Follow-up correction: moved IS/IT801/IT802's `course_offerings` rows
+      from Semester 8 to Semester 9 per the user's explicit clarification
+      that all four courses shown in their screenshot (CL, IS, IT801,
+      IT802) belong to Semester 9, not Semester 8 (`mysqldump` backup of
+      `course_offerings` taken first). CL was already correct (had both a
+      Semester 9 and a separate, genuine Semester 8 offering) and was left
+      untouched.
+      - This surfaced a **real bug**, not just a data question: after the
+        move, those three courses still showed up under the *Semester 8*
+        box with "Unassigned" / "No records yet" — because
+        `course_enrollments` (what `student/courses.php`'s course-discovery
+        step is keyed on) has **no `semester_id` column at all** — it only
+        means "this student takes this course, ever," not "in this
+        specific semester." Every semester box was therefore showing the
+        student's *entire* enrolled course list, regardless of which
+        semester was selected, with per-semester lecturer/attendance just
+        layered on top — so a course with no real connection to the
+        selected semester still showed up as a bare, empty-looking row.
+      - **Fix**: added `AND (co.id IS NOT NULL OR a.id IS NOT NULL)` to the
+        course query's `WHERE` clause — a course now only appears under a
+        given semester if there's real evidence it belongs there: either a
+        `course_offerings` row for that exact `(course, semester)` pair, or
+        an actual `attendance` record. `$courseIds` (from
+        `course_enrollments`/department fallback) is still the *outer*
+        safety net deciding which courses are even candidates, but this
+        inner condition is what decides whether a candidate actually
+        belongs to the semester currently being viewed. Updated the
+        empty-state message from "You are not enrolled in any courses
+        yet." to "No courses recorded for this semester yet." — now a
+        genuinely reachable state (a semester box with zero real course
+        data for this student) rather than only meaning "never enrolled in
+        anything."
+      - **Verified end-to-end via real HTTP requests** with a temporary
+        student (enrolled in CL, IS, IT801, IT802, IT803 via
+        `course_enrollments`, same faculty/department as the real data):
+        confirmed the Semester 8 box now correctly shows only CL and
+        IT803 (the two with real Semester-8 offerings) — IS/IT801/IT802
+        correctly gone; confirmed the Semester 9 box shows CL, IS, IT801,
+        IT802 (their new home) but correctly does *not* show IT803 (which
+        has no Semester-9 offering) — proving the fix is symmetric, not a
+        one-off patch for Semester 8 specifically. Zero PHP warnings/
+        notices/fatals. Cross-checked against the real student (id 158)
+        via direct SQL replicating the exact query: Semester 8 now
+        correctly returns only CL/IT803/IT804/LA/SB/SD, matching what the
+        user's own screenshot should now show. Temporary student, user,
+        and enrollment rows deleted afterward; `users` count confirmed
+        back to the 86 baseline.
+
+### student/xiiso_grid.php: Single-Row Layout (Name + 12 Xiiso + P/A/%)
+- [x] Redesigned the student's own "My Xiiso Grid" page — previously the
+      student's name/Present-Absent-% summary sat as separate badges in a
+      card above a bare, name-less 12-column table. The user asked for one
+      unified row: Full Name, all 12 Xiiso cells, and trailing P/A/%
+      columns together — matching the exact visual language already used
+      by the admin/lecturer-facing Xiiso grids (`reports.php`'s Xiiso
+      Attendance Grid report, `attendance.php`'s Grid View), just scoped
+      down to this one student's single row instead of a whole roster.
+      - Reused the same `col-group-end`/`col-summary` CSS classes and the
+        same column shape those other two views already established (sky-
+        blue header fill + right border after Full Name, matching sky-tint
+        fill + individual right borders after P and A, plain sky-tint on
+        %) — no new CSS needed, this page just hadn't been brought in line
+        with that pattern when it was originally built.
+      - Header band row gained a leading blank `<th>` (for the Name column)
+        and a trailing `colspan="3"` blank (for P/A/%), same shape as
+        `reports.php`'s own Xiiso grid band row.
+      - Removed the now-redundant Present/Absent/% badge row that used to
+        sit in a separate card above the table — that data lives in the
+        row itself now, so showing it twice would be clutter, not clarity.
+      - **Verified end-to-end via a real HTTP request** with a temporary
+        student (real course enrollment + 12 real attendance marks, 2
+        deliberately set to Absent): confirmed the single body row
+        rendered exactly 16 cells (Full Name + Student No sub-line, 12
+        Xiiso Present/Absent badges with the 2 Absent ones landing on the
+        correct sessions, then P=10/A=2/%=83.3% — matching the seeded data
+        exactly) and the header rendered the matching band row + "Full
+        Name"/12 sessions/"P"/"A"/"%" column row. Zero PHP warnings/
+        notices/fatals. The PDF/Excel export code path (a separate,
+        untouched `$exportColumns`/`$exportRows` block earlier in the
+        file) was not touched by this change. Temporary student, user,
+        enrollment, and attendance rows deleted afterward; `users` count
+        confirmed back to the 86 baseline.
+
+### Real Bug: student/dashboard.php Mixed Past-Semester Attendance Into "Current"
+- [x] The user reported the student dashboard's "My Course Attendance"
+      table showing Semester 8 courses (IT803/IT804/LA/SB/SD) instead of
+      Semester 9 (the actual current semester). Root cause: the query
+      filtered by `a.academic_year_id = ?` (this student's current
+      semester's academic year) instead of by the semester itself — and
+      **Semester 8 and Semester 9 share the same `academic_year_id`**
+      (both "2023/2024" for Informatics), a direct, foreseeable
+      consequence of the per-faculty status model from earlier this
+      session (a faculty's semesters no longer auto-increment academic
+      years the way the old date-driven engine implied). So "current
+      academic year" was never a valid stand-in for "current semester" —
+      it was accidentally correct before only because this specific data
+      situation (two same-year semesters both having real attendance) had
+      never come up until the Semester 8 placeholder-attendance fix
+      earlier in this session created it.
+      - **Fix**: query now joins through `sessions` and filters by
+        `sess.semester_id = ?` (this student's own faculty's current
+        semester id, from `get_current_semester()`) instead of
+        `academic_year_id`. Renamed `$currentAcademicYearId` to
+        `$currentSemesterId` throughout — confirmed via grep it was used
+        in exactly this one query, no other reader to update. Old
+        date-only attendance rows with `session_id IS NULL` (pre-dating
+        the whole Semester/Xiiso system) are now correctly excluded from
+        this "current semester" view via the inner join — expected, not a
+        regression, since those rows can't be attributed to any specific
+        semester at all.
+      - **Verified end-to-end via a real HTTP request** with a temporary
+        student seeded with attendance in *both* semesters at once
+        (2 Absent marks under Semester 8's IT803, 3 Present marks under
+        Semester 9's CL — deliberately reproducing the exact same-
+        academic-year collision): confirmed the dashboard now shows only
+        "CL — calculus, 3 present, 0 absent, 100.0%" — Semester 8's IT803
+        row is correctly gone entirely, proving the fix. Zero PHP
+        warnings/notices/fatals. Temporary student, user, and attendance
+        rows deleted afterward; `users` count confirmed back to the 86
+        baseline.
+
+### Data Fix + Edit Semester Guard Narrowed to Faculty-Only
+- [x] The user was on `admin/course_offerings.php` ("Manage Offerings") for
+      IT802, trying to record it as a course taken back in "Semester 6" by
+      students now in Semester 9 — and found the Academic Year field
+      auto-showing **2024/2025** the moment Semester 6 was selected, which
+      didn't match their own institutional knowledge (Semester 6 should be
+      2023/2024, same as Semester 8/9). Confirmed via direct SQL this
+      wasn't a display bug — `semesters.id = 12` ("Semester 6") really was
+      stored with `academic_year_id` pointing at 2024/2025, while
+      Semester 8 and 9 (both real, in-use) are 2023/2024. Root cause
+      unknown (likely picked wrong at creation time, before this session's
+      "Add Total Semesters" work existed to make the dropdown clearer) —
+      not something worth root-causing further, since it's a one-row data
+      mistake, not a systemic bug.
+      - **Attempting the obvious fix (Edit Semester → change Academic
+        Year to 2023/2024) hit a real self-inflicted blocker**: the Edit
+        Semester guard added earlier this session (`semesters.php`'s
+        `update_semester` handler) blocked *any* Faculty-or-Academic-Year
+        change once a semester had dependents, and Semester 6 already has
+        **41 real students** on `students.semester_id = 12`. Re-examined
+        the original justification: the risk that motivated the guard
+        (course_offerings' faculty match via courses' own department,
+        students' own `faculty_id` — both computed elsewhere and blind to
+        a semester's own `faculty_id` changing underneath them) is
+        specific to the **Faculty** column. Academic Year is pure
+        labeling — `semester_year_number()`'s "Year N" display and report
+        filters read it, but nothing scopes `course_offerings`/
+        `attendance`/`students` by it, and a student's own `faculty_id`
+        lives on a completely different column than the semester's
+        `academic_year_id`. **Narrowed the guard to only fire on a Faculty
+        change** (`$facultyChanged` instead of `$facultyOrYearChanged`),
+        so correcting an Academic Year on a semester that already has real
+        course_offerings/students attached is now allowed — updated the
+        rejection message to say "Cannot change Faculty" instead of
+        "Cannot change Faculty or Academic Year" to match.
+      - **Corrected the actual data**: used the real Edit Semester form
+        (not raw SQL) to change Semester 6's Academic Year from 2024/2025
+        to 2023/2024 — doubled as the live verification that the guard
+        narrowing actually works. `mysqldump` backup of `semesters` taken
+        first, per this file's established convention for schema/data
+        changes.
+      - **Verified end-to-end via a real HTTP request** with a temporary
+        `system_admin` account: submitted the exact same update_semester
+        request that would have been rejected before this fix (Semester 6,
+        Faculty unchanged, Academic Year 2024/2025 → 2023/2024) and
+        confirmed it now succeeds, the semester's `academic_year_id`
+        correctly reads 2023/2024 afterward, and all 41 students' own
+        `semester_id = 12` links are completely untouched (row count
+        confirmed unchanged before/after). Temporary account deleted
+        afterward; `users` count confirmed back to the 86 baseline. The
+        user can now open Manage Offerings for IT802, pick Semester 6, and
+        see the correct 2023/2024 Academic Year before recording the
+        historical lecturer assignment.
+
+### Multi-Shift Course Offerings (One Course, One Semester, Multiple Shifts/Lecturers)
+- [x] The user confirmed a real, load-bearing requirement for the actual
+      university: a course frequently runs on multiple shifts within one
+      semester (e.g. Morning taught by Lecturer A, Afternoon by Lecturer B)
+      — `course_offerings`' old `UNIQUE KEY (course_id, semester_id)`
+      couldn't represent this; assigning a second lecturer to the same
+      course+semester on a different shift silently overwrote the first
+      via the existing upserts. This had been deliberately deferred in an
+      earlier session (`migrations/2026_08_course_offerings_shift.sql`'s
+      header comment explicitly named this as future work). Planned via
+      **Plan Mode** (3 Explore-agent-equivalent research passes plus a
+      dedicated Plan-agent validation pass auditing all 21 files
+      referencing `course_offerings`) before writing any code, given the
+      security-sensitive blast radius.
+      - **Schema** (`migrations/2026_08_course_offerings_multi_shift.sql`,
+        mirrored into `admas_attendance_schema.sql`): `shift` gained a 4th
+        ENUM value `'any'` (meaning "applies to every shift") and became
+        `NOT NULL DEFAULT 'any'` — every previously-`NULL` row backfilled
+        to `'any'`. Unique key replaced:
+        `uq_course_semester_shift (course_id, semester_id, shift)`.
+        Chose a real sentinel value over keeping `shift` nullable
+        specifically because MySQL/MariaDB never treat two `NULL`s as
+        equal in a unique index — a nullable "wildcard" would need an
+        app-level pre-check with a real TOCTOU race two concurrent saves
+        could both pass; `'any'` closes this for free via the DB's own
+        `ON DUPLICATE KEY UPDATE`. `mysqldump` backup taken first.
+      - **`includes/attendance_helpers.php`**: new shared
+        `OFFERING_SHIFT_LABELS` (4 values, including "Any/All Shifts").
+        `get_offering_summary()` now takes an optional `?string $shift`
+        and returns an **array** of offerings, not a single nullable row
+        (a course+semester can now genuinely have several); when `$shift`
+        is given, resolves to the single best match via
+        `ORDER BY (co.shift = ?) DESC LIMIT 1` — **preferring an exact
+        shift match over a coexisting `'any'` row**, a real edge case
+        found during live testing (a leftover unassigned `'any'` offering
+        from before a specific shift was added later). `render_offering_summary()`
+        now renders one line per offering. `user_can_write_course_attendance()`
+        gained a 5th `?string $shift` param — the lecturer branch's query
+        becomes `... AND (shift = ? OR shift = 'any')` when a shift is
+        given; `null` keeps the old unfiltered check (used only where no
+        shift context exists yet, e.g. attendance.php's page-level
+        UX-only `$canWriteAttendance` flag when "All Shifts" is selected).
+      - **Security-critical fix — `ajax/save_attendance_cell.php`**: this
+        was the actual enforcement gap — a lecturer assigned to only
+        Morning could previously write Afternoon students' attendance too,
+        since the write-check never considered shift at all. Reordered the
+        student lookup (resolving the student's own real `shift`) to
+        *before* the permission check, then passed that student's shift
+        into `user_can_write_course_attendance()` — never the viewing
+        lecturer's own filter selection, since the boundary must be "is
+        this lecturer authorized for *this specific student's* shift."
+      - **Writers** — `admin/course_offerings.php` ("Manage Offerings")
+        and `lecturer_courses.php` ("Assign Courses"), the two pages whose
+        upserts previously silently overwrote/stole another shift's
+        lecturer: both gained a required Shift field (4 options, no blank)
+        threaded into their `INSERT ... ON DUPLICATE KEY UPDATE` statements
+        (trivial once the `'any'` sentinel design was in place — no new
+        pre-check logic needed anywhere, the DB's own unique key handles
+        it), a Shift column on their offerings tables, and (on
+        `admin/course_offerings.php`) a JS-driven "already offered —
+        editing lecturer" annotation keyed on the exact (semester, shift)
+        pair instead of semester alone. `admin/courses.php`'s existing
+        local 3-value `SHIFT_LABELS` const was removed entirely and
+        replaced with the shared `OFFERING_SHIFT_LABELS` (adding the
+        `attendance_helpers.php` require) so its "Add Course + Optional
+        First Offering" shift field and `admin/courses_import.php`'s
+        `IMPORT_SHIFT_LABELS` both automatically accept `'any'` as a 4th
+        valid value with no other structural change — both already wrote
+        brand-new `course_id` rows that could never collide anyway.
+      - **`admin/courses.php`'s "Current Offering" column** — restructured
+        from one flat `LEFT JOIN` into 3 separate queries (course list;
+        every faculty's current semester(s); every matching
+        `course_offerings` row), because the pre-existing `cur_se`
+        resolution already had a **separate, pre-existing** fan-out risk
+        (a faculty can have multiple concurrently-current semesters, a
+        capability from an earlier session) that the new shift fan-out
+        would have compounded — a naive 2-query fix would only have solved
+        half of it. Renders one line per real offering under each current
+        semester now (e.g. "Morning Shift: John Doe" / "Afternoon Shift:
+        Jane Smith" / "Unassigned"), instead of a single fixed-column value.
+      - **`student/courses.php`** — two real bugs fixed by the same
+        change: (a) a student previously saw *every* shift's lecturer for
+        a course, not just their own; (b) because `attendance` was joined
+        independently of `course_offerings` with `GROUP BY` including
+        lecturer name, N offering rows produced N result rows each
+        carrying the student's *full* unscoped attendance count — genuine
+        double-counting the moment a second shift-offering existed. Fixed
+        by adding `shift` to the student's own `SELECT` and replacing the
+        flat `co` JOIN with the same "resolve to one best match, prefer
+        exact shift over `'any'`" correlated subquery used in
+        `get_offering_summary()` above — discovered live during testing
+        that a plain `(co.shift = ? OR co.shift = 'any')` JOIN condition
+        (without the subquery) still fanned out into duplicate rows
+        whenever a specific-shift offering coexisted with a leftover
+        `'any'` row for the same course+semester, reproducing the exact
+        bug being fixed; the subquery closes that gap completely.
+      - **Verified end-to-end via real HTTP requests**, in two passes:
+        **(1) Regression** — confirmed every touched page (`admin/dashboard.php`,
+        `admin/courses.php`, `admin/course_offerings.php`, `attendance.php`,
+        `reports.php`'s Xiiso grid, `lecturer_courses.php`) still renders
+        real existing single-offering data correctly with zero PHP
+        warnings/notices/fatals, and specifically confirmed "CL — calculus"
+        (a real course with a genuine single Afternoon-shift offering)
+        renders as exactly one row with the correct shift+lecturer, and a
+        Morning-shift vs Afternoon-shift temporary student pair correctly
+        saw/didn't-see that course under Semester 9 as expected.
+        **(2) The real multi-shift scenario**, built via the actual UI (not
+        raw SQL) with temporary accounts: created Morning (Lecturer A) and
+        Afternoon (Lecturer B) offerings for one course+semester via
+        `admin/course_offerings.php`'s real form, confirming both coexisted
+        alongside a genuine leftover `'any'`-shift row from earlier in this
+        session (a real, not contrived, edge case) with zero overwrites;
+        confirmed via direct POST to `ajax/save_attendance_cell.php` that
+        Lecturer A could mark a Morning student Present (200) but was
+        rejected (403) marking an Afternoon student, and the exact reverse
+        for Lecturer B; confirmed a Morning-shift student's `student/courses.php`
+        showed exactly one row with Lecturer A's name and 100% (not
+        doubled), an Afternoon-shift student showed exactly one row with
+        Lecturer B; confirmed `admin/courses.php`'s Current Offering column
+        showed all three offerings (Morning/Afternoon/Unassigned) under one
+        course row, not three duplicate rows; confirmed `reports.php`'s
+        Xiiso grid meta line listed all three lecturers comma-joined;
+        confirmed `attendance.php`'s offering-summary line correctly showed
+        only the relevant shift's lecturer when a Shift filter was applied.
+        All temporary accounts/lecturers/students/offerings/attendance rows
+        were deleted afterward, the pre-existing `'any'`-shift row on the
+        test course was confirmed restored to its original state, and
+        `users` count confirmed back to the 86 baseline.
+      - **Noted for later (separate follow-up plan, not in this scope)**:
+        multi-*faculty* course offerings (one catalog course taught under
+        two different faculties' own semester tracks at once) still isn't
+        representable — a course's offerings are still constrained to its
+        own home department's faculty (`admin/course_offerings.php`'s
+        semester lookup, `lecturer_courses.php`'s `role_may_edit_faculty()`,
+        `ajax/save_attendance_cell.php`'s course-faculty-must-match-semester-
+        faculty check). Multi-*semester* and multi-*academic-year*
+        assignment for one course already worked before this session (a
+        course can hold many `course_offerings` rows across any number of
+        semesters/years) and needed no change. **Resolved below, see
+        "Multi-Faculty Course Offerings."**
+
+### Multi-Faculty Course Offerings
+- [x] Resolved the "Noted for later" gap above: one catalog `courses` row
+      can now be cross-listed into a DIFFERENT faculty's own semester
+      track at once (e.g. a "common" course cataloged under Faculty A also
+      taught, with its own lecturer/shift/dates/roster, inside Faculty B's
+      current semester) — planned via Plan Mode (3 parallel Explore
+      agents traced every place the single-faculty assumption was
+      enforced, plus AskUserQuestion to confirm two design forks with the
+      user before building) then a Plan agent-equivalent synthesis before
+      any code was written.
+      - **Schema** (`migrations/2026_08_course_offerings_roster_department.sql`,
+        mirrored into `admas_attendance_schema.sql`): the single-faculty
+        rule turned out to be 100% application logic — neither `courses`
+        nor `course_offerings` has ever had a `faculty_id` column, so the
+        only schema change needed was one new nullable
+        `course_offerings.roster_department_id` (FK -> `departments`,
+        `ON DELETE SET NULL`, same convention as
+        `semesters.context_department_id`). NULL (every pre-existing
+        offering) means "fall back to the course's own catalog
+        department" exactly as before — zero behavior change for any
+        existing offering. `mysqldump` backup taken first.
+      - **Cross-listing entry point**: new
+        `admin/course_offerings_search.php` (reachable via a new "+ Add
+        Existing Course" button on `admin/courses.php`'s toolbar, visible
+        to `system_admin` and `dean`) — read-only, university-wide course
+        search (Code/Name/Home Department/Home Faculty/Credit Hours),
+        with an "Add Offering" link per row into
+        `admin/course_offerings.php?course_id=X`. Confirmed via
+        `AskUserQuestion` with the user: **a Dean may browse every
+        faculty's catalog** (read-only) specifically to cross-list a
+        course into their own faculty — not restricted to System
+        Administrator only, since a Dean otherwise has no query path
+        anywhere in the app to even discover a course whose catalog home
+        is a different faculty.
+      - **`admin/course_offerings.php` widened**: the course lookup at
+        the top no longer restricts a Dean to their own faculty's courses
+        for *viewing* (write actions are what enforce the real boundary,
+        below). System Admin's Semester dropdown now lists every
+        faculty's semesters grouped by `<optgroup>`; a Dean's stayed
+        exactly as it already was (`WHERE s.faculty_id = ?` bound to
+        their own faculty) — which, once the course-lookup restriction
+        was lifted, is precisely what makes cross-listing possible with
+        zero query change needed there. New "Roster Department" field on
+        the Add/Update form, JS-cascaded to whichever faculty the
+        selected semester belongs to (`departmentsByFacultyId` map, same
+        pattern as `admin/students.php`'s Faculty→Department cascade) —
+        required whenever that faculty differs from the course's own
+        catalog faculty (a guest offering), optional/defaults to NULL
+        otherwise. The existing-offerings table now shows every faculty's
+        offerings for the course (Faculty column + a "Guest" badge) —
+        schedule-metadata-only, the same "cross-faculty visibility is
+        fine, cross-faculty student/attendance data is not" precedent
+        already established by `lecturer_courses.php`. Save/Delete now
+        check "does the target semester belong to a faculty I'm allowed
+        to write into" (System Admin: any; Dean: own faculty only, a
+        strict generalization of the old rule) instead of "does the
+        course's catalog department match my faculty" — Delete is also
+        blocked server-side (not just hidden in the UI) for a Dean
+        against another faculty's offering.
+      - **Write-authorization** (`includes/attendance_helpers.php`):
+        `user_can_write_course_attendance()`'s Dean branch now checks
+        `course_offerings JOIN semesters WHERE ... se.faculty_id = ?`
+        (does a real offering exist for this course in MY faculty)
+        instead of the course's catalog department's faculty — correct
+        for both home and guest offerings, and now consistent with the
+        lecturer branch, which already worked this way. New
+        `course_offering_exists()` helper (does a real offering exist for
+        this course+semester, any shift) replaces every old
+        `get_course_faculty_id()`-vs-`semesters.faculty_id` scalar
+        mismatch guard across `ajax/save_attendance_cell.php`,
+        `attendance.php`, and `reports.php` — those guards used to assume
+        "the course's one faculty," which is no longer true.
+        `get_course_faculty_id()` itself is unchanged and still correctly
+        answers "what is this course's catalog home faculty" (used for
+        CRUD ownership elsewhere). New `resolve_roster_department_id()`
+        resolves a specific course+semester(+shift) offering's roster
+        department (preferring an exact shift match over a coexisting
+        `'any'`-shift row, same precedence as `get_offering_summary()`).
+      - **Roster resolution** (`get_xiiso_grid_data()`): the
+        department-fallback (used whenever `course_enrollments` has no
+        rows) now resolves the specific offering's `roster_department_id`
+        first via the new helper, falling back to the course's own
+        catalog department only when that's NULL — unchanged for every
+        pre-existing offering.
+      - **Course pickers widened** — `attendance.php` (course->[faculty
+        ids] JS map instead of one scalar, so the Semester dropdown
+        cascade merges every faculty a course is actually offered in;
+        Dean/Lecturer course lists gained an `EXISTS`/`JOIN` branch for
+        offerings cross-listed in, not just catalog-owned), `reports.php`
+        (same Dean widening on the Xiiso course list; the
+        course+semester mismatch guard now checks
+        `course_offering_exists()` instead of a faculty scalar compare),
+        `lecturer/courses.php` + `lecturer/dashboard.php` (dropped the
+        `se.faculty_id = d.faculty_id` constraint that was silently
+        hiding a lecturer's own guest-faculty offerings from their own
+        "My Courses"/dashboard; Faculty/Department columns now show the
+        *offering's* own faculty and roster department, not the course's
+        catalog home), `student/courses.php` (course discovery gained a
+        third, additive source: any course with a `course_offerings` row
+        whose `roster_department_id` matches the student's own
+        department, regardless of the course's catalog home).
+        `student/dashboard.php` needed no change — its "My Course
+        Attendance" table is already keyed off real `attendance` rows for
+        the student's own current semester, which was already
+        faculty-agnostic.
+      - **Display polish** (`admin/courses.php`): the course list's
+        "Current Offering" column now resolves every faculty a course
+        actually has a current offering in (not just its catalog home),
+        with a "Guest: {faculty name}" badge on any cross-listed row.
+      - **Deliberately out of scope** (confirmed via `AskUserQuestion`):
+        building a manual `course_enrollments` management UI — the
+        `roster_department_id` approach was chosen instead, since a
+        guest offering's roster is realistically "this whole department's
+        students," not a hand-picked list, and no `course_enrollments`
+        UI has ever existed in this app to begin with (confirmed via
+        grep: nothing writes to that table outside test fixtures). Also
+        out of scope: extending this to `head_academic` — access stays
+        `system_admin` + `dean`, matching this page's existing role set.
+      - **Verified end-to-end via a background verification pass**
+        against the live app (curl + direct SQL, this project's
+        established convention) with temporary `system_admin`/`dean`/
+        `lecturer`/student accounts and a disposable cross-listed test
+        course spanning two temporary faculties (only one real faculty,
+        Informatics, exists in this dev DB, so two throwaway faculties
+        were created for this test alongside it): confirmed the search
+        page finds any course system-wide; confirmed a save with no
+        Roster Department is rejected for a genuine guest offering with
+        zero DB change, and succeeds once one is supplied, for two
+        different target faculties simultaneously; confirmed the Dean's
+        Semester dropdown stays locked to their own faculty even for a
+        foreign-catalog course, and that both a crafted cross-faculty
+        save and delete are rejected server-side with zero DB change;
+        confirmed `attendance.php`'s roster for the cross-listed course
+        showed *only* the correct roster-department student (not the
+        course's own catalog-department student, not the other faculty's
+        roster student) and that a real AJAX save via
+        `ajax/save_attendance_cell.php` succeeded and landed correctly;
+        confirmed the roster-department student sees the course on their
+        own `student/courses.php` with correct lecturer/attendance, and a
+        student outside any roster department does not see it at all;
+        confirmed a real pre-existing ordinary (non-cross-listed) course
+        still renders correctly with zero PHP warnings/notices/fatals on
+        `attendance.php`, `reports.php`'s Xiiso grid, and
+        `admin/courses.php` (regression check). No bugs found. All
+        temporary rows were deleted afterward by exact recorded ID; every
+        table's row count confirmed back to the exact pre-test baseline
+        (faculties 1, departments 1, semesters 3, courses 9,
+        course_offerings 10, users 86, students 77, lecturers 7,
+        attendance 3652, course_enrollments 370), and the real semesters'
+        statuses were confirmed untouched throughout.
+
+### Enroll Students (manual course_enrollments management UI)
+- [x] While investigating a real user-reported issue ("why doesn't course OOB
+      show up under student Abdifatah's — IT-1499/24 — 'Semester 6' view"),
+      root-caused it via direct SQL, not assumption: `course_enrollments`
+      (the table deciding "does this student take this course at all") had
+      **no management UI anywhere in this app** — every existing page only
+      reads it (counts, delete-blockers, roster/course discovery in
+      `get_xiiso_grid_data()`/`student/courses.php`). Abdifatah already had a
+      real, explicit 8-course enrollment list that simply didn't include
+      OOB — not a bug, just no way to add the missing enrollment. The
+      user's real need, once clarified: their whole real cohort
+      ("Information Technology, Academic Year 2023/2024" — 36 real
+      students, all Afternoon shift) took OOB back in a now-`ended`
+      semester, and needed a **UI page** (not a one-off SQL script) to find
+      that cohort and bulk-enroll them.
+      - New `admin/course_enrollments.php?course_id=X`, entered the same
+        way as `admin/course_offerings.php` ("Manage Offerings") — a new
+        "Enroll Students" icon-link on `admin/courses.php`'s course rows,
+        plus a cross-link on `admin/course_offerings.php`'s own header and
+        on `admin/course_offerings_search.php`'s results (so a Dean
+        cross-listing a foreign course into their own faculty can
+        immediately enroll their own students into it too). Same role
+        scope as the widened Manage Offerings page: `system_admin` (any
+        course, any student) and `dean` (may reach *any* course, but may
+        only browse/enroll/remove students from their **own faculty** —
+        unlike Manage Offerings' schedule-metadata cross-faculty
+        visibility, this is real student data, so a Dean never even *sees*
+        another faculty's enrolled students here, let alone writes them).
+      - **Student filter bar**: `admin/students.php`'s exact filter
+        shape/query-building pattern reused verbatim — Academic Year,
+        Faculty, Department (cascaded), Semester (cascaded), Shift, plus a
+        name/student-no search box, all real SQL `WHERE` conditions via
+        the same dynamic `$conditions`/`$params`/`$types` prepared-statement
+        builder already proven there. Explicit on-page note: a student's
+        **Semester** filter matches their *current* `students.semester_id`
+        — since students progress over time, this is often the *wrong*
+        tool for finding who took a course in a past semester (Abdifatah
+        is now in Semester 9, not Semester 6, even though he studied under
+        Semester 6 before); Faculty + Department + Academic Year (+ Shift)
+        with Semester left blank is what actually finds a historical
+        cohort — this exact confusion is what prompted the feature, so it's
+        called out in the UI, not just this log.
+      - **Results table**: matching students with a checkbox per row; a
+        student already enrolled in this course shows an "Already
+        Enrolled" badge with the checkbox disabled instead of re-offering
+        it (via a `LEFT JOIN course_enrollments ce ON ce.student_id =
+        s.id AND ce.course_id = ?` added to the students query).
+      - **Bulk enroll**: new `assets/js/bulk_enroll.js` — same checkbox
+        -> select-all -> hidden-form -> submit mechanic as the existing
+        `assets/js/bulk_delete.js` (used across `admin/students.php` etc.),
+        but not a literal reuse of that file since its click handler
+        hardcodes delete-specific button/confirm wording; this is a
+        parallel file with "Enroll Selected (N)" wording and a
+        non-destructive confirm message. Server-side `bulk_enroll`
+        handler re-verifies every submitted `student_id` actually belongs
+        to the Dean's own faculty (defense in depth, never trusting the
+        filter alone — same convention as every other write action in
+        this app); inserts via `INSERT IGNORE INTO course_enrollments
+        (student_id, course_id) VALUES (?, ?)` per id, relying on the
+        existing `uq_student_course` unique key to silently skip
+        already-enrolled duplicates with zero risk of a duplicate row;
+        flashes a summary ("N enrolled. M already enrolled, skipped. K
+        outside your faculty, skipped.").
+      - **Currently Enrolled panel**: a compact table above the filter bar
+        listing everyone currently enrolled (Student No/Full Name/
+        Faculty/Department) with a per-row "Remove" button (`DELETE FROM
+        course_enrollments WHERE student_id = ? AND course_id = ?`, same
+        Dean-ownership re-check as the bulk action) — gives a way to
+        review/undo, mirroring `admin/course_offerings.php`'s
+        existing-list-plus-add-form shape.
+      - **Explicitly not built**: no semester/offering linkage on the
+        enrollment itself — `course_enrollments` has no semester column
+        and this feature doesn't add one; whether an enrolled student
+        actually *sees* the course under a given semester still depends
+        on that semester having a real `course_offerings` row or
+        `attendance` records, exactly as already documented in
+        `student/courses.php`'s own header comment (both files now
+        cross-reference this). No attendance-record entry here either —
+        the user explicitly said not to fabricate attendance data; this
+        page only manages the enrollment fact.
+      - **Verified end-to-end against the live app and real data** (not a
+        disposable fixture, since the actual motivating case was real):
+        logged in as a temporary `system_admin`, filtered
+        Faculty=Informatics/Department=Information Technology/Academic
+        Year=2023/2024/Shift=Afternoon (Semester left blank) on the real
+        `admin/course_enrollments.php?course_id=38` (OOB), confirmed
+        exactly 36 real students matched (including Abdifatah, IT-1499/24)
+        — extracted their ids from the actual rendered HTML rather than
+        assuming, then submitted a real bulk-enroll POST and confirmed via
+        direct SQL that `course_enrollments` now holds exactly those 36
+        student ids for course 38 (byte-for-byte diffed against the
+        extracted candidate list) with zero effect on any other course;
+        confirmed re-submitting the same students correctly no-ops ("0
+        enrolled, 3 already enrolled, skipped") with the count still
+        exactly 36, no duplicates; confirmed the per-row Remove button
+        removes (36 -> 35) and a subsequent re-enroll restores it (35 ->
+        36); confirmed a temporary Dean (scoped to the real Informatics
+        faculty) sees the identical 36-student Currently Enrolled list;
+        confirmed a crafted `bulk_enroll` POST naming a student from a
+        temporary foreign faculty was silently rejected (zero row
+        created); confirmed a crafted `remove_enrollment` POST against a
+        real (SQL-seeded) foreign-faculty enrollment row was rejected with
+        the row left completely intact. All temporary accounts, the
+        temporary foreign faculty/department/student, and the one
+        SQL-seeded foreign enrollment row used purely to test the removal
+        boundary were deleted afterward — the real 36-row OOB enrollment
+        (the actual intended outcome, not test data) was deliberately left
+        in place. `users`/`faculties`/`departments`/`students` counts
+        confirmed back to their real pre-session baseline (87/1/1/77 — the
+        87 vs. an earlier session's 86 baseline is a genuine real lecturer
+        account, "Eng Ali Shiekh ahmed"/`eng8`, created earlier this same
+        session as part of setting up OOB's real Semester 6 offering, not
+        leftover test data).
+
+### student/dashboard.php: My Course Attendance Now Shows Unmarked Current-Semester Courses
+- [x] The user reported (via a real screenshot of a real student, Abdibasid
+      Duale/HS-13049/23, Nursing/Health Science) that "My Course
+      Attendance" showed nothing at all, despite the student having real
+      current-semester courses. Investigated live, not assumed: confirmed
+      this dashboard table's query only ever read `attendance` rows
+      directly (`FROM attendance a JOIN courses c ... JOIN sessions sess
+      ... WHERE a.student_id = ? AND sess.semester_id = ?`) — a course the
+      student was enrolled in, or which had a cross-listed offering
+      targeting their department (via `roster_department_id`, see the
+      Multi-Faculty Course Offerings work), stayed completely invisible on
+      this page until someone had actually marked at least one session's
+      attendance. Not a bug — the query was internally correct — but a
+      confusing empty dashboard for a real, current course load with
+      nothing marked yet. User explicitly asked for the fix: show every
+      current-semester course regardless of whether attendance exists yet.
+      - Replaced the attendance-only query with the same three-source
+        course-discovery logic `student/courses.php` already uses
+        (`course_enrollments` first, department fallback second, a third
+        additive source for a guest-faculty offering whose
+        `roster_department_id` names this student's own department) —
+        deliberately kept in sync with that file rather than reinvented,
+        down to the identical shift-preference correlated subquery and
+        "real evidence" `WHERE (co.id IS NOT NULL OR a.id IS NOT NULL)`
+        condition, so the two pages can never drift on what counts as
+        "this student's course, this semester."
+      - A course can now render with zero marks ("No records yet", muted
+        text — same convention already used on `student/courses.php`)
+        instead of either being invisible or (the bug this required
+        fixing alongside) counting as "below threshold": the "Courses
+        Below Threshold" KPI loop now only judges a course against
+        `min_attendance_pct` once it actually has `total_marks > 0` — with
+        the old unconditional `$pct = ... : 0` fallback, every unmarked
+        course would have silently and wrongly counted as 0% attendance
+        the moment this query started returning them.
+      - Empty-state message text updated from "No attendance records
+        exist for you yet." to "No courses recorded for this semester
+        yet." to match the new meaning (empty now means "no course
+        connection to this semester at all," not "nothing marked yet").
+      - **Verified end-to-end** without touching any real student's
+        credentials: built a temporary student mirroring Abdibasid's exact
+        real scenario (same Nursing department, Health Science faculty,
+        Semester 8, Afternoon shift; enrolled in only the real LA course,
+        matching his real enrollment) and confirmed the dashboard now
+        shows both real Health Science offerings targeting Nursing — LA
+        (enrolled) and MD/"Medical L surgical" (reachable only via the
+        guest-offering roster-department path, no explicit enrollment) —
+        both "No records yet," "My Attendance %" correctly "—" (null, not
+        0%), "Courses Below Threshold" correctly 0. Regression-checked
+        against a real student (id 184) with genuine existing attendance
+        (CL: 1 present/1 absent) via a direct query simulation: confirmed
+        that course's real present/absent counts are unchanged, while
+        three more of his real current-semester courses with a live
+        offering but zero marks yet (IS, IT801, IT802) now correctly
+        appear as "No records yet" instead of being invisible. Temporary
+        student/user rows deleted afterward; confirmed the 50 real Health
+        Science/Nursing student rows the user had added between sessions
+        (a genuine bulk import, not test data) were left untouched
+        throughout.
 
 ### Deferred Decisions
 - **Student ID as username/password scheme**: scoped but paused before

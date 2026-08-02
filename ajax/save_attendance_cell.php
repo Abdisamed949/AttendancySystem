@@ -42,24 +42,32 @@ $sessionId = (int) ($_POST['session_id'] ?? 0);
 $studentId = (int) ($_POST['student_id'] ?? 0);
 $status = (string) ($_POST['status'] ?? '');
 
-$courseFacultyId = get_course_faculty_id($conn, $courseId);
-if ($courseFacultyId === null) {
+if (get_course_faculty_id($conn, $courseId) === null) {
     respond(false, 'Invalid course.');
 }
 
 // The Grid View lets an admin/dean/lecturer view and mark ANY semester
-// belonging to the course's faculty, not just the current one (matching
-// attendance_import.php's own historical-backfill scope) — so this must
-// validate the specific semester the client says it's editing, never
-// silently substitute "whichever semester is current right now".
+// this course has a real offering in — not just a semester belonging to
+// the course's own catalog faculty, since a course can now be
+// cross-listed into a DIFFERENT faculty's semester track (see the
+// Multi-Faculty Course Offerings plan; matches
+// attendance_import.php's own historical-backfill scope otherwise) — so
+// this must validate the specific semester the client says it's editing
+// actually has a course_offerings row, never silently substitute
+// "whichever semester is current right now" or assume the course has
+// only one faculty.
+if (!course_offering_exists($conn, $courseId, $semesterId)) {
+    respond(false, 'Invalid semester for this course.');
+}
+
 $semStmt = $conn->prepare(
     "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
             ay.label AS academic_year_label
      FROM semesters s
      JOIN academic_years ay ON ay.id = s.academic_year_id
-     WHERE s.id = ? AND s.faculty_id = ?"
+     WHERE s.id = ?"
 );
-$semStmt->bind_param('ii', $semesterId, $courseFacultyId);
+$semStmt->bind_param('i', $semesterId);
 $semStmt->execute();
 $semester = $semStmt->get_result()->fetch_assoc();
 $semStmt->close();
@@ -83,15 +91,15 @@ if ($sessionDate === '') {
     respond(false, 'This Xiiso session has no calendar date assigned yet — ask an admin to assign one in Semesters.');
 }
 
-if (!user_can_write_course_attendance($conn, $role, $currentUser, $courseId, (int) $semester['id'])) {
-    http_response_code(403);
-    respond(false, 'You do not have permission to edit attendance for this course.');
-}
-
 if ($status !== '' && !array_key_exists($status, GRID_STATUS_LABELS)) {
     respond(false, 'Invalid status.');
 }
 
+// Resolved before the write-permission check below, since that check must
+// verify the lecturer is authorized for THIS student's own shift — not
+// whatever shift filter the lecturer happens to have selected on screen
+// (there is no filter selection available at this endpoint's scope
+// anyway; the student's own shift is the only shift that matters here).
 $stmt = $conn->prepare("SELECT shift, academic_year_id FROM students WHERE id = ? AND status = 'active'");
 $stmt->bind_param('i', $studentId);
 $stmt->execute();
@@ -105,6 +113,11 @@ if ($student === null) {
 $shift = (string) $student['shift'];
 $academicYearId = (int) $student['academic_year_id'];
 $recordedBy = (int) $currentUser['id'];
+
+if (!user_can_write_course_attendance($conn, $role, $currentUser, $courseId, (int) $semester['id'], $shift)) {
+    http_response_code(403);
+    respond(false, 'You do not have permission to edit attendance for this course.');
+}
 
 try {
     if ($status === '') {

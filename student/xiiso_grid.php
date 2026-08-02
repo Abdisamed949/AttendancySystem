@@ -247,19 +247,10 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                 ]) ?>
 
                 <div class="admas-card p-4 mb-3">
-                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                        <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
-                            <?= htmlspecialchars($courseRow['code'] . ' — ' . $courseRow['name']) ?>
-                            <span class="text-muted fw-normal">(<?= htmlspecialchars($semesterRow['name']) ?>)</span>
-                        </h6>
-                        <div class="d-flex gap-2 align-items-center">
-                            <span class="badge-divider"><span class="badge-pill badge-present">Present: <?= $presentCount ?></span></span>
-                            <span class="badge-divider"><span class="badge-pill badge-absent">Absent: <?= $absentCount ?></span></span>
-                            <?php if ($attendancePct !== null): ?>
-                                <span class="badge-divider"><span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= number_format($attendancePct, 1) ?>%</span></span>
-                            <?php endif; ?>
-                        </div>
-                    </div>
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
+                        <?= htmlspecialchars($courseRow['code'] . ' — ' . $courseRow['name']) ?>
+                        <span class="text-muted fw-normal">(<?= htmlspecialchars($semesterRow['name']) ?>)</span>
+                    </h6>
                 </div>
 
                 <div class="admas-card p-4">
@@ -276,11 +267,14 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                         <table class="table admas-table align-middle text-center mb-0">
                             <thead>
                                 <tr>
+                                    <th></th>
                                     <?php foreach ($xiisoBandChunks as $chunk): ?>
                                         <th class="grid-month-band col-group-end" colspan="<?= (int) $chunk['span'] ?>"><?= htmlspecialchars($chunk['label']) ?></th>
                                     <?php endforeach; ?>
+                                    <th colspan="3"></th>
                                 </tr>
                                 <tr>
+                                    <th class="col-group-end col-summary text-start">Full Name</th>
                                     <?php foreach ($sessions as $s): ?>
                                         <th class="<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? 'col-group-end' : '' ?>">
                                             <?= htmlspecialchars($s['label']) ?>
@@ -289,10 +283,17 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                             </div>
                                         </th>
                                     <?php endforeach; ?>
+                                    <th class="col-group-end col-summary">P</th>
+                                    <th class="col-group-end col-summary">A</th>
+                                    <th class="col-summary">%</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr>
+                                    <td class="col-group-end col-summary fw-semibold text-start" style="color: var(--admas-text);">
+                                        <?= htmlspecialchars($ownRow['full_name']) ?>
+                                        <div class="text-muted small fw-normal"><?= htmlspecialchars($ownRow['student_no']) ?></div>
+                                    </td>
                                     <?php foreach ($sessions as $s): ?>
                                         <?php $status = $marksBySessionId[(int) $s['id']] ?? null; ?>
                                         <td class="p-2<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? ' col-group-end' : '' ?>">
@@ -305,6 +306,15 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                             <?php endif; ?>
                                         </td>
                                     <?php endforeach; ?>
+                                    <td class="col-group-end col-summary fw-semibold"><?= $presentCount ?></td>
+                                    <td class="col-group-end col-summary fw-semibold"><?= $absentCount ?></td>
+                                    <td class="col-summary">
+                                        <?php if ($attendancePct !== null): ?>
+                                            <span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= number_format($attendancePct, 1) ?>%</span>
+                                        <?php else: ?>
+                                            <span class="text-muted">—</span>
+                                        <?php endif; ?>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>

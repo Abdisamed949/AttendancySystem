@@ -41,13 +41,15 @@ $lecRow = $lecStmt->get_result()->fetch_assoc();
 $lecStmt->close();
 $lecturerRecordId = $lecRow ? (int) $lecRow['id'] : 0;
 
-// "My courses" means current-offering-only (course_offerings scoped to
-// that course's own faculty's current semester), not the deprecated
-// permanent courses.lecturer_id — reused below for the KPI counts and the
-// course table so they can never drift on what "mine" means. Resolved per
-// course's own faculty, never the lecturer's home department (D1).
+// "My courses" means current-offering-only (course_offerings, current
+// semester), not the deprecated permanent courses.lecturer_id — reused
+// below for the KPI counts and the course table so they can never drift on
+// what "mine" means. No longer requires the offering's semester to belong
+// to the course's own catalog department's faculty — a lecturer may hold a
+// cross-listed/guest-faculty offering (see the Multi-Faculty Course
+// Offerings plan), never derived from the lecturer's home department (D1).
 $currentOfferingJoin = 'JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
-     JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1';
+     JOIN semesters se ON se.id = co.semester_id AND se.is_current = 1';
 
 // ---------------------------------------------------------------------
 // KPI cards
@@ -82,22 +84,29 @@ $sessionsRecorded = (int) ($sessionsStmt->get_result()->fetch_assoc()['c'] ?? 0)
 $sessionsStmt->close();
 
 // ---------------------------------------------------------------------
-// My Assigned Courses table — each row's own Academic Year comes from its
-// own current offering's semester, since different courses here can
-// belong to different faculties on different academic years at once;
+// My Assigned Courses table — each row's own Academic Year/Faculty comes
+// from its own current offering's semester, since different courses here
+// can belong to different faculties on different academic years at once;
 // there is no single shared "the current academic year" to show anymore.
+// Faculty/Department shown are the OFFERING's own faculty and roster
+// department (falling back to the course's own catalog department when
+// unset) — not necessarily the course's catalog home, matching
+// lecturer/courses.php.
 // ---------------------------------------------------------------------
 $myCoursesStmt2 = $conn->prepare(
-    "SELECT c.id, c.code, c.name, ay.label AS academic_year_label, se.id AS semester_id,
+    "SELECT c.id, c.code, c.name, offf.name AS faculty_name, COALESCE(rd.name, d.name) AS department_name,
+            se.name AS semester_name, ay.label AS academic_year_label, se.id AS semester_id,
+            co.shift AS offering_shift,
             MAX(a.attendance_date) AS last_session,
-            (SELECT a2.shift FROM attendance a2 WHERE a2.course_id = c.id ORDER BY a2.attendance_date DESC LIMIT 1) AS last_shift,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
      FROM courses c
      JOIN departments d ON d.id = c.department_id
      {$currentOfferingJoin}
+     JOIN faculties offf ON offf.id = se.faculty_id
+     LEFT JOIN departments rd ON rd.id = co.roster_department_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
      LEFT JOIN attendance a ON a.course_id = c.id
-     GROUP BY c.id, c.code, c.name, ay.label, se.id
+     GROUP BY c.id, c.code, c.name, offf.name, d.name, rd.name, se.name, ay.label, se.id, co.shift
      ORDER BY c.code"
 );
 $myCoursesStmt2->bind_param('i', $lecturerRecordId);
@@ -204,6 +213,64 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                 </div>
             </div>
 
+            <div class="admas-card p-4 mb-4">
+                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Assigned Courses</h6>
+                <div class="table-responsive">
+                    <table class="table admas-table align-middle">
+                        <thead>
+                            <tr>
+                                <th>Course</th>
+                                <th>Semester</th>
+                                <th>Faculty</th>
+                                <th>Department</th>
+                                <th>Academic Year</th>
+                                <th>Shift</th>
+                                <th>Students</th>
+                                <th>Last Session</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (empty($myCourses)): ?>
+                                <tr>
+                                    <td colspan="9" class="text-center text-muted py-4">You have no assigned courses yet.</td>
+                                </tr>
+                            <?php else: ?>
+                                <?php foreach ($myCourses as $c): ?>
+                                    <tr>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
+                                        <td><?= htmlspecialchars($c['semester_name']) ?></td>
+                                        <td><?= htmlspecialchars($c['faculty_name']) ?></td>
+                                        <td><?= htmlspecialchars($c['department_name']) ?></td>
+                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
+                                        <td>
+                                            <?php if ($c['offering_shift'] !== null && isset(SHIFT_LABELS[$c['offering_shift']])): ?>
+                                                <?= htmlspecialchars(SHIFT_LABELS[$c['offering_shift']]) ?>
+                                            <?php else: ?>
+                                                <span class="text-muted">—</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td><?= number_format((int) $c['student_count']) ?></td>
+                                        <td>
+                                            <?php if ($c['last_session']): ?>
+                                                <?= htmlspecialchars(date('M j, Y', strtotime((string) $c['last_session']))) ?>
+                                            <?php else: ?>
+                                                <span class="text-muted fst-italic">Never</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                                <i class="bi bi-calendar2-check"></i> Take Attendance
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <?php if (!empty($pendingSessions)): ?>
                 <div class="admas-card p-4 mb-4">
                     <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
@@ -242,58 +309,6 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                     </div>
                 </div>
             <?php endif; ?>
-
-            <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Assigned Courses</h6>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Course</th>
-                                <th>Academic Year</th>
-                                <th>Shift</th>
-                                <th>Students</th>
-                                <th>Last Session</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($myCourses)): ?>
-                                <tr>
-                                    <td colspan="6" class="text-center text-muted py-4">You have no assigned courses yet.</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($myCourses as $c): ?>
-                                    <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?></td>
-                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
-                                        <td>
-                                            <?php if ($c['last_shift'] !== null && isset(SHIFT_LABELS[$c['last_shift']])): ?>
-                                                <?= htmlspecialchars(SHIFT_LABELS[$c['last_shift']]) ?>
-                                            <?php else: ?>
-                                                <span class="text-muted">—</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td><?= number_format((int) $c['student_count']) ?></td>
-                                        <td>
-                                            <?php if ($c['last_session']): ?>
-                                                <?= htmlspecialchars(date('M j, Y', strtotime((string) $c['last_session']))) ?>
-                                            <?php else: ?>
-                                                <span class="text-muted fst-italic">Never</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-calendar2-check"></i> Take Attendance
-                                            </a>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
         </div>
     </div>
 

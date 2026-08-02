@@ -83,56 +83,171 @@ function get_course_faculty_id(mysqli $conn, int $courseId): ?int
 }
 
 /**
- * The "who teaches this course, and when" summary for one specific
- * course+semester pair (i.e. one course_offerings row), for display
- * alongside render_scope_breadcrumb() wherever a course+semester
- * combination is already on screen (attendance.php's roster/Grid View,
- * reports.php's Xiiso grid) — the breadcrumb itself only ever describes
- * Course/Department/Faculty/Semester/Academic Year, never who's actually
- * teaching or the offering's date range, so this is a separate lookup
- * rather than a change to that helper's contract. Returns null if no
- * course_offerings row exists yet for this pair (nothing to show).
+ * Whether at least one real course_offerings row exists for this
+ * course+semester (any shift) — the correct validity/authorization
+ * boundary now that a semester's faculty no longer has to match the
+ * course's own catalog faculty (a course can be cross-listed into a
+ * different faculty's semester track — see
+ * migrations/2026_08_course_offerings_roster_department.sql). Replaces
+ * the old get_course_faculty_id()-vs-semesters.faculty_id scalar
+ * comparison, which assumed a course could only ever have offerings in
+ * one faculty. get_course_faculty_id() itself is unchanged and still the
+ * right answer to "what is this course's catalog home faculty" (used for
+ * CRUD ownership, e.g. admin/courses.php's Dean-scoped list) — this is a
+ * separate question: "is this specific course+semester pairing real."
  */
-function get_offering_summary(mysqli $conn, int $courseId, int $semesterId): ?array
+function course_offering_exists(mysqli $conn, int $courseId, int $semesterId): bool
 {
     if ($courseId <= 0 || $semesterId <= 0) {
-        return null;
+        return false;
     }
 
-    $stmt = $conn->prepare(
-        'SELECT l.full_name AS lecturer_name, co.start_date, co.end_date
-         FROM course_offerings co
-         LEFT JOIN lecturers l ON l.id = co.lecturer_id
-         WHERE co.course_id = ? AND co.semester_id = ?'
-    );
+    $stmt = $conn->prepare('SELECT 1 FROM course_offerings WHERE course_id = ? AND semester_id = ? LIMIT 1');
     $stmt->bind_param('ii', $courseId, $semesterId);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
-    return $row ?: null;
+    return $row !== null;
+}
+
+/**
+ * Resolves which department's students should be used as the roster
+ * fallback for a specific course+semester(+shift) offering, per that
+ * offering's own roster_department_id (see
+ * migrations/2026_08_course_offerings_roster_department.sql) — set
+ * explicitly for a guest-faculty/cross-listed offering, since the
+ * course's own catalog department would otherwise pull the wrong
+ * faculty's students. Returns null when no matching offering row sets
+ * one, so callers fall back to the course's own catalog department
+ * exactly as before this column existed. When $shift is given, prefers
+ * an exact-shift match over a coexisting 'any'-shift row, same
+ * precedence as get_offering_summary().
+ */
+function resolve_roster_department_id(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): ?int
+{
+    if ($shift !== null && $shift !== '') {
+        $stmt = $conn->prepare(
+            "SELECT roster_department_id FROM course_offerings
+             WHERE course_id = ? AND semester_id = ? AND (shift = ? OR shift = 'any') AND roster_department_id IS NOT NULL
+             ORDER BY (shift = ?) DESC
+             LIMIT 1"
+        );
+        $stmt->bind_param('iiss', $courseId, $semesterId, $shift, $shift);
+    } else {
+        $stmt = $conn->prepare(
+            'SELECT roster_department_id FROM course_offerings
+             WHERE course_id = ? AND semester_id = ? AND roster_department_id IS NOT NULL
+             LIMIT 1'
+        );
+        $stmt->bind_param('ii', $courseId, $semesterId);
+    }
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row ? (int) $row['roster_department_id'] : null;
+}
+
+/**
+ * Human labels for course_offerings.shift, including the 'any' sentinel
+ * (meaning "applies to every shift") — shared by every file that renders
+ * or collects an offering's shift. Local per-file convention (matches the
+ * existing SHIFT_LABELS constants already duplicated across
+ * attendance.php/admin/courses.php/etc. for students.shift, which only has
+ * 3 values and stays separate from this one).
+ */
+const OFFERING_SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
+    'any' => 'Any/All Shifts',
+];
+
+/**
+ * The "who teaches this course, and when" summary for one specific
+ * course+semester — now potentially MULTIPLE course_offerings rows (one
+ * per shift), so this returns a list, not a single row. For display
+ * alongside render_scope_breadcrumb() wherever a course+semester
+ * combination is already on screen (attendance.php's roster/Grid View,
+ * reports.php's Xiiso grid) — the breadcrumb itself only ever describes
+ * Course/Department/Faculty/Semester/Academic Year, never who's actually
+ * teaching or the offering's date range, so this is a separate lookup
+ * rather than a change to that helper's contract.
+ *
+ * $shift: null (default) = no filter, return every offering row for this
+ * course+semester (0, 1, or many — e.g. reports.php has no shift context).
+ * A real shift value resolves to the single best-matching offering: an
+ * exact shift match if one exists, else the 'any' wildcard row — a
+ * specific-shift row and an 'any' row can legitimately coexist for the
+ * same course+semester (e.g. a catch-all offering left in place after a
+ * specific shift was added later), so this can't just filter on "either
+ * matches" without risking two rows for what should read as one answer.
+ *
+ * @return array<int, array{lecturer_name: ?string, shift: string, start_date: ?string, end_date: ?string}>
+ */
+function get_offering_summary(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): array
+{
+    if ($courseId <= 0 || $semesterId <= 0) {
+        return [];
+    }
+
+    if ($shift !== null) {
+        $stmt = $conn->prepare(
+            'SELECT l.full_name AS lecturer_name, co.shift, co.start_date, co.end_date
+             FROM course_offerings co
+             LEFT JOIN lecturers l ON l.id = co.lecturer_id
+             WHERE co.course_id = ? AND co.semester_id = ? AND (co.shift = ? OR co.shift = \'any\')
+             ORDER BY (co.shift = ?) DESC
+             LIMIT 1'
+        );
+        $stmt->bind_param('iiss', $courseId, $semesterId, $shift, $shift);
+    } else {
+        $stmt = $conn->prepare(
+            'SELECT l.full_name AS lecturer_name, co.shift, co.start_date, co.end_date
+             FROM course_offerings co
+             LEFT JOIN lecturers l ON l.id = co.lecturer_id
+             WHERE co.course_id = ? AND co.semester_id = ?'
+        );
+        $stmt->bind_param('ii', $courseId, $semesterId);
+    }
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    return $rows;
 }
 
 /**
  * Renders get_offering_summary()'s result as the same small muted-text
  * line style used elsewhere (e.g. render_scope_breadcrumb()) — a no-op
- * (empty string) when there's no offering row yet, so callers can use it
- * unconditionally right after a breadcrumb call.
+ * (empty string) when there are no offering rows yet, so callers can use
+ * it unconditionally right after a breadcrumb call. One line per offering
+ * when there's more than one (e.g. "Morning: John Doe" / "Afternoon:
+ * Unassigned"); the shift label is omitted when there's only a single
+ * 'any'-shift offering, since naming "Any/All Shifts" explicitly adds
+ * nothing for the common single-offering case.
  */
-function render_offering_summary(?array $offering): string
+function render_offering_summary(array $offerings): string
 {
-    if ($offering === null) {
+    if (empty($offerings)) {
         return '';
     }
 
-    $lecturer = $offering['lecturer_name'] ?: 'Unassigned';
-    $dates = '';
-    if ($offering['start_date'] || $offering['end_date']) {
-        $dates = ' <span class="mx-1">&middot;</span> ' . htmlspecialchars(($offering['start_date'] ?? '?') . ' to ' . ($offering['end_date'] ?? '?'));
+    $lines = [];
+    $singleAny = count($offerings) === 1 && $offerings[0]['shift'] === 'any';
+    foreach ($offerings as $offering) {
+        $lecturer = $offering['lecturer_name'] ?: 'Unassigned';
+        $dates = '';
+        if ($offering['start_date'] || $offering['end_date']) {
+            $dates = ' <span class="mx-1">&middot;</span> ' . htmlspecialchars(($offering['start_date'] ?? '?') . ' to ' . ($offering['end_date'] ?? '?'));
+        }
+        $prefix = $singleAny ? '' : htmlspecialchars(OFFERING_SHIFT_LABELS[$offering['shift']] ?? $offering['shift']) . ': ';
+        $lines[] = $prefix . htmlspecialchars($lecturer) . $dates;
     }
 
     return '<div class="text-muted small mb-2"><i class="bi bi-person-badge"></i> '
-        . htmlspecialchars($lecturer) . $dates . '</div>';
+        . implode('<br>', $lines) . '</div>';
 }
 
 /**
@@ -193,17 +308,31 @@ function delete_attendance_record(mysqli $conn, int $studentId, int $courseId, i
 /**
  * Single-course write-permission check, modeled on the course-list scoping
  * already used by attendance.php/reports.php (system_admin: any course;
- * dean: only courses in their own faculty; lecturer: only courses they're
- * currently assigned to teach, via course_offerings — not the deprecated
- * permanent courses.lecturer_id). Used by the AJAX save endpoint, which has
+ * dean: only an offering that actually exists inside their own faculty's
+ * semester track — via course_offerings/semesters.faculty_id, not the
+ * course's own catalog department, so a Dean can write a cross-listed
+ * guest-faculty offering in their faculty even when the course's catalog
+ * home is elsewhere, per the Multi-Faculty Course Offerings plan; lecturer:
+ * only courses they're currently assigned to teach, via course_offerings —
+ * not the deprecated permanent courses.lecturer_id). Used by the AJAX save endpoint, which has
  * no server-rendered $courseById allowlist to lean on the way the
  * page-load flow does — this is that endpoint's actual security boundary.
  * $semesterId must be the *current* semester for this course's own
  * faculty (see get_current_semester()) — a lecturer's write access is
  * scoped to their current-semester offering, so being unassigned for a
  * later semester automatically revokes it, rather than lasting forever.
+ *
+ * $shift: since a course can now have one offering per shift within the
+ * same semester, a lecturer assigned to only Morning must NOT be able to
+ * write Afternoon students' attendance. Pass the shift of the specific
+ * student/roster being written to (ajax/save_attendance_cell.php always
+ * has a real value here — the student's own shift). null (default) skips
+ * the shift check entirely (any offering row for this lecturer counts) —
+ * used only where there's no specific shift in context yet (e.g.
+ * attendance.php's page-level "can write" flag when no Shift filter is
+ * selected — a UX convenience, not the real security boundary).
  */
-function user_can_write_course_attendance(mysqli $conn, string $role, array $currentUser, int $courseId, int $semesterId): bool
+function user_can_write_course_attendance(mysqli $conn, string $role, array $currentUser, int $courseId, int $semesterId, ?string $shift = null): bool
 {
     if ($role === 'system_admin') {
         return true;
@@ -215,9 +344,10 @@ function user_can_write_course_attendance(mysqli $conn, string $role, array $cur
             return false;
         }
         $stmt = $conn->prepare(
-            'SELECT 1 FROM courses c JOIN departments d ON d.id = c.department_id WHERE c.id = ? AND d.faculty_id = ?'
+            'SELECT 1 FROM course_offerings co JOIN semesters se ON se.id = co.semester_id
+             WHERE co.course_id = ? AND co.semester_id = ? AND se.faculty_id = ?'
         );
-        $stmt->bind_param('ii', $courseId, $facultyId);
+        $stmt->bind_param('iii', $courseId, $semesterId, $facultyId);
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
@@ -236,8 +366,13 @@ function user_can_write_course_attendance(mysqli $conn, string $role, array $cur
             return false;
         }
 
-        $stmt = $conn->prepare('SELECT 1 FROM course_offerings WHERE course_id = ? AND semester_id = ? AND lecturer_id = ?');
-        $stmt->bind_param('iii', $courseId, $semesterId, $lecturerRecordId);
+        if ($shift !== null) {
+            $stmt = $conn->prepare('SELECT 1 FROM course_offerings WHERE course_id = ? AND semester_id = ? AND lecturer_id = ? AND (shift = ? OR shift = \'any\')');
+            $stmt->bind_param('iiis', $courseId, $semesterId, $lecturerRecordId, $shift);
+        } else {
+            $stmt = $conn->prepare('SELECT 1 FROM course_offerings WHERE course_id = ? AND semester_id = ? AND lecturer_id = ?');
+            $stmt->bind_param('iii', $courseId, $semesterId, $lecturerRecordId);
+        }
         $stmt->execute();
         $row = $stmt->get_result()->fetch_assoc();
         $stmt->close();
@@ -292,7 +427,29 @@ function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?stri
     $stmt->close();
 
     if (empty($students)) {
-        if ($shift !== null && $shift !== '') {
+        // Guest-faculty offerings set their own roster_department_id (the
+        // course's own catalog department lives in the WRONG faculty for
+        // those); fall back to the course's own department only when no
+        // offering row sets one — unchanged default behavior.
+        $rosterDepartmentId = resolve_roster_department_id($conn, $courseId, $semesterId, $shift);
+
+        if ($rosterDepartmentId !== null) {
+            if ($shift !== null && $shift !== '') {
+                $stmt = $conn->prepare(
+                    "SELECT id, student_no, full_name FROM students
+                     WHERE department_id = ? AND status = 'active' AND shift = ?
+                     ORDER BY student_no"
+                );
+                $stmt->bind_param('is', $rosterDepartmentId, $shift);
+            } else {
+                $stmt = $conn->prepare(
+                    "SELECT id, student_no, full_name FROM students
+                     WHERE department_id = ? AND status = 'active'
+                     ORDER BY student_no"
+                );
+                $stmt->bind_param('i', $rosterDepartmentId);
+            }
+        } elseif ($shift !== null && $shift !== '') {
             $stmt = $conn->prepare(
                 "SELECT s.id, s.student_no, s.full_name
                  FROM students s

@@ -7,6 +7,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/lecturer_accounts.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 
 require_role(['system_admin']);
@@ -19,16 +20,45 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 
 $conn = db();
 
+const IMPORT_SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
+    'any' => 'Any/All Shifts',
+];
+
+/**
+ * Accept either the raw enum value ("morning") or the friendly label
+ * ("Morning Shift"), case-insensitively — same helper as
+ * admin/students_import.php's own (duplicated rather than shared, matching
+ * that file's own local-helper convention).
+ */
+function normalize_shift_input_for_course(string $input): ?string
+{
+    $normalized = mb_strtolower(trim($input));
+    if (array_key_exists($normalized, IMPORT_SHIFT_LABELS)) {
+        return $normalized;
+    }
+    foreach (IMPORT_SHIFT_LABELS as $value => $label) {
+        if (mb_strtolower($label) === $normalized) {
+            return $value;
+        }
+    }
+
+    return null;
+}
+
 // ---------------------------------------------------------------------
 // Downloadable template (must run before any HTML output)
 // ---------------------------------------------------------------------
 if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->fromArray(['Code', 'Name', 'Department', 'Credit Hours'], null, 'A1');
-    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', 3], null, 'A2');
-    $sheet->getStyle('A1:D1')->getFont()->setBold(true);
-    foreach (['A', 'B', 'C', 'D'] as $col) {
+    $sheet->fromArray(['Code', 'Name', 'Department', 'Credit Hours', 'Academic Year', 'Semester', 'Shift', 'Lecturer'], null, 'A1');
+    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', 3, '2025/2026', 'Semester 1', 'Morning Shift', 'Ahmed Cali'], null, 'A2');
+    $sheet->fromArray(['CS205', 'Databases', 'Computer Science', 3, '', '', '', ''], null, 'A3');
+    $sheet->getStyle('A1:H1')->getFont()->setBold(true);
+    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as $col) {
         $sheet->getColumnDimension($col)->setAutoSize(true);
     }
 
@@ -72,10 +102,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 $step = 'upload';
 $previewRows = [];
 
-$existingDepartments = $conn->query('SELECT id, name FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$existingDepartments = $conn->query('SELECT id, name, faculty_id FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 $departmentByLowerName = [];
+$departmentFacultyIdById = [];
 foreach ($existingDepartments as $dept) {
     $departmentByLowerName[mb_strtolower(trim((string) $dept['name']))] = (int) $dept['id'];
+    $departmentFacultyIdById[(int) $dept['id']] = (int) $dept['faculty_id'];
+}
+
+// The four "first offering" columns below are all optional, as a group —
+// left blank, a row imports as a catalog-only course exactly like before
+// (same opt-in rule as admin/courses.php's manual Add Course form). Only
+// consulted when a row actually provides a Semester.
+$existingAcademicYears = $conn->query('SELECT id, label FROM academic_years ORDER BY label')->fetch_all(MYSQLI_ASSOC);
+$academicYearByLowerLabel = [];
+foreach ($existingAcademicYears as $ay) {
+    $academicYearByLowerLabel[mb_strtolower(trim((string) $ay['label']))] = (int) $ay['id'];
+}
+
+// Semesters are scoped by (faculty, academic year, name) — the same name
+// ("Semester 1") can legitimately exist in more than one academic year for
+// the same faculty, so Academic Year is what disambiguates which row this
+// resolves to (not just faculty+name, unlike the simpler per-faculty-only
+// lookup students_import.php uses).
+$existingSemesters = $conn->query('SELECT id, name, faculty_id, academic_year_id FROM semesters ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$semesterByFacultyYearAndLowerName = [];
+foreach ($existingSemesters as $sem) {
+    $key = (int) $sem['faculty_id'] . '|' . (int) $sem['academic_year_id'] . '|' . mb_strtolower(trim((string) $sem['name']));
+    $semesterByFacultyYearAndLowerName[$key] = (int) $sem['id'];
+}
+
+// Any active lecturer system-wide may be assigned (not just ones in the
+// course's own department) — same "common courses across faculties" reasoning
+// as admin/courses.php's own offering-lecturer field.
+$existingLecturers = $conn->query("SELECT id, full_name FROM lecturers WHERE status = 'active'")->fetch_all(MYSQLI_ASSOC);
+$lecturerByLowerName = [];
+foreach ($existingLecturers as $lec) {
+    $lecturerByLowerName[mb_strtolower(trim((string) $lec['full_name']))] = (int) $lec['id'];
 }
 
 // ---------------------------------------------------------------------
@@ -109,37 +172,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (empty($rows)) {
                         $errorMessage = 'The uploaded file is empty.';
                     } else {
-                        $headerRow = array_map(static fn ($h) => mb_strtolower(trim((string) $h)), array_shift($rows));
+                        // Some real sheets have a decorative title banner above the
+                        // real header row (university name, faculty, a note, etc.) —
+                        // same idea as admin/students_import.php's own banner-skipping.
+                        // Keep advancing past any row that doesn't actually look like
+                        // the real header row (no Code-like or Name-like cell anywhere
+                        // in it) until the real one is found.
+                        $looksLikeCourseHeaderRow = static function (array $row): bool {
+                            $normalizedCells = array_map(
+                                static fn ($h) => mb_strtolower(trim((string) $h)),
+                                $row
+                            );
+                            $codeCandidates = ['code', 'course code'];
+                            $nameCandidates = ['name', 'course name'];
 
-                        $codeCol = array_search('code', $headerRow, true);
-                        $nameCol = array_search('name', $headerRow, true);
-                        if ($nameCol === false) {
-                            $nameCol = array_search('course name', $headerRow, true);
+                            return find_import_column($normalizedCells, $codeCandidates) !== false
+                                || find_import_column($normalizedCells, $nameCandidates) !== false;
+                        };
+                        $tableStart = 0;
+                        while ($tableStart < count($rows) && !$looksLikeCourseHeaderRow($rows[$tableStart])) {
+                            $tableStart++;
                         }
-                        $departmentCol = array_search('department', $headerRow, true);
-                        if ($departmentCol === false) {
-                            $departmentCol = array_search('department name', $headerRow, true);
-                        }
-                        $creditCol = array_search('credit hours', $headerRow, true);
-                        if ($creditCol === false) {
-                            $creditCol = array_search('credit_hours', $headerRow, true);
-                        }
-                        if ($creditCol === false) {
-                            $creditCol = array_search('credits', $headerRow, true);
-                        }
+
+                        if ($tableStart >= count($rows)) {
+                            $errorMessage = 'No course table was found in the uploaded file.';
+                        } else {
+                        $headerRow = array_map(static fn ($h) => mb_strtolower(trim((string) $h)), $rows[$tableStart]);
+                        $dataRows = array_slice($rows, $tableStart + 1);
+                        $rowNumber = $tableStart + 1;
+
+                        $codeCol = find_import_column($headerRow, ['code', 'course code']);
+                        $nameCol = find_import_column($headerRow, ['name', 'course name']);
+                        $departmentCol = find_import_column($headerRow, ['department', 'department name']);
+                        $creditCol = find_import_column($headerRow, ['credit hours', 'credit_hours', 'credits']);
+                        // Optional "first offering" columns — a group, opt-in per row.
+                        $academicYearCol = find_import_column($headerRow, ['academic year', 'sanadka waxbarasho', 'sanadka waxbarashada', 'sanadka']);
+                        $semesterCol = find_import_column($headerRow, ['semester', 'semesterka']);
+                        $shiftCol = find_import_column($headerRow, ['shift', 'shiftka']);
+                        $lecturerCol = find_import_column($headerRow, ['lecturer', 'lecturer name', 'macalinka', 'macallinka']);
 
                         if ($codeCol === false || $nameCol === false || $departmentCol === false) {
                             $errorMessage = 'The file must have "Code", "Name" and "Department" column headers.';
                         } else {
                             $seenInFile = [];
-                            $rowNumber = 1;
 
-                            foreach ($rows as $row) {
+                            foreach ($dataRows as $row) {
                                 $rowNumber++;
                                 $code = trim((string) ($row[$codeCol] ?? ''));
                                 $name = trim((string) ($row[$nameCol] ?? ''));
                                 $departmentInput = trim((string) ($row[$departmentCol] ?? ''));
                                 $creditInput = $creditCol !== false ? trim((string) ($row[$creditCol] ?? '')) : '';
+                                $academicYearInput = $academicYearCol !== false ? trim((string) ($row[$academicYearCol] ?? '')) : '';
+                                $semesterInput = $semesterCol !== false ? trim((string) ($row[$semesterCol] ?? '')) : '';
+                                $shiftInput = $shiftCol !== false ? trim((string) ($row[$shiftCol] ?? '')) : '';
+                                $lecturerInput = $lecturerCol !== false ? trim((string) ($row[$lecturerCol] ?? '')) : '';
 
                                 if ($code === '' && $name === '' && $departmentInput === '') {
                                     continue;
@@ -148,8 +234,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $status = 'ok';
                                 $message = 'Ready to import';
                                 $departmentId = 0;
+                                $departmentFacultyId = 0;
                                 $creditHours = 3;
                                 $codeUpper = strtoupper($code);
+                                $academicYearId = 0;
+                                $semesterId = 0;
+                                $shift = null;
+                                $lecturerId = 0;
 
                                 if ($code === '') {
                                     $status = 'error';
@@ -165,6 +256,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     if ($departmentId === 0) {
                                         $status = 'error';
                                         $message = 'Unknown department "' . $departmentInput . '"';
+                                    } else {
+                                        $departmentFacultyId = $departmentFacultyIdById[$departmentId] ?? 0;
                                     }
                                 }
 
@@ -174,6 +267,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         $message = 'Invalid Credit Hours (must be a number 1-10)';
                                     } else {
                                         $creditHours = (int) $creditInput;
+                                    }
+                                }
+
+                                // The offering columns are only validated at all when a
+                                // Semester was actually given — left blank, the row
+                                // imports as a catalog-only course, same opt-in rule as
+                                // the manual Add Course form.
+                                if ($status === 'ok' && $semesterInput !== '') {
+                                    if ($academicYearInput === '') {
+                                        $status = 'error';
+                                        $message = 'Semester given but Academic Year is missing (needed to identify which "' . $semesterInput . '")';
+                                    } elseif ($shiftInput === '') {
+                                        $status = 'error';
+                                        $message = 'Semester given but Shift is missing';
+                                    } else {
+                                        $academicYearId = $academicYearByLowerLabel[mb_strtolower($academicYearInput)] ?? 0;
+                                        if ($academicYearId === 0) {
+                                            $status = 'error';
+                                            $message = 'Unknown academic year "' . $academicYearInput . '"';
+                                        } else {
+                                            $semKey = $departmentFacultyId . '|' . $academicYearId . '|' . mb_strtolower($semesterInput);
+                                            $semesterId = $semesterByFacultyYearAndLowerName[$semKey] ?? 0;
+                                            if ($semesterId === 0) {
+                                                $status = 'error';
+                                                $message = 'Unknown semester "' . $semesterInput . '" for "' . $departmentInput . '"\'s faculty in ' . $academicYearInput;
+                                            } else {
+                                                $shift = normalize_shift_input_for_course($shiftInput);
+                                                if ($shift === null) {
+                                                    $status = 'error';
+                                                    $message = 'Invalid Shift "' . $shiftInput . '" (use Morning Shift, Afternoon Shift, or Weekend)';
+                                                } elseif ($lecturerInput !== '') {
+                                                    $lecturerId = $lecturerByLowerName[mb_strtolower($lecturerInput)] ?? 0;
+                                                    if ($lecturerId === 0) {
+                                                        $status = 'error';
+                                                        $message = 'Unknown lecturer "' . $lecturerInput . '"';
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -205,6 +337,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     'department_input' => $departmentInput,
                                     'department_id' => $departmentId,
                                     'credit_hours' => $creditHours,
+                                    'academic_year_input' => $academicYearInput,
+                                    'semester_input' => $semesterInput,
+                                    'shift_input' => $shiftInput,
+                                    'lecturer_input' => $lecturerInput,
+                                    'academic_year_id' => $academicYearId,
+                                    'semester_id' => $semesterId,
+                                    'shift' => $shift,
+                                    'lecturer_id' => $lecturerId,
                                     'status' => $status,
                                     'message' => $message,
                                 ];
@@ -216,6 +356,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $_SESSION['course_import_preview'] = $previewRows;
                                 $step = 'preview';
                             }
+                        }
                         }
                     }
                 } catch (\Throwable $e) {
@@ -237,17 +378,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->begin_transaction();
                 try {
                     $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
+                    $offeringStmt = $conn->prepare(
+                        'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift) VALUES (?, ?, ?, ?)'
+                    );
                     $imported = 0;
+                    $offeringsCreated = 0;
                     foreach ($validRows as $row) {
                         $insertStmt->bind_param('ssii', $row['code'], $row['name'], $row['department_id'], $row['credit_hours']);
                         $insertStmt->execute();
+                        $newCourseId = (int) $conn->insert_id;
                         $imported++;
+
+                        // Same opt-in rule as the manual Add Course form: only rows
+                        // that resolved a Semester (validated in the preview step
+                        // above) also get a course_offerings row.
+                        if ($row['semester_id'] > 0) {
+                            $lecturerParam = $row['lecturer_id'] > 0 ? $row['lecturer_id'] : null;
+                            $offeringStmt->bind_param('iiis', $newCourseId, $row['semester_id'], $lecturerParam, $row['shift']);
+                            $offeringStmt->execute();
+                            $offeringsCreated++;
+                        }
                     }
                     $insertStmt->close();
+                    $offeringStmt->close();
                     $conn->commit();
 
                     $skipped = count($previewRows) - $imported;
                     $_SESSION['flash_success'] = "Imported {$imported} course(s) successfully."
+                        . ($offeringsCreated > 0 ? " Created {$offeringsCreated} semester offering(s)." : '')
                         . ($skipped > 0 ? " Skipped {$skipped} invalid row(s)." : '');
                 } catch (\Throwable $e) {
                     $conn->rollback();
@@ -320,9 +478,16 @@ $invalidCount = count($previewRows) - $validCount;
                         The file must have column headers: <strong>Code</strong>, <strong>Name</strong>,
                         and <strong>Department</strong> (the Department value must match an existing
                         department's name). <strong>Credit Hours</strong> is optional and defaults to 3
-                        if left blank. Lecturer assignment is per-semester now — use "Manage Offerings"
-                        on each course after importing.
-                        <br>
+                        if left blank.
+                        <br><br>
+                        You can also, per row, optionally add <strong>Academic Year</strong>,
+                        <strong>Semester</strong>, <strong>Shift</strong>, and <strong>Lecturer</strong> —
+                        when a row has a Semester, that course is immediately offered for that semester
+                        too (same as "Manage Offerings"), all in this one import. Leave all four blank
+                        on a row to import just the course itself, to offer later. Any decorative title
+                        rows above your real header row (university name, notes, etc.) are automatically
+                        skipped.
+                        <br><br>
                         <a href="?action=template" class="fw-semibold">
                             <i class="bi bi-download"></i> Download a starter template (.xlsx)
                         </a>
@@ -360,6 +525,7 @@ $invalidCount = count($previewRows) - $validCount;
                                     <th>Name</th>
                                     <th>Department</th>
                                     <th>Credit Hours</th>
+                                    <th>Offering</th>
                                     <th>Status</th>
                                 </tr>
                             </thead>
@@ -371,6 +537,22 @@ $invalidCount = count($previewRows) - $validCount;
                                         <td><?= htmlspecialchars($r['name']) ?></td>
                                         <td><?= htmlspecialchars($r['department_input']) ?></td>
                                         <td><?= (int) $r['credit_hours'] ?></td>
+                                        <td>
+                                            <?php if ($r['semester_input'] === ''): ?>
+                                                <span class="text-muted">&mdash;</span>
+                                            <?php else: ?>
+                                                <?= htmlspecialchars($r['semester_input']) ?>
+                                                <?php if ($r['academic_year_input'] !== ''): ?>
+                                                    (<?= htmlspecialchars($r['academic_year_input']) ?>)
+                                                <?php endif; ?>
+                                                <?php if ($r['shift'] !== null): ?>
+                                                    &middot; <?= htmlspecialchars(IMPORT_SHIFT_LABELS[$r['shift']]) ?>
+                                                <?php endif; ?>
+                                                <?php if ($r['lecturer_input'] !== ''): ?>
+                                                    &middot; <?= htmlspecialchars($r['lecturer_input']) ?>
+                                                <?php endif; ?>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <?php if ($r['status'] === 'ok'): ?>
                                                 <span class="badge-pill badge-active"><i class="bi bi-check-lg"></i> <?= htmlspecialchars($r['message']) ?></span>

@@ -88,33 +88,49 @@ if ($role === 'system_admin') {
          ORDER BY f.name, d.name, c.code"
     )->fetch_all(MYSQLI_ASSOC);
 } elseif ($role === 'dean') {
+    // Own faculty's own-catalog courses, PLUS any course cross-listed INTO
+    // this faculty from elsewhere (a course whose catalog home is a
+    // different faculty but has a real course_offerings row here — see
+    // the Multi-Faculty Course Offerings plan). department_name/
+    // faculty_name shown for a cross-listed row are the course's own
+    // catalog home, not this faculty — correct, since that's genuinely
+    // where the course is cataloged.
     $stmt = $conn->prepare(
-        "SELECT c.id, c.code, c.name, c.department_id,
+        "SELECT DISTINCT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
          WHERE d.faculty_id = ?
+            OR EXISTS (
+                SELECT 1 FROM course_offerings co
+                JOIN semesters se ON se.id = co.semester_id
+                WHERE co.course_id = c.id AND se.faculty_id = ?
+            )
          ORDER BY d.name, c.code"
     );
-    $stmt->bind_param('i', $deanFacultyId);
+    $stmt->bind_param('ii', $deanFacultyId, $deanFacultyId);
     $stmt->execute();
     $courses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 } elseif ($role === 'lecturer') {
     // Current-offering-only: a lecturer only sees courses they're
-    // currently assigned to teach (course_offerings, scoped to that
-    // course's OWN faculty's current semester) — not a lifetime list of
-    // every course they've ever been assigned, and never derived from
-    // the lecturer's own home department (D1: always resolved per course).
+    // currently assigned to teach (course_offerings), regardless of which
+    // faculty that specific offering's semester belongs to — a lecturer
+    // may now hold a cross-listed/guest-faculty offering whose semester's
+    // faculty differs from the course's own catalog department's faculty
+    // (see the Multi-Faculty Course Offerings plan), so this is no longer
+    // constrained to "the course's own faculty's current semester". Not a
+    // lifetime list of every course they've ever been assigned, and never
+    // derived from the lecturer's own home department.
     $stmt = $conn->prepare(
-        "SELECT c.id, c.code, c.name, c.department_id,
+        "SELECT DISTINCT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
          JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
-         JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
+         JOIN semesters se ON se.id = co.semester_id AND se.is_current = 1
          ORDER BY c.code"
     );
     $stmt->bind_param('i', $lecturerRecordId);
@@ -126,6 +142,33 @@ if ($role === 'system_admin') {
 $courseById = [];
 foreach ($courses as $c) {
     $courseById[(int) $c['id']] = $c;
+}
+
+// Every faculty each course actually has a real course_offerings row in
+// (home faculty is not necessarily one of these until it has its own
+// offering) — used below to resolve/validate semesters for a course that
+// may now be offered across more than one faculty at once.
+$offeringFacultyIdsByCourse = [];
+$offFacRes = $conn->query(
+    'SELECT DISTINCT co.course_id, se.faculty_id
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id'
+);
+if ($offFacRes) {
+    while ($row = $offFacRes->fetch_assoc()) {
+        $offeringFacultyIdsByCourse[(int) $row['course_id']][] = (int) $row['faculty_id'];
+    }
+}
+
+// Home faculty first (preferred default), then every other faculty this
+// course is actually offered in.
+$courseFacultyIdsByCourse = [];
+foreach ($courses as $c) {
+    $cid = (int) $c['id'];
+    $courseFacultyIdsByCourse[$cid] = array_values(array_unique(array_merge(
+        [(int) $c['faculty_id']],
+        $offeringFacultyIdsByCourse[$cid] ?? []
+    )));
 }
 
 $faculties = $role === 'system_admin'
@@ -167,7 +210,13 @@ if ($role === 'system_admin') {
 // semester's grid, not only mark the live one), plus each faculty's
 // current semester id for the JS default-selection below.
 // ---------------------------------------------------------------------
-$facultyIds = array_values(array_unique(array_map(static fn ($c) => (int) $c['faculty_id'], $courses)));
+$facultyIds = [];
+foreach ($courseFacultyIdsByCourse as $ids) {
+    foreach ($ids as $fid) {
+        $facultyIds[] = $fid;
+    }
+}
+$facultyIds = array_values(array_unique($facultyIds));
 $semestersByFacultyId = [];
 $currentSemesterIdByFacultyId = [];
 if (!empty($facultyIds)) {
@@ -187,13 +236,12 @@ if (!empty($facultyIds)) {
     }
 }
 
-// Course -> faculty map for the JS Semester cascade (every role, not just
-// system_admin — dean/lecturer also need this to populate Semester options
-// when Course changes, even though their own Course list is server-flat).
-$courseFacultyIdJs = [];
-foreach ($courses as $c) {
-    $courseFacultyIdJs[(int) $c['id']] = (int) $c['faculty_id'];
-}
+// Course -> [faculty_id, ...] map for the JS Semester cascade (every role,
+// not just system_admin — dean/lecturer also need this to populate
+// Semester options when Course changes, even though their own Course list
+// is server-flat). A course can now have real offerings in more than one
+// faculty at once, so this is plural, not a single scalar.
+$courseFacultyIdsJs = $courseFacultyIdsByCourse;
 
 // ---------------------------------------------------------------------
 // Flash messages (post-redirect-get, same pattern as the other admin pages)
@@ -226,30 +274,42 @@ $sessionById = [];
 
 if (array_key_exists($filterCourseId, $courseById)) {
     $courseFacultyId = (int) $courseById[$filterCourseId]['faculty_id'];
+    $courseFacultyIds = $courseFacultyIdsByCourse[$filterCourseId] ?? [$courseFacultyId];
 
     if ($filterSemesterId > 0) {
-        $semStmt = $conn->prepare(
-            "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
-                    ay.label AS academic_year_label
-             FROM semesters s
-             JOIN academic_years ay ON ay.id = s.academic_year_id
-             WHERE s.id = ? AND s.faculty_id = ?"
-        );
-        $semStmt->bind_param('ii', $filterSemesterId, $courseFacultyId);
-        $semStmt->execute();
-        $currentSemester = $semStmt->get_result()->fetch_assoc() ?: null;
-        $semStmt->close();
+        // Valid whenever a real course_offerings row exists for this
+        // course+semester — not "this semester's faculty equals the
+        // course's one catalog faculty" (a course can now have offerings
+        // across more than one faculty at once).
+        if (course_offering_exists($conn, $filterCourseId, $filterSemesterId)) {
+            $semStmt = $conn->prepare(
+                "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
+                        ay.label AS academic_year_label
+                 FROM semesters s
+                 JOIN academic_years ay ON ay.id = s.academic_year_id
+                 WHERE s.id = ?"
+            );
+            $semStmt->bind_param('i', $filterSemesterId);
+            $semStmt->execute();
+            $currentSemester = $semStmt->get_result()->fetch_assoc() ?: null;
+            $semStmt->close();
+        }
         if ($currentSemester === null) {
             $filterSemesterId = 0;
         }
     }
 
     if ($currentSemester === null) {
-        // No (valid) semester specified — default to this faculty's
-        // current one, same as before Semester became user-selectable.
-        $currentSemester = get_current_semester($conn, $courseFacultyId);
-        if ($currentSemester !== null) {
-            $filterSemesterId = (int) $currentSemester['id'];
+        // No (valid) semester specified — default to the course's own
+        // home faculty's current semester; if that faculty has none set,
+        // fall back to any other faculty this course is actually offered
+        // in (a cross-listed/guest offering may be the only "live" one).
+        foreach ($courseFacultyIds as $fid) {
+            $currentSemester = get_current_semester($conn, $fid);
+            if ($currentSemester !== null) {
+                $filterSemesterId = (int) $currentSemester['id'];
+                break;
+            }
         }
     }
 
@@ -269,7 +329,7 @@ if (array_key_exists($filterCourseId, $courseById)) {
 // roles view historical data they can't edit.
 $canWriteAttendance = false;
 if (array_key_exists($filterCourseId, $courseById) && $currentSemester !== null) {
-    $canWriteAttendance = user_can_write_course_attendance($conn, $role, $currentUser, $filterCourseId, (int) $currentSemester['id']);
+    $canWriteAttendance = user_can_write_course_attendance($conn, $role, $currentUser, $filterCourseId, (int) $currentSemester['id'], $filterShift !== '' ? $filterShift : null);
 }
 
 // ---------------------------------------------------------------------
@@ -506,7 +566,7 @@ $scopeBanner = match ($role) {
                             $currentSemester['name'] ?? null,
                             $currentSemester['academic_year_label'] ?? null,
                         ]) ?>
-                        <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0))) ?>
+                        <?= render_offering_summary(get_offering_summary($conn, $filterCourseId, (int) ($currentSemester['id'] ?? 0), $filterShift !== '' ? $filterShift : null)) ?>
                         <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">
                                 Xiiso Grid — <?= htmlspecialchars($courseById[$filterCourseId]['code'] . ' — ' . $courseById[$filterCourseId]['name']) ?>
@@ -618,25 +678,38 @@ $scopeBanner = match ($role) {
     <script>
         window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
-        const courseFacultyIdMap = <?= json_encode($courseFacultyIdJs, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        // course_id -> [faculty_id, ...] — a course can now have real
+        // offerings across more than one faculty at once (home faculty
+        // listed first as the preferred default), so this is plural.
+        const courseFacultyIdsMap = <?= json_encode($courseFacultyIdsJs, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const currentSemesterIdByFacultyId = <?= json_encode($currentSemesterIdByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
-        // Semester options depend on the selected course's own faculty, not
-        // one global list — repopulated client-side (no page reload) so
+        // Semester options depend on EVERY faculty the selected course is
+        // actually offered in, not one global list — merged (deduplicated
+        // by semester id) and repopulated client-side (no page reload) so
         // Course/Semester/Shift can all be picked before a single "Load
         // Grid" submit, same cascade pattern as attendance_import.php's
         // own Course -> Semester picker.
         function admasUpdateSemesterOptionsForCourse(courseId, preselectedSemesterId) {
             const select = document.getElementById('semesterSelect');
-            const facultyId = courseFacultyIdMap[courseId];
-            const semesters = (facultyId !== undefined && semestersByFacultyId[facultyId]) || [];
+            const facultyIds = courseFacultyIdsMap[courseId] || [];
+            const seenSemesterIds = new Set();
+            const semesters = [];
+            facultyIds.forEach((fid) => {
+                (semestersByFacultyId[fid] || []).forEach((sem) => {
+                    if (!seenSemesterIds.has(sem.id)) {
+                        seenSemesterIds.add(sem.id);
+                        semesters.push(sem);
+                    }
+                });
+            });
             select.innerHTML = '';
 
             if (semesters.length === 0) {
                 const blank = document.createElement('option');
                 blank.value = '';
-                blank.textContent = courseId ? 'No semesters for this faculty yet' : 'Select course first';
+                blank.textContent = courseId ? 'No semesters for this course yet' : 'Select course first';
                 select.appendChild(blank);
                 return;
             }
@@ -648,7 +721,18 @@ $scopeBanner = match ($role) {
                 select.appendChild(opt);
             });
 
-            const defaultSemesterId = preselectedSemesterId || currentSemesterIdByFacultyId[facultyId];
+            let defaultSemesterId = preselectedSemesterId;
+            if (!defaultSemesterId) {
+                // Prefer the course's own home faculty's current semester
+                // (facultyIds[0]); fall back to any other represented
+                // faculty's current semester otherwise.
+                for (const fid of facultyIds) {
+                    if (currentSemesterIdByFacultyId[fid]) {
+                        defaultSemesterId = currentSemesterIdByFacultyId[fid];
+                        break;
+                    }
+                }
+            }
             if (defaultSemesterId) {
                 select.value = String(defaultSemesterId);
             }

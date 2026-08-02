@@ -7,6 +7,12 @@
  * CLAUDE.md §4). Scoped via lecturers.user_id -> lecturers.id, resolved
  * from current_user()['id'], never trusted from request input (same
  * pattern as attendance.php/reports.php's lecturer branch).
+ *
+ * Faculty/Department shown per row are the OFFERING's own semester's
+ * faculty and roster department (falling back to the course's own catalog
+ * department when no roster department is set) — not necessarily the
+ * course's catalog home, since a lecturer may hold a cross-listed/
+ * guest-faculty offering (see the Multi-Faculty Course Offerings plan).
  */
 declare(strict_types=1);
 
@@ -15,6 +21,12 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 
 require_role(['lecturer']);
+
+const SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
+];
 
 $conn = db();
 $currentUser = current_user();
@@ -50,23 +62,23 @@ $filterSearch = trim((string) ($_GET['search'] ?? ''));
 // Faculty/Department options — only those actually present among this
 // lecturer's own courses (never the whole university's list).
 // ---------------------------------------------------------------------
-// A lecturer's "own courses" means current-offering-only (course_offerings
-// scoped to that course's own faculty's current semester), not the
-// deprecated permanent courses.lecturer_id — same EXISTS shape reused in
-// all three queries below so the option lists and the actual course list
-// can never drift apart on what "my courses" means.
-$currentOfferingExists = "EXISTS (
-    SELECT 1 FROM course_offerings co
-    JOIN semesters se ON se.id = co.semester_id
-    WHERE co.course_id = c.id AND co.lecturer_id = ? AND se.faculty_id = d.faculty_id AND se.is_current = 1
-)";
-
+// A lecturer's "own courses" means current-offering-only (course_offerings,
+// current semester), not the deprecated permanent courses.lecturer_id —
+// no longer requires the offering's semester to belong to the course's own
+// catalog department's faculty, since a lecturer may hold a cross-listed/
+// guest-faculty offering whose semester's faculty differs from the
+// course's home faculty (see the Multi-Faculty Course Offerings plan).
+// Faculty/Department options below reflect the OFFERING's own faculty
+// (se.faculty_id) and roster department (co.roster_department_id, falling
+// back to the course's own department when unset) — the operationally
+// relevant faculty/department for that specific offering, not necessarily
+// the course's catalog home.
 $facultyOptStmt = $conn->prepare(
     "SELECT DISTINCT f.id, f.name
-     FROM courses c
-     JOIN departments d ON d.id = c.department_id
-     JOIN faculties f ON f.id = d.faculty_id
-     WHERE {$currentOfferingExists}
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id
+     JOIN faculties f ON f.id = se.faculty_id
+     WHERE co.lecturer_id = ? AND se.is_current = 1
      ORDER BY f.name"
 );
 $facultyOptStmt->bind_param('i', $lecturerRecordId);
@@ -75,11 +87,14 @@ $facultyOptions = $facultyOptStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $facultyOptStmt->close();
 
 $deptOptStmt = $conn->prepare(
-    "SELECT DISTINCT d.id, d.name, d.faculty_id
-     FROM courses c
+    "SELECT DISTINCT COALESCE(rd.id, d.id) AS id, COALESCE(rd.name, d.name) AS name, se.faculty_id
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id
+     JOIN courses c ON c.id = co.course_id
      JOIN departments d ON d.id = c.department_id
-     WHERE {$currentOfferingExists}
-     ORDER BY d.name"
+     LEFT JOIN departments rd ON rd.id = co.roster_department_id
+     WHERE co.lecturer_id = ? AND se.is_current = 1
+     ORDER BY name"
 );
 $deptOptStmt->bind_param('i', $lecturerRecordId);
 $deptOptStmt->execute();
@@ -105,12 +120,12 @@ $params = [$lecturerRecordId];
 $types = 'i';
 
 if ($filterFacultyId > 0) {
-    $conditions[] = 'd.faculty_id = ?';
+    $conditions[] = 'se.faculty_id = ?';
     $params[] = $filterFacultyId;
     $types .= 'i';
 }
 if ($filterDepartmentId > 0) {
-    $conditions[] = 'c.department_id = ?';
+    $conditions[] = 'COALESCE(rd.id, d.id) = ?';
     $params[] = $filterDepartmentId;
     $types .= 'i';
 }
@@ -130,26 +145,27 @@ if ($filterAcademicYearId > 0) {
 $whereSql = empty($conditions) ? '1 = 1' : implode(' AND ', $conditions);
 
 // One row per (course, current-semester offering) pair — not per course —
-// since a faculty can have multiple concurrent current semesters (see
-// includes/semester_helpers.php's refresh_semester_current_flags()), a
+// since a faculty can have multiple concurrent current semesters (status
+// is set by hand per semester via semesters.php, not mutually exclusive), a
 // lecturer can be teaching the same course under two different current
 // semesters/batches at once, and each needs its own Semester/Pending
 // Xiiso context rather than being collapsed into a single course row.
 $coursesStmt = $conn->prepare(
     "SELECT c.id AS course_id, c.code, c.name, c.credit_hours,
-            d.id AS department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name,
+            COALESCE(rd.id, d.id) AS department_id, se.faculty_id, COALESCE(rd.name, d.name) AS department_name, offf.name AS faculty_name,
             se.id AS semester_id, se.name AS semester_name,
             ay.id AS academic_year_id, ay.label AS academic_year_label,
             co.shift AS offering_shift,
             (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
      FROM courses c
      JOIN departments d ON d.id = c.department_id
-     JOIN faculties f ON f.id = d.faculty_id
      JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
-     JOIN semesters se ON se.id = co.semester_id AND se.faculty_id = d.faculty_id AND se.is_current = 1
+     JOIN semesters se ON se.id = co.semester_id AND se.is_current = 1
+     JOIN faculties offf ON offf.id = se.faculty_id
+     LEFT JOIN departments rd ON rd.id = co.roster_department_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
      WHERE {$whereSql}
-     ORDER BY f.name, d.name, c.code, se.start_date"
+     ORDER BY offf.name, department_name, c.code, se.start_date"
 );
 $coursesStmt->bind_param($types, ...$params);
 $coursesStmt->execute();
@@ -300,8 +316,11 @@ foreach ($academicYears as $ay) {
                         <thead>
                             <tr>
                                 <th>Course</th>
-                                <th>Department</th>
                                 <th>Semester</th>
+                                <th>Faculty</th>
+                                <th>Department</th>
+                                <th>Academic Year</th>
+                                <th>Shift</th>
                                 <th>Students</th>
                                 <th>Sessions</th>
                                 <th>Pending Xiiso</th>
@@ -311,7 +330,7 @@ foreach ($academicYears as $ay) {
                         <tbody>
                             <?php if (empty($courses)): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-4">No courses match the current filters.</td>
+                                    <td colspan="10" class="text-center text-muted py-4">No courses match the current filters.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courses as $c): ?>
@@ -337,12 +356,17 @@ foreach ($academicYears as $ay) {
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);">
                                             <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
-                                            <div class="text-muted small"><?= htmlspecialchars($c['faculty_name']) ?></div>
                                         </td>
+                                        <td><?= htmlspecialchars($c['semester_name']) ?></td>
+                                        <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
+                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
                                         <td>
-                                            <?= htmlspecialchars($c['semester_name']) ?>
-                                            <div class="text-muted small"><?= htmlspecialchars($c['academic_year_label']) ?></div>
+                                            <?php if ($c['offering_shift'] !== null && isset(SHIFT_LABELS[$c['offering_shift']])): ?>
+                                                <?= htmlspecialchars(SHIFT_LABELS[$c['offering_shift']]) ?>
+                                            <?php else: ?>
+                                                <span class="text-muted">—</span>
+                                            <?php endif; ?>
                                         </td>
                                         <td><?= number_format((int) $c['student_count']) ?></td>
                                         <td>

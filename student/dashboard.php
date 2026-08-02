@@ -29,10 +29,12 @@ if ($settingsResult) {
 $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 
 // ---------------------------------------------------------------------
-// Own students.id (never trusted from input)
+// Own students.id + department_id + shift (never trusted from input) —
+// department_id/shift are needed below for the same course-discovery
+// logic student/courses.php already uses.
 // ---------------------------------------------------------------------
 $ownStmt = $conn->prepare(
-    'SELECT s.id, s.full_name, s.faculty_id, f.name AS faculty_name, d.name AS department_name
+    'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, f.name AS faculty_name, d.name AS department_name
      FROM students s
      JOIN faculties f ON f.id = s.faculty_id
      JOIN departments d ON d.id = s.department_id
@@ -43,29 +45,101 @@ $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
 $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
+$ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
+$ownShift = (string) ($ownRow['shift'] ?? '');
 
-// "Current academic year" is resolved from this student's own faculty's
-// current semester, not a single global settings value.
+// Resolved from this student's own faculty's current semester, not a
+// single global settings value.
 $ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
-$currentAcademicYearId = (int) ($ownCurrentSemester['academic_year_id'] ?? 0);
+$currentSemesterId = (int) ($ownCurrentSemester['id'] ?? 0);
 
 // ---------------------------------------------------------------------
-// My Course Attendance — per course, for the current academic year
+// Course discovery — same three-source logic as student/courses.php,
+// kept in sync deliberately: course_enrollments first; department
+// fallback if that's empty; plus a third, additive source for a
+// cross-listed/guest-faculty offering whose roster_department_id names
+// this student's own department (see the Multi-Faculty Course Offerings
+// work). Previously this dashboard only ever looked at real `attendance`
+// rows directly, which meant a student's own current-semester courses
+// were invisible here until someone had actually marked at least one
+// session — correct data, but a confusing empty dashboard for a course
+// that's really just "not marked yet".
+// ---------------------------------------------------------------------
+$courseIds = [];
+if ($ownStudentId > 0) {
+    $enrollStmt = $conn->prepare('SELECT course_id FROM course_enrollments WHERE student_id = ?');
+    $enrollStmt->bind_param('i', $ownStudentId);
+    $enrollStmt->execute();
+    $enrollRes = $enrollStmt->get_result();
+    while ($row = $enrollRes->fetch_assoc()) {
+        $courseIds[] = (int) $row['course_id'];
+    }
+    $enrollStmt->close();
+
+    if (empty($courseIds) && $ownDepartmentId > 0) {
+        $deptCourseStmt = $conn->prepare('SELECT id FROM courses WHERE department_id = ?');
+        $deptCourseStmt->bind_param('i', $ownDepartmentId);
+        $deptCourseStmt->execute();
+        $deptCourseRes = $deptCourseStmt->get_result();
+        while ($row = $deptCourseRes->fetch_assoc()) {
+            $courseIds[] = (int) $row['id'];
+        }
+        $deptCourseStmt->close();
+    }
+
+    if ($ownDepartmentId > 0) {
+        $guestCourseStmt = $conn->prepare('SELECT DISTINCT course_id FROM course_offerings WHERE roster_department_id = ?');
+        $guestCourseStmt->bind_param('i', $ownDepartmentId);
+        $guestCourseStmt->execute();
+        $guestCourseRes = $guestCourseStmt->get_result();
+        while ($row = $guestCourseRes->fetch_assoc()) {
+            $courseIds[] = (int) $row['course_id'];
+        }
+        $guestCourseStmt->close();
+        $courseIds = array_values(array_unique($courseIds));
+    }
+}
+
+// ---------------------------------------------------------------------
+// My Course Attendance — every candidate course that has real evidence of
+// belonging to the current SEMESTER specifically (not just the current
+// academic year — a faculty's semesters share one academic_year_id, e.g.
+// both "Semester 8" and "Semester 9" can be "2023/2024" at once, so
+// filtering by academic_year_id alone would mix an already-completed
+// semester in with the current one): either a course_offerings row for
+// (course, current semester, this student's own shift or 'any'), or a
+// real attendance record — same "real evidence" condition and shift
+// correlated-subquery precedence as student/courses.php, so the two pages
+// can never drift on what counts as "this student's course, this
+// semester". A course can now show with zero marks yet ("No records
+// yet") when only the offering exists — that's new, and deliberate: the
+// student can see their real current course load before anyone has
+// marked a single session.
 // ---------------------------------------------------------------------
 $courseAttendance = [];
-if ($ownStudentId > 0 && $currentAcademicYearId > 0) {
-    $stmt = $conn->prepare(
-        "SELECT c.id AS course_id, c.code, c.name,
-                SUM(a.status = 'present') AS present_count,
-                SUM(a.status = 'absent') AS absent_count,
-                COUNT(*) AS total_marks
-         FROM attendance a
-         JOIN courses c ON c.id = a.course_id
-         WHERE a.student_id = ? AND a.academic_year_id = ?
-         GROUP BY c.id, c.code, c.name
-         ORDER BY c.code"
-    );
-    $stmt->bind_param('ii', $ownStudentId, $currentAcademicYearId);
+if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
+    $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
+    $sql = "SELECT c.id AS course_id, c.code, c.name,
+                   SUM(a.status = 'present') AS present_count,
+                   SUM(a.status = 'absent') AS absent_count,
+                   COUNT(a.id) AS total_marks
+            FROM courses c
+            LEFT JOIN course_offerings co ON co.id = (
+                SELECT co2.id FROM course_offerings co2
+                WHERE co2.course_id = c.id AND co2.semester_id = ? AND (co2.shift = ? OR co2.shift = 'any')
+                ORDER BY (co2.shift = ?) DESC
+                LIMIT 1
+            )
+            LEFT JOIN attendance a ON a.course_id = c.id AND a.student_id = ?
+                AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ?)
+            WHERE c.id IN ({$placeholders})
+                AND (co.id IS NOT NULL OR a.id IS NOT NULL)
+            GROUP BY c.id, c.code, c.name
+            ORDER BY c.code";
+    $stmt = $conn->prepare($sql);
+    $types = 'issii' . str_repeat('i', count($courseIds));
+    $params = array_merge([$currentSemesterId, $ownShift, $ownShift, $ownStudentId, $currentSemesterId], $courseIds);
+    $stmt->bind_param($types, ...$params);
     $stmt->execute();
     $courseAttendance = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
@@ -80,9 +154,14 @@ $coursesBelowThreshold = 0;
 foreach ($courseAttendance as $row) {
     $totalMarksAll += (int) $row['total_marks'];
     $totalPresentAll += (int) $row['present_count'];
-    $pct = (int) $row['total_marks'] > 0 ? 100 * (int) $row['present_count'] / (int) $row['total_marks'] : 0;
-    if ($pct < $minAttendancePct) {
-        $coursesBelowThreshold++;
+    // Only judge a course against the threshold once it has real marks —
+    // a course with zero attendance recorded yet isn't "below threshold",
+    // it's simply not marked yet.
+    if ((int) $row['total_marks'] > 0) {
+        $pct = 100 * (int) $row['present_count'] / (int) $row['total_marks'];
+        if ($pct < $minAttendancePct) {
+            $coursesBelowThreshold++;
+        }
     }
 }
 $myAttendancePct = $totalMarksAll > 0 ? round(100 * $totalPresentAll / $totalMarksAll, 1) : null;
@@ -186,19 +265,25 @@ if ($ownStudentId > 0) {
                         <tbody>
                             <?php if (empty($courseAttendance)): ?>
                                 <tr>
-                                    <td colspan="4" class="text-center text-muted py-4">No attendance records exist for you yet.</td>
+                                    <td colspan="4" class="text-center text-muted py-4">No courses recorded for this semester yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courseAttendance as $row): ?>
                                     <?php
                                     $totalMarks = (int) $row['total_marks'];
-                                    $pct = $totalMarks > 0 ? round(100 * (int) $row['present_count'] / $totalMarks, 1) : 0.0;
+                                    $pct = $totalMarks > 0 ? round(100 * (int) $row['present_count'] / $totalMarks, 1) : null;
                                     ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
                                         <td><?= (int) $row['present_count'] ?></td>
                                         <td><?= (int) $row['absent_count'] ?></td>
-                                        <td><span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= number_format($pct, 1) ?>%</span></td>
+                                        <td>
+                                            <?php if ($pct === null): ?>
+                                                <span class="text-muted">No records yet</span>
+                                            <?php else: ?>
+                                                <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= number_format($pct, 1) ?>%</span>
+                                            <?php endif; ?>
+                                        </td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php endif; ?>

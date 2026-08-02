@@ -21,6 +21,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
+require_once __DIR__ . '/includes/attendance_helpers.php';
 
 require_role(['system_admin', 'dean', 'head_academic']);
 
@@ -98,6 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'assign_course') {
         $courseId = (int) ($_POST['course_id'] ?? 0);
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        $shift = (string) ($_POST['shift'] ?? '');
         $startDateRaw = trim((string) ($_POST['start_date'] ?? ''));
         $endDateRaw = trim((string) ($_POST['end_date'] ?? ''));
 
@@ -114,6 +116,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Please select a valid course.';
         } elseif (!role_may_edit_faculty($role, $deanFacultyId, (int) $courseRow['faculty_id'])) {
             $validationError = 'You can only assign courses within your own faculty.';
+        } elseif (!array_key_exists($shift, OFFERING_SHIFT_LABELS)) {
+            $validationError = 'Please select a valid shift.';
         }
 
         $semRow = null;
@@ -151,14 +155,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($validationError === '') {
             $upsertStmt = $conn->prepare(
-                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, start_date, end_date) VALUES (?, ?, ?, ?, ?)
+                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), start_date = VALUES(start_date), end_date = VALUES(end_date)'
             );
-            $upsertStmt->bind_param('iiiss', $courseId, $semesterId, $lecturerId, $startDate, $endDate);
+            $upsertStmt->bind_param('iiisss', $courseId, $semesterId, $lecturerId, $shift, $startDate, $endDate);
             $upsertStmt->execute();
             $upsertStmt->close();
 
-            $_SESSION['flash_success'] = $lecturer['full_name'] . ' assigned to "' . $semRow['name'] . '" successfully.';
+            $_SESSION['flash_success'] = $lecturer['full_name'] . ' assigned to "' . $semRow['name'] . '" (' . OFFERING_SHIFT_LABELS[$shift] . ') successfully.';
         } else {
             $_SESSION['flash_error'] = $validationError;
         }
@@ -198,7 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // this lecturer, any faculty, most recent semester first.
 // ---------------------------------------------------------------------
 $teachingStmt = $conn->prepare(
-    'SELECT co.id AS offering_id, co.start_date, co.end_date,
+    'SELECT co.id AS offering_id, co.start_date, co.end_date, co.shift,
             c.code, c.name AS course_name, d.faculty_id,
             se.name AS semester_name, se.is_current, f.name AS faculty_name, ay.label AS academic_year_label
      FROM course_offerings co
@@ -208,7 +212,7 @@ $teachingStmt = $conn->prepare(
      JOIN semesters se ON se.id = co.semester_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
      WHERE co.lecturer_id = ?
-     ORDER BY se.start_date DESC'
+     ORDER BY se.start_date DESC, co.shift'
 );
 $teachingStmt->bind_param('i', $lecturerId);
 $teachingStmt->execute();
@@ -312,6 +316,7 @@ foreach ($semesters as $sem) {
                                     <tr>
                                         <th>Course</th>
                                         <th>Semester</th>
+                                        <th>Shift</th>
                                         <th>Faculty</th>
                                         <th>Academic Year</th>
                                         <th>Teaching Period</th>
@@ -321,7 +326,7 @@ foreach ($semesters as $sem) {
                                 <tbody>
                                     <?php if (empty($teaching)): ?>
                                         <tr>
-                                            <td colspan="6" class="text-center text-muted py-4">Not assigned to any course yet.</td>
+                                            <td colspan="7" class="text-center text-muted py-4">Not assigned to any course yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($teaching as $t): ?>
@@ -333,6 +338,7 @@ foreach ($semesters as $sem) {
                                                         <span class="badge-pill badge-active">Current</span>
                                                     <?php endif; ?>
                                                 </td>
+                                                <td><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$t['shift']] ?? $t['shift']) ?></td>
                                                 <td><?= htmlspecialchars($t['faculty_name']) ?></td>
                                                 <td><?= htmlspecialchars($t['academic_year_label']) ?></td>
                                                 <td>
@@ -411,6 +417,15 @@ foreach ($semesters as $sem) {
                                 <label class="form-label small mb-1">Semester</label>
                                 <select class="form-select form-select-sm" name="semester_id" id="assignSemesterSelect">
                                     <option value="">Select faculty first</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label small mb-1">Shift</label>
+                                <select class="form-select form-select-sm" name="shift" required>
+                                    <?php foreach (OFFERING_SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
+                                        <option value="<?= htmlspecialchars($shiftValue) ?>"><?= htmlspecialchars($shiftLabel) ?></option>
+                                    <?php endforeach; ?>
                                 </select>
                             </div>
 

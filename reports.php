@@ -18,6 +18,7 @@ require_role(['system_admin', 'head_academic', 'dean', 'registration', 'lecturer
 use Dompdf\Dompdf;
 use Dompdf\Options as DompdfOptions;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 
@@ -441,12 +442,20 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
     table { width: 100%; border-collapse: collapse; }
     th { background: #0b1f3a; color: #fff; text-transform: uppercase; font-size: 8px; padding: 6px; text-align: left; }
     td { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; font-size: 10px; }
+    /* Same sky-blue column-group dividers/summary accent as the on-screen
+       Xiiso Grid (build_xiiso_chunks()/col-group-end/col-summary in
+       app.css) — only $columns built by build_xiiso_grid_report() ever set
+       group_end/summary/header_accent, so this is a no-op for the other 3
+       report types. */
+    th.col-group-end, td.col-group-end { border-right: 3px solid #0ea5e9; }
+    th.col-summary { background: #0ea5e9; color: #fff; }
+    td.col-summary { background: rgba(14, 165, 233, 0.15); }
 </style>
 </head>
 <body>
     <div class="header">
         <?php if ($logoBase64 !== ''): ?>
-            <img src="data:image/jpeg;base64,<?= $logoBase64 ?>">
+            <img src="data:image/jpeg;base64,<?= $logoBase64 ?>" width="56" height="56">
         <?php endif; ?>
         <div class="header-text">
             <div class="uni-name"><?= htmlspecialchars($universityName) ?></div>
@@ -462,7 +471,13 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
         <thead>
             <tr>
                 <?php foreach ($columns as $col): ?>
-                    <th><?= htmlspecialchars($col['label']) ?></th>
+                    <?php
+                    $thClasses = trim(
+                        (!empty($col['group_end']) ? 'col-group-end ' : '')
+                        . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary' : '')
+                    );
+                    ?>
+                    <th class="<?= $thClasses ?>"><?= htmlspecialchars($col['label']) ?></th>
                 <?php endforeach; ?>
             </tr>
         </thead>
@@ -473,7 +488,13 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
                 <?php foreach ($rows as $r): ?>
                     <tr>
                         <?php foreach ($columns as $col): ?>
-                            <td><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
+                            <?php
+                            $tdClasses = trim(
+                                (!empty($col['group_end']) ? 'col-group-end ' : '')
+                                . (!empty($col['summary']) ? 'col-summary' : '')
+                            );
+                            ?>
+                            <td class="<?= $tdClasses ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
                         <?php endforeach; ?>
                     </tr>
                 <?php endforeach; ?>
@@ -592,15 +613,23 @@ if (in_array('xiiso_grid', $allowedReportTypes, true)) {
         );
         $stmt->bind_param('i', $lecturerRecordId);
     } elseif ($role === 'dean') {
+        // Own faculty's own-catalog courses, PLUS any course cross-listed
+        // INTO this faculty from elsewhere (see the Multi-Faculty Course
+        // Offerings plan) — same widening as attendance.php's course list.
         $stmt = $conn->prepare(
-            "SELECT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
+            "SELECT DISTINCT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
              FROM courses c
              JOIN departments d ON d.id = c.department_id
              JOIN faculties f ON f.id = d.faculty_id
              WHERE d.faculty_id = ?
+                OR EXISTS (
+                    SELECT 1 FROM course_offerings co
+                    JOIN semesters se ON se.id = co.semester_id
+                    WHERE co.course_id = c.id AND se.faculty_id = ?
+                )
              ORDER BY d.name, c.code"
         );
-        $stmt->bind_param('i', $deanFacultyId);
+        $stmt->bind_param('ii', $deanFacultyId, $deanFacultyId);
     } else {
         $stmt = $conn->prepare(
             "SELECT c.id, c.code, c.name, c.department_id, d.faculty_id, d.name AS department_name, f.name AS faculty_name
@@ -640,22 +669,48 @@ foreach ($xiisoSemesters as $s) {
 
 $filterXiisoCourseId = isset($_GET['xiiso_course_id']) ? (int) $_GET['xiiso_course_id'] : 0;
 
-// Default the semester dropdown to the selected course's own faculty's
-// current semester — there's no single "the" current semester to default
-// to before a course is chosen, so no default applies yet in that case.
-$defaultXiisoSemesterId = 0;
+// Every faculty the selected course actually has a real course_offerings
+// row in (home faculty first, as the preferred default) — a course can now
+// be offered across more than one faculty at once, so there's no single
+// scalar "the course's faculty" to default/validate against.
+$xiisoCourseFacultyIds = [];
 if (array_key_exists($filterXiisoCourseId, $xiisoCourseById)) {
-    $defaultXiisoSemesterId = (int) (get_current_semester($conn, (int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id'])['id'] ?? 0);
+    $offFacStmt = $conn->prepare(
+        'SELECT DISTINCT se.faculty_id FROM course_offerings co JOIN semesters se ON se.id = co.semester_id WHERE co.course_id = ?'
+    );
+    $offFacStmt->bind_param('i', $filterXiisoCourseId);
+    $offFacStmt->execute();
+    $offFacIds = array_map(static fn ($r) => (int) $r['faculty_id'], $offFacStmt->get_result()->fetch_all(MYSQLI_ASSOC));
+    $offFacStmt->close();
+    $xiisoCourseFacultyIds = array_values(array_unique(array_merge(
+        [(int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id']],
+        $offFacIds
+    )));
+}
+
+// Default the semester dropdown to the selected course's own home
+// faculty's current semester, falling back to any other faculty this
+// course is actually offered in — there's no single "the" current
+// semester to default to before a course is chosen, so no default
+// applies yet in that case.
+$defaultXiisoSemesterId = 0;
+foreach ($xiisoCourseFacultyIds as $fid) {
+    $defaultXiisoSemesterId = (int) (get_current_semester($conn, $fid)['id'] ?? 0);
+    if ($defaultXiisoSemesterId > 0) {
+        break;
+    }
 }
 $filterXiisoSemesterId = isset($_GET['xiiso_semester_id']) ? (int) $_GET['xiiso_semester_id'] : $defaultXiisoSemesterId;
 
-// Guard against a course + semester pair from different faculties (e.g. a
-// tampered query string) — silently building a cross-faculty grid would be
-// wrong, so treat the semester choice as unset instead.
+// Guard against a course + semester pair with no real offering (e.g. a
+// tampered query string) — not "different faculties," since a course can
+// now legitimately have offerings across more than one faculty at once;
+// silently building a grid for a pairing with no real offering would still
+// be wrong, so treat the semester choice as unset instead.
 if (
     array_key_exists($filterXiisoCourseId, $xiisoCourseById)
-    && array_key_exists($filterXiisoSemesterId, $xiisoSemesterById)
-    && (int) $xiisoSemesterById[$filterXiisoSemesterId]['faculty_id'] !== (int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id']
+    && $filterXiisoSemesterId > 0
+    && !course_offering_exists($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
 ) {
     $filterXiisoSemesterId = 0;
 }
@@ -697,8 +752,25 @@ $deanDepartments = $role === 'dean'
 $reportTitle = REPORT_TYPE_LABELS[$filterReportType] ?? 'Report';
 
 if ($filterReportType === 'xiiso_grid') {
+    // Same offering lookup the on-screen breadcrumb already uses
+    // (render_offering_summary()/get_offering_summary()) — surfaced here too
+    // so the exported file carries the same Faculty/Department/Academic
+    // Year/Lecturer context as the screen, not just Course + Semester.
+    $xiisoOfferings = (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
+        ? get_offering_summary($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
+        : [];
+    $xiisoLecturerLine = empty($xiisoOfferings)
+        ? 'Unassigned'
+        : implode(', ', array_map(
+            static fn ($o) => ($o['shift'] === 'any' ? '' : (OFFERING_SHIFT_LABELS[$o['shift']] ?? $o['shift']) . ': ') . ($o['lecturer_name'] ?: 'Unassigned'),
+            $xiisoOfferings
+        ));
     $reportMetaLine = 'Course: ' . ($xiisoCourseById[$filterXiisoCourseId]['code'] ?? '') . ' — ' . ($xiisoCourseById[$filterXiisoCourseId]['name'] ?? '')
-        . '   |   Semester: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? '');
+        . '   |   Department: ' . ($xiisoCourseById[$filterXiisoCourseId]['department_name'] ?? '')
+        . '   |   Faculty: ' . ($xiisoCourseById[$filterXiisoCourseId]['faculty_name'] ?? '')
+        . '   |   Semester: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? '')
+        . '   |   Academic Year: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? '')
+        . '   |   Lecturer: ' . $xiisoLecturerLine;
 } else {
     $reportMetaLine = 'Period: ' . $filterDateFrom . ' to ' . $filterDateTo;
 }
@@ -763,6 +835,30 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
                 $colLetter++;
             }
             $rowIndex++;
+        }
+        $lastDataRow = $rowIndex - 1;
+
+        // Same sky-blue column-group dividers/summary accent as the
+        // on-screen Xiiso Grid and the PDF export above — only $reportColumns
+        // built by build_xiiso_grid_report() ever set
+        // group_end/summary/header_accent, so this is a no-op for the other
+        // 3 report types.
+        if ($lastDataRow >= $headerRow) {
+            $colLetter = 'A';
+            foreach ($reportColumns as $col) {
+                if (!empty($col['summary']) || !empty($col['header_accent'])) {
+                    $sheet->getStyle($colLetter . $headerRow)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('0EA5E9');
+                }
+                if (!empty($col['summary']) && $lastDataRow > $headerRow) {
+                    $sheet->getStyle($colLetter . ($headerRow + 1) . ':' . $colLetter . $lastDataRow)
+                        ->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('D6F0FC');
+                }
+                if (!empty($col['group_end'])) {
+                    $sheet->getStyle($colLetter . $headerRow . ':' . $colLetter . $lastDataRow)
+                        ->getBorders()->getRight()->setBorderStyle(Border::BORDER_MEDIUM)->getColor()->setRGB('0EA5E9');
+                }
+                $colLetter++;
+            }
         }
 
         foreach ($columnLetters as $cl) {

@@ -31,28 +31,14 @@ function session_label(array $session): string
 }
 
 /**
- * Recompute every semester's is_current flag from its own start_date/
- * end_date against today — a semester is "current" for as long as today
- * falls within its own date range, full stop. Unlike a manually-toggled
- * flag, this lets any number of semesters be current at once (across
- * different faculties, or multiple concurrent batches within the same
- * faculty) with no admin action required and no risk of one semester
- * silently switching another off. Called once per request from
- * includes/auth.php, so every page always sees fresh flags before it runs
- * any of its own is_current-scoped queries.
- */
-function refresh_semester_current_flags(mysqli $conn): void
-{
-    $conn->query('UPDATE semesters SET is_current = (CURDATE() BETWEEN start_date AND end_date)');
-}
-
-/**
- * The semester currently marked is_current = 1 for one specific faculty, or
- * null if that faculty has none set (or $facultyId is invalid). If more than
- * one of that faculty's semesters is concurrently current (multiple active
- * batches), the most recently started one is returned — callers that need
- * a single "your current semester" for display, not every caller needing
- * to know about every concurrently-running one.
+ * The semester currently marked status = 'current' for one specific
+ * faculty, or null if that faculty has none set (or $facultyId is
+ * invalid). "Current" is set by hand via semesters.php's Start/End/Waiting
+ * buttons, not derived from calendar dates. If more than one of that
+ * faculty's semesters is concurrently current (multiple active batches),
+ * the most recently created one is returned — callers that need a single
+ * "your current semester" for display, not every caller needing to know
+ * about every concurrently-running one.
  */
 function get_current_semester(mysqli $conn, int $facultyId): ?array
 {
@@ -61,12 +47,12 @@ function get_current_semester(mysqli $conn, int $facultyId): ?array
     }
 
     $stmt = $conn->prepare(
-        "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current,
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.name, s.start_date, s.end_date, s.is_current, s.status,
                 ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
-         WHERE s.is_current = 1 AND s.faculty_id = ?
-         ORDER BY s.start_date DESC
+         WHERE s.status = 'current' AND s.faculty_id = ?
+         ORDER BY s.id DESC
          LIMIT 1"
     );
     $stmt->bind_param('i', $facultyId);
@@ -78,57 +64,32 @@ function get_current_semester(mysqli $conn, int $facultyId): ?array
 }
 
 /**
- * The next sequential semester number for a faculty, derived from the
- * digits in its existing semester names (e.g. "Semester 3" -> 3), not a
- * stored counter — so it stays correct even if a semester is later renamed
- * or deleted. Returns 1 if the faculty has no semesters yet.
+ * The Semester dropdown/box options for a given faculty — "Semester 1"
+ * through "Semester {total_semesters}" — generated fresh rather than
+ * stored, so raising a faculty's Total Semesters later immediately makes
+ * more options available with no data migration needed. Shared by
+ * semesters.php (Create/Edit Semester dropdown) and student/courses.php
+ * (the per-faculty Semester box picker).
+ *
+ * @return array<int, string>
  */
-function next_semester_number_for_faculty(mysqli $conn, int $facultyId): int
+function semester_name_options_for_faculty(int $totalSemesters): array
 {
-    $stmt = $conn->prepare('SELECT name FROM semesters WHERE faculty_id = ?');
-    $stmt->bind_param('i', $facultyId);
-    $stmt->execute();
-    $names = array_column($stmt->get_result()->fetch_all(MYSQLI_ASSOC), 'name');
-    $stmt->close();
-
-    $max = 0;
-    foreach ($names as $name) {
-        $digits = preg_replace('/\D/', '', (string) $name);
-        if ($digits !== '') {
-            $max = max($max, (int) $digits);
-        }
+    $options = [];
+    for ($n = 1; $n <= $totalSemesters; $n++) {
+        $options[] = 'Semester ' . $n;
     }
 
-    return $max + 1;
-}
-
-/**
- * The day after a faculty's most recently ended semester, i.e. where its
- * next semester should start — or null if that faculty has no semesters
- * yet (the very first one needs an admin-provided start date).
- */
-function next_semester_start_date_for_faculty(mysqli $conn, int $facultyId): ?string
-{
-    $stmt = $conn->prepare('SELECT MAX(end_date) AS last_end FROM semesters WHERE faculty_id = ?');
-    $stmt->bind_param('i', $facultyId);
-    $stmt->execute();
-    $lastEnd = $stmt->get_result()->fetch_assoc()['last_end'] ?? null;
-    $stmt->close();
-
-    if ($lastEnd === null) {
-        return null;
-    }
-
-    $next = new DateTime((string) $lastEnd);
-    $next->modify('+1 day');
-
-    return $next->format('Y-m-d');
+    return $options;
 }
 
 /**
  * A semester's end date, fixed at 3 months after its start date (every
  * semester at this university is 3 months / 12 Xiiso long, regardless of
- * faculty — only how many semesters run per year differs).
+ * faculty — only how many semesters run per year differs). Used to
+ * auto-fill End Date + all 12 Xiiso dates from a manually-entered Start
+ * Date on semesters.php, instead of requiring every date to be typed in
+ * one by one.
  */
 function semester_end_date_from_start(string $startDate): string
 {

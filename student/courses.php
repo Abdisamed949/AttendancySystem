@@ -10,7 +10,11 @@
  * record); if this student has zero enrollment rows, falls back to every
  * course in the student's own department — the same
  * enrolled-or-department-fallback assumption attendance.php's roster query
- * already makes in the opposite direction (course -> students).
+ * already makes in the opposite direction (course -> students). A third,
+ * additive source also surfaces any course cross-listed into this
+ * student's own department via a course_offerings row's
+ * roster_department_id (see the Multi-Faculty Course Offerings plan) —
+ * the course's own catalog home may be a different faculty entirely.
  */
 declare(strict_types=1);
 
@@ -39,62 +43,80 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // ---------------------------------------------------------------------
 // Own students.id + department_id + faculty_id (never trusted from input)
 // ---------------------------------------------------------------------
-$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id, shift FROM students WHERE user_id = ?');
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
 $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
 $ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
+$ownShift = (string) ($ownRow['shift'] ?? '');
 
-// "Current semester" is resolved from this student's own faculty, not a
-// single global settings value — used only as the dropdown's default pick.
-$ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
+$ownFacultyId = (int) ($ownRow['faculty_id'] ?? 0);
 
 // ---------------------------------------------------------------------
-// Semester picker — every semester this student has attendance history in
-// (via attendance -> sessions -> semesters), most recent first, so a
-// senior can page back through everything they've taken so far, not just
-// the current one. Falls back to just their own current semester when
-// there's no attendance history yet (e.g. a brand-new student), so the
-// dropdown is never empty.
+// Semester picker — one box per "Semester 1".."Semester {total_semesters}"
+// for this student's own faculty (the same numbering
+// semesters.php's Create Semester dropdown uses), not just the semesters
+// this student happens to already have attendance rows in. A semester
+// number with no real `semesters` row yet renders as a disabled box
+// ("not created yet") instead of being silently omitted, so the student
+// can see their whole program's shape even before every semester has been
+// entered into the system.
 // ---------------------------------------------------------------------
-$semesterOptions = [];
-if ($ownStudentId > 0) {
-    $stmt = $conn->prepare(
-        "SELECT DISTINCT se.id, se.name, se.start_date, se.is_current
-         FROM attendance a
-         JOIN sessions sess ON sess.id = a.session_id
-         JOIN semesters se ON se.id = sess.semester_id
-         WHERE a.student_id = ?
-         ORDER BY se.start_date DESC"
-    );
-    $stmt->bind_param('i', $ownStudentId);
-    $stmt->execute();
-    $semesterOptions = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $stmt->close();
+$facultyTotalSemesters = 0;
+if ($ownFacultyId > 0) {
+    $facStmt = $conn->prepare('SELECT total_semesters FROM faculties WHERE id = ?');
+    $facStmt->bind_param('i', $ownFacultyId);
+    $facStmt->execute();
+    $facultyTotalSemesters = (int) ($facStmt->get_result()->fetch_assoc()['total_semesters'] ?? 0);
+    $facStmt->close();
 }
-if (empty($semesterOptions) && $ownCurrentSemester !== null) {
-    $semesterOptions[] = [
-        'id' => (int) $ownCurrentSemester['id'],
-        'name' => $ownCurrentSemester['name'],
-        'start_date' => $ownCurrentSemester['start_date'],
-        'is_current' => 1,
+
+// Real semester rows for this faculty, keyed by name — if a faculty ever
+// has two rows with the same name (different academic years), the most
+// recently created one wins, same tie-break as get_current_semester().
+$semestersByName = [];
+if ($ownFacultyId > 0) {
+    $semStmt = $conn->prepare('SELECT id, name, status FROM semesters WHERE faculty_id = ? ORDER BY id ASC');
+    $semStmt->bind_param('i', $ownFacultyId);
+    $semStmt->execute();
+    $semRes = $semStmt->get_result();
+    while ($row = $semRes->fetch_assoc()) {
+        $semestersByName[$row['name']] = $row;
+    }
+    $semStmt->close();
+}
+
+$semesterBoxes = [];
+foreach (semester_name_options_for_faculty($facultyTotalSemesters) as $semName) {
+    $match = $semestersByName[$semName] ?? null;
+    $semesterBoxes[] = [
+        'name' => $semName,
+        'semester_id' => $match !== null ? (int) $match['id'] : 0,
+        'status' => $match['status'] ?? null,
     ];
 }
-$semesterOptionIds = array_map(static fn ($s) => (int) $s['id'], $semesterOptions);
 
 $filterSemesterId = (int) ($_GET['semester_id'] ?? 0);
-if (!in_array($filterSemesterId, $semesterOptionIds, true)) {
+$createdSemesterIds = array_filter(array_column($semesterBoxes, 'semester_id'));
+if (!in_array($filterSemesterId, $createdSemesterIds, true)) {
     $filterSemesterId = 0;
-    foreach ($semesterOptions as $s) {
-        if ((int) $s['is_current'] === 1) {
-            $filterSemesterId = (int) $s['id'];
+    foreach ($semesterBoxes as $box) {
+        if ($box['semester_id'] > 0 && $box['status'] === 'current') {
+            $filterSemesterId = $box['semester_id'];
             break;
         }
     }
-    if ($filterSemesterId === 0 && !empty($semesterOptions)) {
-        $filterSemesterId = (int) $semesterOptions[0]['id'];
+    if ($filterSemesterId === 0) {
+        // No current semester created for this faculty yet — default to
+        // the highest-numbered semester that actually exists.
+        foreach (array_reverse($semesterBoxes) as $box) {
+            if ($box['semester_id'] > 0) {
+                $filterSemesterId = $box['semester_id'];
+                break;
+            }
+        }
     }
 }
 
@@ -130,6 +152,28 @@ if ($ownStudentId > 0) {
         $deptCourseStmt->close();
         $discoveryMethod = 'department_fallback';
     }
+
+    // Additive third source: a cross-listed/guest-faculty offering whose
+    // roster_department_id explicitly names this student's own department
+    // as its roster (see the Multi-Faculty Course Offerings plan) — the
+    // course's own catalog home may be a completely different faculty, so
+    // neither of the two paths above would ever surface it. Merged in
+    // regardless of which path above ran, since a student can be a
+    // genuine course_enrollments/department-fallback member of some
+    // courses AND separately in a guest offering's roster for another.
+    if ($ownDepartmentId > 0) {
+        $guestCourseStmt = $conn->prepare(
+            'SELECT DISTINCT course_id FROM course_offerings WHERE roster_department_id = ?'
+        );
+        $guestCourseStmt->bind_param('i', $ownDepartmentId);
+        $guestCourseStmt->execute();
+        $guestCourseRes = $guestCourseStmt->get_result();
+        while ($row = $guestCourseRes->fetch_assoc()) {
+            $courseIds[] = (int) $row['course_id'];
+        }
+        $guestCourseStmt->close();
+        $courseIds = array_values(array_unique($courseIds));
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -144,20 +188,50 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
     // Lecturer shown is whoever held this course's offering for the
     // SELECTED semester (not the deprecated permanent courses.lecturer_id)
     // — "Unassigned" if there's no offering for that pair.
+    //
+    // course_enrollments has no semester_id of its own — it just means
+    // "this student takes this course at all", not "in this specific
+    // semester" — so $courseIds alone isn't enough to decide what belongs
+    // under a given semester box. The extra WHERE clause below only keeps
+    // a course here if there's real evidence it belongs to THIS semester:
+    // either a course_offerings row for (course, semester), or an actual
+    // attendance record. A course the student takes generally but with
+    // neither for this particular semester is correctly left off this
+    // semester's list instead of showing as a bare "Unassigned / No
+    // records yet" row that doesn't actually belong here.
+    //
+    // The course_offerings JOIN is also narrowed to this student's own
+    // shift (or an 'any'-shift offering, which applies to every shift) —
+    // a course can now have a separate offering per shift within the same
+    // semester, so without this the join would match every shift's row at
+    // once, showing the wrong lecturer and (since attendance is joined
+    // independently of co) double-counting this student's attendance once
+    // per matching offering row. A specific-shift row and an 'any' row can
+    // legitimately coexist for the same course+semester (e.g. an old
+    // catch-all offering left in place after a specific shift was added
+    // later) — the correlated subquery below resolves to exactly ONE
+    // offering per course, preferring the exact shift match over 'any'
+    // when both exist, so this can never fan out into duplicate rows.
     $sql = "SELECT c.id, c.code, c.name, l.full_name AS lecturer_name,
                    SUM(a.status = 'present') AS present_count,
                    COUNT(a.id) AS total_marks
             FROM courses c
-            LEFT JOIN course_offerings co ON co.course_id = c.id AND co.semester_id = ?
+            LEFT JOIN course_offerings co ON co.id = (
+                SELECT co2.id FROM course_offerings co2
+                WHERE co2.course_id = c.id AND co2.semester_id = ? AND (co2.shift = ? OR co2.shift = 'any')
+                ORDER BY (co2.shift = ?) DESC
+                LIMIT 1
+            )
             LEFT JOIN lecturers l ON l.id = co.lecturer_id
             LEFT JOIN attendance a ON a.course_id = c.id AND a.student_id = ?
                 AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ?)
             WHERE c.id IN ({$placeholders})
+                AND (co.id IS NOT NULL OR a.id IS NOT NULL)
             GROUP BY c.id, c.code, c.name, l.full_name
             ORDER BY c.code";
     $stmt = $conn->prepare($sql);
-    $types = 'iii' . str_repeat('i', count($courseIds));
-    $params = array_merge([$filterSemesterId, $ownStudentId, $filterSemesterId], $courseIds);
+    $types = 'issii' . str_repeat('i', count($courseIds));
+    $params = array_merge([$filterSemesterId, $ownShift, $ownShift, $ownStudentId, $filterSemesterId], $courseIds);
     $stmt->bind_param($types, ...$params);
     $stmt->execute();
     $courses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -193,18 +267,24 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                 </div>
             </div>
 
-            <?php if (count($semesterOptions) > 1): ?>
+            <?php if (!empty($semesterBoxes)): ?>
                 <div class="admas-card p-3 mb-3">
-                    <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="d-flex align-items-center gap-2">
-                        <label for="semesterSelect" class="form-label small mb-0 text-nowrap">Semester</label>
-                        <select class="form-select form-select-sm" id="semesterSelect" name="semester_id" style="max-width: 260px;" onchange="this.form.submit()">
-                            <?php foreach ($semesterOptions as $s): ?>
-                                <option value="<?= (int) $s['id'] ?>" <?= (int) $s['id'] === $filterSemesterId ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($s['name']) ?><?= (int) $s['is_current'] === 1 ? ' (current)' : '' ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </form>
+                    <div class="text-muted small mb-2">Semester</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <?php foreach ($semesterBoxes as $box): ?>
+                            <?php if ($box['semester_id'] > 0): ?>
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php?semester_id=<?= $box['semester_id'] ?>"
+                                   class="btn btn-sm <?= $box['semester_id'] === $filterSemesterId ? 'text-white' : 'btn-outline-secondary' ?>"
+                                   <?= $box['semester_id'] === $filterSemesterId ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"' : '' ?>>
+                                    <?= htmlspecialchars($box['name']) ?><?= $box['status'] === 'current' ? ' (current)' : '' ?>
+                                </a>
+                            <?php else: ?>
+                                <span class="btn btn-sm btn-outline-secondary disabled" style="opacity: 0.4;" title="Not created yet">
+                                    <?= htmlspecialchars($box['name']) ?>
+                                </span>
+                            <?php endif; ?>
+                        <?php endforeach; ?>
+                    </div>
                 </div>
             <?php endif; ?>
 
@@ -223,7 +303,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                         <tbody>
                             <?php if (empty($courses)): ?>
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted py-4">You are not enrolled in any courses yet.</td>
+                                    <td colspan="5" class="text-center text-muted py-4">No courses recorded for this semester yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courses as $c): ?>
@@ -255,7 +335,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                                         ]);
                                         ?>
                                         <td>
-                                            <a href="<?= htmlspecialchars($gridUrl) ?>" class="btn btn-outline-secondary btn-sm">
+                                            <a href="<?= htmlspecialchars($gridUrl) ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                 <i class="bi bi-grid-3x3"></i> View Grid
                                             </a>
                                         </td>
