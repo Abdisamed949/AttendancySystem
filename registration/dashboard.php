@@ -124,7 +124,7 @@ $recentStudents = $conn->query(
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Recent Student Registrations</h6>
                     <div class="d-flex gap-2">
-                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-outline-secondary btn-sm">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                         </a>
                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">

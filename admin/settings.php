@@ -9,6 +9,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/factory_reset.php';
+require_once __DIR__ . '/../includes/university_logo.php';
 
 require_role(['system_admin']);
 
@@ -63,7 +64,6 @@ $universityFormValues = [
     'contact_email' => $settings['contact_email'] ?? '',
     'contact_phone' => $settings['contact_phone'] ?? '',
 ];
-$addYearFormValues = ['label' => ''];
 $scopeFormValues = [
     'default_faculty_id' => (int) ($settings['default_faculty_id'] ?? 0),
     'default_department_id' => (int) ($settings['default_department_id'] ?? 0),
@@ -108,38 +108,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $errorMessage = $validationError;
-    } elseif ($action === 'add_academic_year') {
-        $label = trim((string) ($_POST['label'] ?? ''));
-        $addYearFormValues = ['label' => $label];
+    } elseif ($action === 'upload_logo') {
+        $uploadResult = save_university_logo($_FILES['logo'] ?? []);
 
-        $validationError = '';
-        if ($label === '') {
-            $validationError = 'Academic Year label is required.';
-        } elseif (mb_strlen($label) > 20) {
-            $validationError = 'Academic Year label must be 20 characters or fewer.';
-        }
+        if ($uploadResult['success']) {
+            $oldLogoPath = $settings['university_logo'] ?? '';
+            save_setting($conn, 'university_logo', $uploadResult['path']);
+            delete_old_university_logo($oldLogoPath);
 
-        if ($validationError === '') {
-            $dupStmt = $conn->prepare('SELECT id FROM academic_years WHERE label = ?');
-            $dupStmt->bind_param('s', $label);
-            $dupStmt->execute();
-            if ($dupStmt->get_result()->fetch_assoc()) {
-                $validationError = 'This Academic Year already exists.';
-            }
-            $dupStmt->close();
-        }
-
-        if ($validationError === '') {
-            $insertStmt = $conn->prepare('INSERT INTO academic_years (label, is_current) VALUES (?, 0)');
-            $insertStmt->bind_param('s', $label);
-            $insertStmt->execute();
-            $insertStmt->close();
-
-            $_SESSION['flash_success'] = 'Academic Year "' . $label . '" added successfully.';
+            $_SESSION['flash_success'] = 'University logo updated successfully.';
             redirect_to('admin/settings.php');
         }
 
-        $errorMessage = $validationError;
+        $errorMessage = $uploadResult['error'];
     } elseif ($action === 'save_scope_and_threshold') {
         $defaultFacultyIdInput = (int) ($_POST['default_faculty_id'] ?? 0);
         $defaultDepartmentIdInput = (int) ($_POST['default_department_id'] ?? 0);
@@ -236,8 +217,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 // Data for rendering
 // ---------------------------------------------------------------------
-$academicYears = $conn->query('SELECT id, label, is_current FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
-
 $faculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 
 $departments = $conn->query('SELECT id, name, faculty_id FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC);
@@ -291,6 +270,27 @@ foreach ($departments as $d) {
             <!-- University Information -->
             <div class="admas-card p-4 mb-3">
                 <h6 class="fw-bold mb-3" style="color: var(--admas-text);">University Information</h6>
+
+                <div class="d-flex align-items-center gap-3 mb-4 pb-4" style="border-bottom: 1px solid var(--admas-border);">
+                    <img id="profilePhotoPreview" src="<?= htmlspecialchars(BASE_URL . '/' . get_university_logo_relative_path($settings)) ?>?v=<?= time() ?>"
+                         alt="University logo" class="rounded-circle" width="72" height="72"
+                         style="width: 72px; height: 72px; object-fit: cover; border: 2px solid var(--admas-sky);">
+                    <div>
+                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php" enctype="multipart/form-data" class="d-flex align-items-center gap-2 flex-wrap">
+                            <input type="hidden" name="action" value="upload_logo">
+                            <label class="btn btn-sm btn-outline-secondary mb-0">
+                                <i class="bi bi-camera"></i> Choose Logo
+                                <input type="file" name="logo" id="profilePhotoInput" accept="image/jpeg,image/png,image/gif,image/webp" class="d-none">
+                            </label>
+                            <button type="submit" class="btn btn-sm text-white" id="profilePhotoSaveBtn" disabled
+                                    style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                <i class="bi bi-save"></i> Save Logo
+                            </button>
+                        </form>
+                        <div class="form-text mb-0">Shown on the sidebar, login page, and PDF report exports. JPG/PNG/GIF/WEBP, max 5MB.</div>
+                    </div>
+                </div>
+
                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php" class="row g-3">
                     <input type="hidden" name="action" value="save_university_info">
 
@@ -323,54 +323,22 @@ foreach ($departments as $d) {
                 </form>
             </div>
 
-            <!-- Academic Year Settings -->
+            <!-- Default Scope & Attendance Threshold -->
             <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Academic Year Settings</h6>
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Default Scope &amp; Attendance Threshold</h6>
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/academic_years.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                        <i class="bi bi-calendar-range"></i> Manage Academic Years
+                    </a>
+                </div>
+                <p class="text-muted small">
+                    Academic Years now have their own page — add, rename, or remove them from
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/academic_years.php">Academic Years</a>. "Current"
+                    is set per faculty, per semester, on the <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page.
+                </p>
 
                 <div class="row g-4">
                     <div class="col-lg-6">
-                        <h6 class="small text-uppercase text-muted mb-2">Academic Years</h6>
-                        <p class="text-muted small">
-                            "Current" is now set per faculty, per semester, on the
-                            <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page — an academic
-                            year here is just a label used when creating a semester.
-                        </p>
-                        <div class="table-responsive mb-3">
-                            <table class="table admas-table align-middle mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>Label</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($academicYears)): ?>
-                                        <tr>
-                                            <td class="text-center text-muted py-3">No academic years exist yet.</td>
-                                        </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($academicYears as $ay): ?>
-                                            <tr>
-                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($ay['label']) ?></td>
-                                            </tr>
-                                        <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <h6 class="small text-uppercase text-muted mb-2">Add New Academic Year</h6>
-                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php" class="d-flex gap-2">
-                            <input type="hidden" name="action" value="add_academic_year">
-                            <input type="text" class="form-control" name="label" maxlength="20" placeholder="e.g. 2026/2027" required
-                                   value="<?= htmlspecialchars($addYearFormValues['label']) ?>">
-                            <button type="submit" class="btn btn-primary text-nowrap" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                <i class="bi bi-plus-lg"></i> Add
-                            </button>
-                        </form>
-                    </div>
-
-                    <div class="col-lg-6">
-                        <h6 class="small text-uppercase text-muted mb-2">Default Scope &amp; Attendance Threshold</h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/settings.php">
                             <input type="hidden" name="action" value="save_scope_and_threshold">
 
@@ -479,6 +447,7 @@ foreach ($departments as $d) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/profile_photo.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 

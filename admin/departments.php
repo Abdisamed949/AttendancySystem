@@ -353,7 +353,7 @@ if ($role === 'dean') {
                             <div class="d-flex gap-2">
                                 <?php if ($role === 'system_admin'): ?>
                                     <button type="button" id="bulkDeleteDepartmentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments_import.php" class="btn btn-outline-secondary btn-sm">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>

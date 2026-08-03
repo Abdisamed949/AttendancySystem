@@ -13,12 +13,20 @@
  * department when no roster department is set) — not necessarily the
  * course's catalog home, since a lecturer may hold a cross-listed/
  * guest-faculty offering (see the Multi-Faculty Course Offerings plan).
+ *
+ * Shows this lecturer's FULL teaching history — current, waiting, and
+ * ended semesters alike, not just the current one — with a Status badge
+ * per row, so past semesters they used to teach are never hidden. Write
+ * access itself was never blocked by semester status (see
+ * user_can_write_course_attendance()); only this page's own listing query
+ * used to filter to current-only, which is what this fixes.
  */
 declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/attendance_helpers.php';
 
 require_role(['lecturer']);
 
@@ -30,6 +38,17 @@ const SHIFT_LABELS = [
 
 $conn = db();
 $currentUser = current_user();
+
+// ---------------------------------------------------------------------
+// University settings (drives the sky-blue top strip)
+// ---------------------------------------------------------------------
+$settings = [];
+$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
+if ($settingsResult) {
+    while ($row = $settingsResult->fetch_assoc()) {
+        $settings[$row['key']] = $row['value'];
+    }
+}
 
 // No single "current academic year" default here — a lecturer can have
 // courses across different faculties, each with its own current semester
@@ -78,7 +97,7 @@ $facultyOptStmt = $conn->prepare(
      FROM course_offerings co
      JOIN semesters se ON se.id = co.semester_id
      JOIN faculties f ON f.id = se.faculty_id
-     WHERE co.lecturer_id = ? AND se.is_current = 1
+     WHERE co.lecturer_id = ?
      ORDER BY f.name"
 );
 $facultyOptStmt->bind_param('i', $lecturerRecordId);
@@ -93,7 +112,7 @@ $deptOptStmt = $conn->prepare(
      JOIN courses c ON c.id = co.course_id
      JOIN departments d ON d.id = c.department_id
      LEFT JOIN departments rd ON rd.id = co.roster_department_id
-     WHERE co.lecturer_id = ? AND se.is_current = 1
+     WHERE co.lecturer_id = ?
      ORDER BY name"
 );
 $deptOptStmt->bind_param('i', $lecturerRecordId);
@@ -144,28 +163,31 @@ if ($filterAcademicYearId > 0) {
 
 $whereSql = empty($conditions) ? '1 = 1' : implode(' AND ', $conditions);
 
-// One row per (course, current-semester offering) pair — not per course —
-// since a faculty can have multiple concurrent current semesters (status
-// is set by hand per semester via semesters.php, not mutually exclusive), a
-// lecturer can be teaching the same course under two different current
-// semesters/batches at once, and each needs its own Semester/Pending
-// Xiiso context rather than being collapsed into a single course row.
+// One row per (course, offering) pair — not per course, and not restricted
+// to the current semester — since a lecturer's real teaching history spans
+// past (ended), active (current), and not-yet-started (waiting) semesters
+// at once, and a faculty can even have multiple concurrent current
+// semesters (status is set by hand per semester via semesters.php, not
+// mutually exclusive). Every offering this lecturer has ever held is shown
+// here, distinguished by its own Semester Status badge, so their full real
+// teaching record — not just today's snapshot — is visible (the dashboard's
+// own "My Assigned Courses" widget stays current-only, matching the same
+// dashboard-vs-full-history split already used on student/courses.php).
 $coursesStmt = $conn->prepare(
     "SELECT c.id AS course_id, c.code, c.name, c.credit_hours,
             COALESCE(rd.id, d.id) AS department_id, se.faculty_id, COALESCE(rd.name, d.name) AS department_name, offf.name AS faculty_name,
-            se.id AS semester_id, se.name AS semester_name,
+            se.id AS semester_id, se.name AS semester_name, se.status AS semester_status,
             ay.id AS academic_year_id, ay.label AS academic_year_label,
-            co.shift AS offering_shift,
-            (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
+            co.shift AS offering_shift
      FROM courses c
      JOIN departments d ON d.id = c.department_id
      JOIN course_offerings co ON co.course_id = c.id AND co.lecturer_id = ?
-     JOIN semesters se ON se.id = co.semester_id AND se.is_current = 1
+     JOIN semesters se ON se.id = co.semester_id
      JOIN faculties offf ON offf.id = se.faculty_id
      LEFT JOIN departments rd ON rd.id = co.roster_department_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
      WHERE {$whereSql}
-     ORDER BY offf.name, department_name, c.code, se.start_date"
+     ORDER BY (se.status = 'current') DESC, (se.status = 'waiting') DESC, offf.name, department_name, c.code, se.start_date DESC"
 );
 $coursesStmt->bind_param($types, ...$params);
 $coursesStmt->execute();
@@ -191,7 +213,13 @@ foreach ($courseOfferingRows as $row) {
     }
     $sessions = $sessionsBySemesterId[$semesterId];
 
-    $enrolledCount = (int) $row['student_count'];
+    // Real roster size — same enrollment-then-department-fallback
+    // resolution the Grid View itself uses (get_course_roster_count()),
+    // not a bare course_enrollments count, which understates it whenever
+    // a course has no explicit enrollment rows yet. An offering shift of
+    // 'any' means "every shift", so it's treated the same as no filter.
+    $rosterShift = ($row['offering_shift'] !== null && $row['offering_shift'] !== 'any') ? $row['offering_shift'] : null;
+    $enrolledCount = get_course_roster_count($conn, $courseId, $semesterId, $rosterShift);
     $totalMarked = 0;
     $lastSessionDate = null;
     $pendingSessions = [];
@@ -218,6 +246,7 @@ foreach ($courseOfferingRows as $row) {
         }
     }
 
+    $row['student_count'] = $enrolledCount;
     $row['total_sessions'] = $totalMarked;
     $row['last_session'] = $lastSessionDate;
     $row['pending_count'] = count($pendingSessions);
@@ -258,11 +287,11 @@ foreach ($academicYears as $ay) {
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
                     <h4 class="fw-bold mb-1" style="color: var(--admas-text);">My Courses</h4>
-                    <p class="text-muted mb-0">Courses assigned to you, filterable by Academic Year, Faculty, and Department.</p>
+                    <p class="text-muted mb-0">Your full teaching history — current, upcoming, and past semesters — filterable by Academic Year, Faculty, and Department.</p>
                 </div>
             </div>
 
-            <div class="admas-card p-4 mb-3">
+            <div class="admas-card p-4 mb-3" style="border: 2px solid var(--admas-sky);">
                 <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="row g-2 mb-0">
                     <div class="col-sm-6 col-md-3">
                         <select class="form-select form-select-sm" name="academic_year_id">
@@ -293,7 +322,7 @@ foreach ($academicYears as $ay) {
                         <div class="input-group input-group-sm">
                             <input type="text" class="form-control" name="search" placeholder="Search course code or name"
                                    value="<?= htmlspecialchars($filterSearch) ?>">
-                            <button type="submit" class="btn btn-outline-secondary"><i class="bi bi-search"></i></button>
+                            <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                         </div>
                     </div>
                     <?php if ($filterFacultyId > 0 || $filterDepartmentId > 0 || $filterSearch !== ''): ?>
@@ -304,7 +333,7 @@ foreach ($academicYears as $ay) {
                 </form>
             </div>
 
-            <div class="admas-card p-4">
+            <div class="admas-card p-4" style="border: 2px solid var(--admas-sky);">
                 <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
                     Courses
                     <?php if ($currentAcademicYearLabel !== ''): ?>
@@ -317,6 +346,7 @@ foreach ($academicYears as $ay) {
                             <tr>
                                 <th>Course</th>
                                 <th>Semester</th>
+                                <th>Status</th>
                                 <th>Faculty</th>
                                 <th>Department</th>
                                 <th>Academic Year</th>
@@ -330,7 +360,7 @@ foreach ($academicYears as $ay) {
                         <tbody>
                             <?php if (empty($courses)): ?>
                                 <tr>
-                                    <td colspan="10" class="text-center text-muted py-4">No courses match the current filters.</td>
+                                    <td colspan="11" class="text-center text-muted py-4">No courses match the current filters.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courses as $c): ?>
@@ -358,6 +388,16 @@ foreach ($academicYears as $ay) {
                                             <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
                                         </td>
                                         <td><?= htmlspecialchars($c['semester_name']) ?></td>
+                                        <td>
+                                            <?php
+                                            $statusBadgeClass = [
+                                                'current' => 'badge-present',
+                                                'waiting' => 'badge-warning',
+                                                'ended' => 'badge-inactive',
+                                            ][$c['semester_status']] ?? 'badge-inactive';
+                                            ?>
+                                            <span class="badge-pill <?= $statusBadgeClass ?>"><?= htmlspecialchars(ucfirst((string) $c['semester_status'])) ?></span>
+                                        </td>
                                         <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
                                         <td><?= htmlspecialchars($c['academic_year_label']) ?></td>

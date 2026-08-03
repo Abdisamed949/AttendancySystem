@@ -268,14 +268,16 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
             </div>
 
             <?php if (!empty($semesterBoxes)): ?>
-                <div class="admas-card p-3 mb-3">
+                <div class="admas-card p-3 mb-3" style="border: 2px solid var(--admas-sky);">
                     <div class="text-muted small mb-2">Semester</div>
                     <div class="d-flex flex-wrap gap-2">
                         <?php foreach ($semesterBoxes as $box): ?>
                             <?php if ($box['semester_id'] > 0): ?>
                                 <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php?semester_id=<?= $box['semester_id'] ?>"
-                                   class="btn btn-sm <?= $box['semester_id'] === $filterSemesterId ? 'text-white' : 'btn-outline-secondary' ?>"
-                                   <?= $box['semester_id'] === $filterSemesterId ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"' : '' ?>>
+                                   class="btn btn-sm <?= $box['semester_id'] === $filterSemesterId ? 'text-white' : '' ?>"
+                                   <?= $box['semester_id'] === $filterSemesterId
+                                        ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"'
+                                        : 'style="border: 1px solid var(--admas-sky); color: var(--admas-sky);"' ?>>
                                     <?= htmlspecialchars($box['name']) ?><?= $box['status'] === 'current' ? ' (current)' : '' ?>
                                 </a>
                             <?php else: ?>
@@ -288,7 +290,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                 </div>
             <?php endif; ?>
 
-            <div class="admas-card p-4">
+            <div class="admas-card p-4" style="border: 2px solid var(--admas-sky);">
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>

@@ -27,6 +27,17 @@ require_role(['system_admin', 'dean']);
 $conn = db();
 $role = current_role();
 
+// ---------------------------------------------------------------------
+// University settings (drives the sky-blue top strip)
+// ---------------------------------------------------------------------
+$settings = [];
+$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
+if ($settingsResult) {
+    while ($row = $settingsResult->fetch_assoc()) {
+        $settings[$row['key']] = $row['value'];
+    }
+}
+
 $deanFacultyId = 0;
 if ($role === 'dean') {
     $deanFacultyId = (int) ($_SESSION['faculty_id'] ?? 0);

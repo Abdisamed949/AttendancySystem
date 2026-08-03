@@ -18,6 +18,17 @@ require_role(['system_admin', 'head_academic', 'dean']);
 $conn = db();
 $role = current_role();
 
+// ---------------------------------------------------------------------
+// University settings (drives the sky-blue top strip)
+// ---------------------------------------------------------------------
+$settings = [];
+$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
+if ($settingsResult) {
+    while ($row = $settingsResult->fetch_assoc()) {
+        $settings[$row['key']] = $row['value'];
+    }
+}
+
 $deanFacultyId = 0;
 $deanFacultyName = '';
 if ($role === 'dean') {
@@ -982,7 +993,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                             <i class="bi bi-magic"></i> Generate Sessions
                                         </button>
                                     </form>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= $selectedSemesterId ?>&edit=1" class="btn btn-outline-secondary btn-sm">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= $selectedSemesterId ?>&edit=1" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-pencil"></i> Edit
                                     </a>
                                 </div>
@@ -1001,7 +1012,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
-                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Assign Faculty</button>
+                                    <button type="submit" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">Assign Faculty</button>
                                 </form>
                             <?php endif; ?>
 

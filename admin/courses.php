@@ -529,14 +529,17 @@ foreach ($departments as $dept) {
 }
 
 // Semester options for the Add Course form's optional "first offering"
-// section, grouped by faculty for the Department -> Semester cascade —
-// same shape as admin/students.php's semestersByFacultyId, extended with
-// academic_year_label/is_current for the read-only Academic Year display
-// and the "— Current" option label (same technique as
-// admin/course_offerings.php's own Semester dropdown).
+// section — grouped by faculty THEN by academic year for the
+// Department -> Academic Year -> Semester cascade (Academic Year is a
+// real, freely-selectable dropdown listing every academic year in the
+// project, not derived from the Semester; the same semester NAME can
+// legitimately repeat across different academic years for one faculty —
+// see admin/courses_import.php's own (faculty, academic_year, name)
+// lookup — so Academic Year genuinely narrows the Semester list rather
+// than being decorative).
 if ($role === 'dean') {
     $offeringSemStmt = $conn->prepare(
-        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.id AS academic_year_id, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          WHERE s.faculty_id = ?
@@ -548,7 +551,7 @@ if ($role === 'dean') {
     $offeringSemStmt->close();
 } else {
     $offeringSemesters = $conn->query(
-        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.id AS academic_year_id, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          WHERE s.faculty_id IS NOT NULL
@@ -556,14 +559,20 @@ if ($role === 'dean') {
     )->fetch_all(MYSQLI_ASSOC);
 }
 
+// All academic years in the project — the Academic Year dropdown is
+// unfiltered (every faculty/dean shares the same academic year list; it's
+// the Semester dropdown below it that narrows by faculty + this choice).
+$allAcademicYears = $conn->query('SELECT id, label FROM academic_years ORDER BY label DESC')->fetch_all(MYSQLI_ASSOC);
+
 $semestersByFacultyId = [];
+$offeringSemesterAcademicYearById = [];
 foreach ($offeringSemesters as $sem) {
-    $semestersByFacultyId[(int) $sem['faculty_id']][] = [
+    $semestersByFacultyId[(int) $sem['faculty_id']][(int) $sem['academic_year_id']][] = [
         'id' => (int) $sem['id'],
         'name' => $sem['name'],
-        'academic_year_label' => $sem['academic_year_label'],
         'is_current' => (int) $sem['is_current'] === 1,
     ];
+    $offeringSemesterAcademicYearById[(int) $sem['id']] = (int) $sem['academic_year_id'];
 }
 
 // Lecturer options for the Department -> Lecturer cascade. Every active
@@ -834,18 +843,23 @@ foreach ($offeringLecturers as $lec) {
                                 <p class="small text-muted mb-2">Optionally create this course's first offering now, instead of using "Manage Offerings" afterward.</p>
 
                                 <div class="mb-3">
+                                    <label for="offeringAcademicYearSelect" class="form-label">Academic Year <span class="text-muted fw-normal">(optional)</span></label>
+                                    <select class="form-select" id="offeringAcademicYearSelect" onchange="admasRebuildOfferingSemesterOptions()">
+                                        <option value="">Select academic year</option>
+                                        <?php foreach ($allAcademicYears as $ay): ?>
+                                            <option value="<?= (int) $ay['id'] ?>"><?= htmlspecialchars($ay['label']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3">
                                     <label for="offeringSemesterSelect" class="form-label">Semester <span class="text-muted fw-normal">(optional)</span></label>
                                     <select class="form-select" id="offeringSemesterSelect" name="offering_semester_id" onchange="admasUpdateOfferingSemesterChange()">
-                                        <option value="">No offering yet — select a department first</option>
+                                        <option value="">Select a department and academic year first</option>
                                     </select>
                                 </div>
 
                                 <div id="offeringDetailsBlock" class="d-none">
-                                    <div class="mb-3">
-                                        <label for="offeringAcademicYearDisplay" class="form-label">Academic Year</label>
-                                        <input type="text" class="form-control" id="offeringAcademicYearDisplay" value="" disabled placeholder="Derived from the selected semester">
-                                    </div>
-
                                     <div class="mb-3">
                                         <label for="offeringShiftSelect" class="form-label">Shift</label>
                                         <select class="form-select" id="offeringShiftSelect" name="offering_shift">
@@ -898,34 +912,60 @@ foreach ($offeringLecturers as $lec) {
         // only — these elements don't exist at all in edit mode, so every
         // function here is a no-op if it can't find them).
         const facultyIdByDepartmentId = <?= json_encode($facultyIdByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        // Nested by faculty THEN academic year — Semester is cascaded from
+        // BOTH (Department's faculty, chosen Academic Year), never from
+        // Semester alone, since the same semester name can legitimately
+        // repeat across different academic years for one faculty.
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const offeringSemesterAcademicYearById = <?= json_encode($offeringSemesterAcademicYearById, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const lecturersByDepartmentId = <?= json_encode($lecturersByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allActiveLecturers = <?= json_encode($allActiveLecturers, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
-        function admasUpdateOfferingFieldsForDepartment(departmentId, selectedSemesterId) {
+        function admasRebuildOfferingSemesterOptions(selectedSemesterId) {
             const semesterSelect = document.getElementById('offeringSemesterSelect');
-            const lecturerSelect = document.getElementById('offeringLecturerSelect');
-            if (!semesterSelect || !lecturerSelect) {
+            const departmentSelect = document.getElementById('courseDepartmentSelect');
+            const academicYearSelect = document.getElementById('offeringAcademicYearSelect');
+            if (!semesterSelect || !departmentSelect || !academicYearSelect) {
                 return;
             }
 
+            const departmentId = departmentSelect.value;
+            const academicYearId = academicYearSelect.value;
             const facultyId = facultyIdByDepartmentId[departmentId];
-            const semesters = (facultyId !== undefined ? semestersByFacultyId[facultyId] : null) || [];
+            const semesters = (facultyId !== undefined && academicYearId && semestersByFacultyId[facultyId])
+                ? (semestersByFacultyId[facultyId][academicYearId] || [])
+                : [];
 
             semesterSelect.innerHTML = '';
             const blank = document.createElement('option');
             blank.value = '';
-            blank.textContent = departmentId
-                ? (semesters.length === 0 ? 'No semesters for this faculty yet' : 'No offering yet — select a semester below')
-                : 'No offering yet — select a department first';
+            if (!departmentId || !academicYearId) {
+                blank.textContent = 'Select a department and academic year first';
+            } else {
+                blank.textContent = semesters.length === 0
+                    ? 'No semesters for this faculty in this academic year yet'
+                    : 'No offering yet — select a semester below';
+            }
             semesterSelect.appendChild(blank);
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.dataset.academicYear = sem.academic_year_label;
                 opt.textContent = sem.name + (sem.is_current ? ' — Current' : '');
                 semesterSelect.appendChild(opt);
             });
+
+            semesterSelect.value = String(selectedSemesterId || '');
+            if (semesterSelect.value !== String(selectedSemesterId || '')) {
+                semesterSelect.value = '';
+            }
+            admasUpdateOfferingSemesterChange();
+        }
+
+        function admasUpdateOfferingFieldsForDepartment(departmentId, selectedSemesterId) {
+            const lecturerSelect = document.getElementById('offeringLecturerSelect');
+            if (!lecturerSelect) {
+                return;
+            }
 
             lecturerSelect.innerHTML = '';
             const unassigned = document.createElement('option');
@@ -958,36 +998,37 @@ foreach ($offeringLecturers as $lec) {
                 });
             }
 
-            semesterSelect.value = String(selectedSemesterId || '');
-            if (semesterSelect.value !== String(selectedSemesterId || '')) {
-                semesterSelect.value = '';
-            }
-            admasUpdateOfferingSemesterChange();
+            admasRebuildOfferingSemesterOptions(selectedSemesterId);
         }
 
         function admasUpdateOfferingSemesterChange() {
             const semesterSelect = document.getElementById('offeringSemesterSelect');
             const detailsBlock = document.getElementById('offeringDetailsBlock');
-            const academicYearDisplay = document.getElementById('offeringAcademicYearDisplay');
-            if (!semesterSelect || !detailsBlock || !academicYearDisplay) {
+            if (!semesterSelect || !detailsBlock) {
                 return;
             }
 
             if (semesterSelect.value) {
                 detailsBlock.classList.remove('d-none');
-                const selected = semesterSelect.options[semesterSelect.selectedIndex];
-                academicYearDisplay.value = selected ? (selected.dataset.academicYear || '') : '';
             } else {
                 detailsBlock.classList.add('d-none');
-                academicYearDisplay.value = '';
             }
         }
 
         window.addEventListener('DOMContentLoaded', () => {
             const departmentSelect = document.getElementById('courseDepartmentSelect');
+            const academicYearSelect = document.getElementById('offeringAcademicYearSelect');
             const offeringLecturerSelect = document.getElementById('offeringLecturerSelect');
             if (departmentSelect && document.getElementById('offeringSemesterSelect')) {
-                admasUpdateOfferingFieldsForDepartment(departmentSelect.value, <?= (int) $formValues['offering_semester_id'] ?>);
+                const priorSemesterId = <?= (int) $formValues['offering_semester_id'] ?>;
+                // Re-select whichever Academic Year that prior Semester
+                // belonged to (failed-submit re-render only — Academic Year
+                // itself isn't a submitted field, since course_offerings
+                // only stores semester_id).
+                if (academicYearSelect && priorSemesterId && offeringSemesterAcademicYearById[priorSemesterId]) {
+                    academicYearSelect.value = String(offeringSemesterAcademicYearById[priorSemesterId]);
+                }
+                admasUpdateOfferingFieldsForDepartment(departmentSelect.value, priorSemesterId);
                 if (offeringLecturerSelect) {
                     offeringLecturerSelect.value = <?= json_encode((string) $formValues['offering_lecturer_id']) ?>;
                 }

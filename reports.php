@@ -11,6 +11,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
+require_once __DIR__ . '/includes/university_logo.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 require_role(['system_admin', 'head_academic', 'dean', 'registration', 'lecturer']);
@@ -874,7 +875,7 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
     }
 
     // PDF export
-    $logoPath = __DIR__ . '/logo/logo.jpg';
+    $logoPath = __DIR__ . '/' . get_university_logo_relative_path($settings);
     $logoBase64 = is_file($logoPath) ? base64_encode((string) file_get_contents($logoPath)) : '';
     $campusLine = trim(($settings['campus'] ?? '') . ' — ' . ($settings['contact_email'] ?? '') . ' — ' . ($settings['contact_phone'] ?? ''), ' —');
 
@@ -1038,10 +1039,10 @@ $scopeBanner = match ($role) {
                         <span class="text-muted fw-normal">(<?= htmlspecialchars($reportMetaLine) ?>)</span>
                     </h6>
                     <div class="d-flex gap-2">
-                        <a href="<?= htmlspecialchars($exportExcelUrl) ?>" class="btn btn-outline-secondary btn-sm">
+                        <a href="<?= htmlspecialchars($exportExcelUrl) ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-file-earmark-excel"></i> Export Excel
                         </a>
-                        <a href="<?= htmlspecialchars($exportPdfUrl) ?>" class="btn btn-outline-secondary btn-sm">
+                        <a href="<?= htmlspecialchars($exportPdfUrl) ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-file-earmark-pdf"></i> Export PDF
                         </a>
                     </div>

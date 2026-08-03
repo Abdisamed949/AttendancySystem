@@ -27,6 +27,11 @@ function nav_items(): array
         ['label' => 'Lecturers', 'icon' => 'bi-person-badge', 'file' => 'lecturers.php', 'roles' => ['head_academic']],
         ['label' => 'Departments', 'icon' => 'bi-diagram-3', 'file' => 'departments.php', 'path' => 'admin/departments.php', 'roles' => ['system_admin', 'dean']],
         ['label' => 'Faculties', 'icon' => 'bi-bank', 'file' => 'faculties.php', 'roles' => ['system_admin']],
+        // Previously only reachable via a card inside admin/settings.php —
+        // moved to its own CRUD page + sidebar entry so adding a new
+        // academic year isn't buried in Settings (see the top-of-file
+        // comment on admin/academic_years.php).
+        ['label' => 'Academic Years', 'icon' => 'bi-calendar-range', 'file' => 'academic_years.php', 'roles' => ['system_admin']],
         ['label' => 'Courses', 'icon' => 'bi-journal-bookmark', 'file' => 'courses.php', 'path' => 'admin/courses.php', 'roles' => ['system_admin', 'dean']],
         // "My Courses" — Lecturer's own assigned courses and Student's own
         // enrolled courses are two different files under two different role

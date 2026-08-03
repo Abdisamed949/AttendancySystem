@@ -163,8 +163,8 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
                 </div>
                 <?php if (!empty($semesters)): ?>
                     <div class="d-flex gap-2">
-                        <a href="?export=excel" class="btn btn-outline-secondary btn-sm"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
-                        <a href="?export=pdf" class="btn btn-outline-secondary btn-sm"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
+                        <a href="?export=excel" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
+                        <a href="?export=pdf" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
                     </div>
                 <?php endif; ?>
             </div>

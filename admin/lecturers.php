@@ -555,7 +555,7 @@ foreach ($departments as $dept) {
                             <div class="d-flex gap-2">
                                 <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role === 'system_admin'): ?>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers_import.php" class="btn btn-outline-secondary btn-sm">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>

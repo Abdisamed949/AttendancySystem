@@ -5,6 +5,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/university_logo.php';
 
 $roleToDashboard = [
     'system_admin' => 'admin/dashboard.php',
@@ -79,6 +80,7 @@ if ($settingsResult) {
 }
 $universityName = $settings['university_name'] ?? 'ADMAS University';
 $campusLine = $settings['campus'] ?? 'Garoowe Campus';
+$loginLogoPath = get_university_logo_relative_path($settings);
 // Second brand line is the campus setting with a trailing "Campus" word
 // stripped (e.g. "Garoowe Campus" -> "Garoowe"), kept data-driven rather
 // than hardcoded per CLAUDE.md's branding rule.
@@ -259,7 +261,7 @@ if ($campusShort === '') {
         <div class="login-card">
             <div class="brand-panel">
                 <div class="brand-logo-ring">
-                    <img src="<?= htmlspecialchars(BASE_URL) ?>/logo/logo.jpg" alt="<?= htmlspecialchars($universityName) ?> logo" class="brand-logo">
+                    <img src="<?= htmlspecialchars(BASE_URL . '/' . $loginLogoPath) ?>" alt="<?= htmlspecialchars($universityName) ?> logo" class="brand-logo">
                 </div>
                 <div class="brand-name-line1"><?= htmlspecialchars($universityName) ?></div>
                 <div class="brand-name-line2"><?= htmlspecialchars($campusShort) ?></div>

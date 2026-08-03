@@ -9,6 +9,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/attendance_helpers.php';
 
 require_role(['lecturer']);
 
@@ -65,18 +66,6 @@ $myCoursesStmt->execute();
 $myCoursesCount = (int) ($myCoursesStmt->get_result()->fetch_assoc()['c'] ?? 0);
 $myCoursesStmt->close();
 
-$totalStudentsStmt = $conn->prepare(
-    "SELECT COUNT(DISTINCT ce.student_id) AS c
-     FROM course_enrollments ce
-     JOIN courses c ON c.id = ce.course_id
-     JOIN departments d ON d.id = c.department_id
-     {$currentOfferingJoin}"
-);
-$totalStudentsStmt->bind_param('i', $lecturerRecordId);
-$totalStudentsStmt->execute();
-$totalStudentsCount = (int) ($totalStudentsStmt->get_result()->fetch_assoc()['c'] ?? 0);
-$totalStudentsStmt->close();
-
 $sessionsStmt = $conn->prepare('SELECT COUNT(DISTINCT attendance_date) AS c FROM attendance WHERE recorded_by_user_id = ?');
 $sessionsStmt->bind_param('i', $currentUser['id']);
 $sessionsStmt->execute();
@@ -97,8 +86,7 @@ $myCoursesStmt2 = $conn->prepare(
     "SELECT c.id, c.code, c.name, offf.name AS faculty_name, COALESCE(rd.name, d.name) AS department_name,
             se.name AS semester_name, ay.label AS academic_year_label, se.id AS semester_id,
             co.shift AS offering_shift,
-            MAX(a.attendance_date) AS last_session,
-            (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_id = c.id) AS student_count
+            MAX(a.attendance_date) AS last_session
      FROM courses c
      JOIN departments d ON d.id = c.department_id
      {$currentOfferingJoin}
@@ -113,6 +101,23 @@ $myCoursesStmt2->bind_param('i', $lecturerRecordId);
 $myCoursesStmt2->execute();
 $myCourses = $myCoursesStmt2->get_result()->fetch_all(MYSQLI_ASSOC);
 $myCoursesStmt2->close();
+
+// Real roster size per course — enrollment-then-department-fallback (same
+// resolution the Xiiso Grid itself uses), not a bare course_enrollments
+// count, which understates any course only ever reachable via the
+// department-roster fallback (no explicit enrollment rows yet). "Total
+// Students" below is the distinct student ids across every one of this
+// lecturer's own courses, not a sum (a student can be on more than one of
+// their rosters at once).
+$allRosterStudentIds = [];
+foreach ($myCourses as &$courseRow) {
+    $rosterShift = ($courseRow['offering_shift'] !== null && $courseRow['offering_shift'] !== 'any') ? $courseRow['offering_shift'] : null;
+    $rosterIds = get_course_roster_student_ids($conn, (int) $courseRow['id'], (int) $courseRow['semester_id'], $rosterShift);
+    $courseRow['student_count'] = count($rosterIds);
+    $allRosterStudentIds = array_merge($allRosterStudentIds, $rosterIds);
+}
+unset($courseRow);
+$totalStudentsCount = count(array_unique($allRosterStudentIds));
 
 // ---------------------------------------------------------------------
 // Pending Xiiso Sessions — for each currently-offered course, any Xiiso

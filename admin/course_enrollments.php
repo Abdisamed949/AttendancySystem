@@ -34,6 +34,17 @@ require_role(['system_admin', 'dean']);
 $conn = db();
 $role = current_role();
 
+// ---------------------------------------------------------------------
+// University settings (drives the sky-blue top strip)
+// ---------------------------------------------------------------------
+$settings = [];
+$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
+if ($settingsResult) {
+    while ($row = $settingsResult->fetch_assoc()) {
+        $settings[$row['key']] = $row['value'];
+    }
+}
+
 $deanFacultyId = 0;
 $deanFacultyName = '';
 if ($role === 'dean') {
@@ -494,7 +505,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                         <div class="input-group input-group-sm">
                             <input type="text" class="form-control" name="search" placeholder="Search name or student no"
                                    value="<?= htmlspecialchars($filterSearch) ?>">
-                            <button type="submit" class="btn btn-outline-secondary"><i class="bi bi-search"></i></button>
+                            <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                         </div>
                     </div>
                     <?php if ($hasAnyFilter): ?>

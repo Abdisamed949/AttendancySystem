@@ -2,15 +2,23 @@
 /**
  * Import Attendance from Excel — bulk-imports historical attendance data
  * matching the university's own paper/Excel tracker format (REG/NO, three
- * name columns, P/A/% summary, then one column per calendar day grouped
- * into colored month bands) into this app's own Xiiso-session model. Lives
- * at the app root (not under /admin) because it's shared by three roles,
- * same placement/role-scoping convention as attendance.php.
+ * name columns, P/A/% summary, then one column per class session) into
+ * this app's own Xiiso-session model. Lives at the app root (not under
+ * /admin) because it's shared by three roles, same placement/role-scoping
+ * convention as attendance.php.
  *
- * Excel day-columns map onto a semester's 12 fixed Xiiso slots
- * automatically, in chronological order: the first 12 detected dates
- * become Xiiso 1-12; any further dates are ignored (flagged on the
- * preview page) since a semester only ever has 12 sessions.
+ * Deliberately does NOT try to read a date out of the file at all — real
+ * trackers vary too much in how they encode day/date headers (bare day
+ * numbers, merged month-band cells, raw Excel date serials, ...) for that
+ * to ever be fully reliable. Instead: any non-reserved column that
+ * actually contains a 1 (Present) or 0 (Absent) mark in at least one
+ * student's row is treated as a real session column, taken in left-to-right
+ * order and mapped POSITIONALLY onto the selected semester's own Xiiso
+ * 1-12 slots (1st such column -> Xiiso 1, 2nd -> Xiiso 2, ...); any columns
+ * beyond the 12th are ignored. The semester's own already-assigned Xiiso
+ * session dates (set via the Semesters page) are what gets used — if one
+ * of the sessions being imported into has no date yet, the whole import is
+ * blocked with a clear message rather than guessing one.
  */
 declare(strict_types=1);
 
@@ -26,8 +34,38 @@ require_role(['system_admin', 'dean', 'lecturer']);
 use PhpOffice\PhpSpreadsheet\Reader\Csv;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 
 $conn = db();
+
+// ---------------------------------------------------------------------
+// Downloadable template (must run before any HTML output) — one header
+// row (REG/NO + names + P/A/%), data starts immediately below. The day
+// columns need NO header at all — any column with a 1/0 mark in it is
+// picked up automatically, in left-to-right order, and mapped onto
+// Xiiso 1, 2, 3... Cell values are 1 for Present, 0 for Absent, blank for
+// unmarked.
+// ---------------------------------------------------------------------
+if (($_GET['action'] ?? '') === 'template') {
+    $spreadsheet = new Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->fromArray(['REG/NO', 'First Names', "Father's", "G.Father's", 'P', 'A', '%'], null, 'A1');
+    $sheet->fromArray(['1472/23', 'Amina', 'Hassan', 'Ali', '', '', '', 1, 1, 0, 1, 1], null, 'A2');
+    $sheet->fromArray(['1489/23', 'Faisal', 'Ahmed', 'Warsame', '', '', '', 0, 1, 1, 1, 0], null, 'A3');
+    $sheet->getStyle('A1:L1')->getFont()->setBold(true);
+    foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'] as $col) {
+        $sheet->getColumnDimension($col)->setAutoSize(true);
+    }
+
+    header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    header('Content-Disposition: attachment; filename="attendance_import_template.xlsx"');
+    header('Cache-Control: max-age=0');
+
+    (new XlsxWriter($spreadsheet))->save('php://output');
+    exit;
+}
+
 $currentUser = current_user();
 $role = current_role();
 
@@ -159,7 +197,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 $step = 'upload';
 $previewRows = [];
 $mappedSessions = [];
-$skippedDates = [];
+$skippedColumnCount = 0;
 $previewCourseId = 0;
 $previewSemesterId = 0;
 
@@ -204,9 +242,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'xls' => new Xls(),
                             'csv' => new Csv(),
                         };
-                        $reader->setReadDataOnly(true);
+                        // Deliberately NOT setReadDataOnly(true) — merge-cell
+                        // ranges (needed below to detect a single date label
+                        // spanning several weekly session columns) are
+                        // structural info that data-only mode discards.
                         $spreadsheet = $reader->load($_FILES['import_file']['tmp_name']);
-                        $rows = $spreadsheet->getActiveSheet()->toArray(null, true, true, false);
+                        $ws = $spreadsheet->getActiveSheet();
+                        $rows = $ws->toArray(null, true, true, false);
 
                         if (empty($rows)) {
                             $errorMessage = 'The uploaded file is empty.';
@@ -227,39 +269,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $errorMessage = 'Could not find the "REG/NO" header row in the uploaded file.';
                             } else {
                                 $headerRow = array_map(static fn ($h) => str_replace('-', '', mb_strtolower(trim((string) $h))), $rows[$headerRowIdx]);
-
-                                // The row that actually holds the day-numbers (3, 4,
-                                // 5...) may be the same row as REG/NO, or the row
-                                // immediately below it — real trackers often
-                                // vertically merge REG/NO/names/P/A/% across two
-                                // header rows, with the month-band label sharing the
-                                // REG/NO row and bare day-numbers on the row below.
-                                // Pick whichever of the two rows has more cells that
-                                // look like bare day-numbers (1-31).
-                                $countDayLikeCells = static function (array $row): int {
-                                    $n = 0;
-                                    foreach ($row as $cell) {
-                                        $v = trim((string) $cell);
-                                        if ($v !== '' && ctype_digit($v) && (int) $v >= 1 && (int) $v <= 31) {
-                                            $n++;
-                                        }
-                                    }
-
-                                    return $n;
-                                };
-                                $rowBelowIdx = $headerRowIdx + 1;
-                                $rowBelow = $rows[$rowBelowIdx] ?? [];
-                                $dayRowIdx = $headerRowIdx;
-                                if (isset($rows[$rowBelowIdx]) && $countDayLikeCells($rowBelow) > $countDayLikeCells($rows[$headerRowIdx])) {
-                                    $dayRowIdx = $rowBelowIdx;
-                                }
-                                $dayRow = $rows[$dayRowIdx];
-                                // Month-band labels live on whichever row is NOT the
-                                // day-number row: the REG/NO row itself if day-numbers
-                                // turned out to be on the row below it, otherwise the
-                                // row above the REG/NO row.
-                                $bandRow = $dayRowIdx === $headerRowIdx ? ($rows[$headerRowIdx - 1] ?? []) : $rows[$headerRowIdx];
-                                $dataStartIdx = max($headerRowIdx, $dayRowIdx) + 1;
+                                $dataStartIdx = $headerRowIdx + 1;
 
                                 $regNoCol = find_import_column($headerRow, ['reg/no', 'regno', 'reg no', 'student no', 'studentno', 'id']);
                                 $firstNameCol = find_import_column($headerRow, ['first names', 'first name', 'firstname']);
@@ -277,149 +287,140 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         static fn ($c) => $c !== false
                                     ));
 
-                                    // Detect date columns: try a direct date parse
-                                    // first (a fully-qualified date header on the
-                                    // day-number row), else treat that row's cell as a
-                                    // bare day-number and combine it with the nearest
-                                    // month-band cell to its left in the band row
-                                    // (forward-filled, since merged month cells only
-                                    // populate their leftmost cell once PhpSpreadsheet
-                                    // flattens them via toArray()).
-                                    $dateByCol = [];
-                                    $columnCount = count($dayRow);
+                                    // Session columns are identified purely by content,
+                                    // never by whatever (if anything) their header
+                                    // cell says: any non-reserved column that holds a
+                                    // real 1 (Present) or 0 (Absent) mark in at least
+                                    // one student's row counts as one session, in
+                                    // left-to-right order. This deliberately ignores
+                                    // dates entirely — real trackers vary too much in
+                                    // how they encode them (bare day numbers, merged
+                                    // month-band cells, raw Excel date serials...) for
+                                    // that to ever be fully reliable; the semester's
+                                    // own already-assigned Xiiso dates are what's used
+                                    // instead (checked further below).
+                                    $dataRowsRaw = array_slice($rows, $dataStartIdx);
+                                    $columnCount = 0;
+                                    foreach ($rows as $rw) {
+                                        $columnCount = max($columnCount, count($rw));
+                                    }
+                                    $sessionCols = [];
                                     for ($c = 0; $c < $columnCount; $c++) {
                                         if (in_array($c, $reservedCols, true)) {
                                             continue;
                                         }
-                                        $rawHeader = trim((string) ($dayRow[$c] ?? ''));
-                                        if ($rawHeader === '') {
-                                            continue;
-                                        }
-
-                                        $parsedDate = null;
-                                        if (preg_match('/\d{4}/', $rawHeader) || preg_match('/[A-Za-z]{3,}/', $rawHeader)) {
-                                            $ts = strtotime($rawHeader);
-                                            if ($ts !== false) {
-                                                $parsedDate = date('Y-m-d', $ts);
+                                        foreach ($dataRowsRaw as $rw) {
+                                            $v = trim((string) ($rw[$c] ?? ''));
+                                            if ($v === '1' || $v === '0') {
+                                                $sessionCols[] = $c;
+                                                break;
                                             }
-                                        }
-                                        if ($parsedDate === null) {
-                                            $dayNum = (int) preg_replace('/\D/', '', $rawHeader);
-                                            if ($dayNum >= 1 && $dayNum <= 31) {
-                                                for ($b = $c; $b >= 0; $b--) {
-                                                    $bandVal = trim((string) ($bandRow[$b] ?? ''));
-                                                    if ($bandVal !== '') {
-                                                        $bts = strtotime($bandVal);
-                                                        if ($bts !== false && checkdate((int) date('m', $bts), $dayNum, (int) date('Y', $bts))) {
-                                                            $parsedDate = date('Y-m-', $bts) . str_pad((string) $dayNum, 2, '0', STR_PAD_LEFT);
-                                                        }
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if ($parsedDate !== null) {
-                                            $dateByCol[$c] = $parsedDate;
                                         }
                                     }
 
-                                    if (empty($dateByCol)) {
-                                        $errorMessage = 'No date columns could be detected in the uploaded file.';
+                                    if (empty($sessionCols)) {
+                                        $errorMessage = 'No attendance mark columns (1 for Present / 0 for Absent) could be detected in the uploaded file.';
                                     } else {
-                                        // Sort chronologically, cap at 12 — a semester
-                                        // only ever has 12 Xiiso sessions.
-                                        asort($dateByCol);
-                                        $orderedCols = array_keys($dateByCol);
-                                        $usedCols = array_slice($orderedCols, 0, 12);
-                                        foreach (array_slice($orderedCols, 12) as $sc) {
-                                            $skippedDates[] = $dateByCol[$sc];
-                                        }
+                                        // Cap at 12 — a semester only ever has 12 Xiiso
+                                        // sessions. Extra columns beyond that are ignored.
+                                        $usedCols = array_slice($sessionCols, 0, 12);
+                                        $skippedColumnCount = count($sessionCols) - count($usedCols);
 
                                         // Ensure this semester's 12 Xiiso rows exist
                                         // (idempotent — safe to call every time).
                                         generate_sessions_for_semester($conn, $semesterId);
                                         $semesterSessions = get_sessions_for_semester($conn, $semesterId);
 
+                                        $missingDateLabels = [];
                                         foreach ($semesterSessions as $i => $sess) {
                                             if (!isset($usedCols[$i])) {
                                                 break;
                                             }
-                                            $col = $usedCols[$i];
+                                            if ($sess['date'] === null) {
+                                                $missingDateLabels[] = $sess['label'];
+                                                continue;
+                                            }
                                             $mappedSessions[] = [
                                                 'session_id' => (int) $sess['id'],
                                                 'label' => $sess['label'],
-                                                'excel_col' => $col,
-                                                'excel_date' => $dateByCol[$col],
-                                                'existing_date' => $sess['date'],
-                                                'date_conflict' => $sess['date'] !== null && $sess['date'] !== $dateByCol[$col],
+                                                'excel_col' => $usedCols[$i],
+                                                'date' => $sess['date'],
                                             ];
                                         }
 
-                                        $dataRows = array_slice($rows, $dataStartIdx);
-                                        foreach ($dataRows as $row) {
-                                            $regNo = strtoupper(trim((string) ($row[$regNoCol] ?? '')));
-                                            if ($regNo === '') {
-                                                continue;
-                                            }
+                                        if (!empty($missingDateLabels)) {
+                                            $errorMessage = 'These Xiiso sessions have no date assigned yet in this semester: '
+                                                . implode(', ', $missingDateLabels)
+                                                . '. Please assign dates on the Semesters page first, then try importing again.';
+                                            $mappedSessions = [];
+                                        }
 
-                                            $rowFirstName = $firstNameCol !== false ? trim((string) ($row[$firstNameCol] ?? '')) : '';
-                                            $rowFatherName = $fatherNameCol !== false ? trim((string) ($row[$fatherNameCol] ?? '')) : '';
-                                            $studentDisplayName = trim($rowFirstName . ' ' . $rowFatherName);
-
-                                            $status = 'ok';
-                                            $message = 'Ready to import';
-                                            $studentId = 0;
-
-                                            $studStmt = $conn->prepare('SELECT id, full_name FROM students WHERE UPPER(student_no) = ?');
-                                            $studStmt->bind_param('s', $regNo);
-                                            $studStmt->execute();
-                                            $studRow = $studStmt->get_result()->fetch_assoc();
-                                            $studStmt->close();
-
-                                            if (!$studRow) {
-                                                $status = 'error';
-                                                $message = 'No student found with this REG/NO';
-                                            } else {
-                                                $studentId = (int) $studRow['id'];
-                                                if ($studentDisplayName === '') {
-                                                    $studentDisplayName = (string) $studRow['full_name'];
+                                        if (empty($missingDateLabels)) {
+                                            $dataRows = $dataRowsRaw;
+                                            foreach ($dataRows as $row) {
+                                                $regNo = strtoupper(trim((string) ($row[$regNoCol] ?? '')));
+                                                if ($regNo === '') {
+                                                    continue;
                                                 }
+
+                                                $rowFirstName = $firstNameCol !== false ? trim((string) ($row[$firstNameCol] ?? '')) : '';
+                                                $rowFatherName = $fatherNameCol !== false ? trim((string) ($row[$fatherNameCol] ?? '')) : '';
+                                                $studentDisplayName = trim($rowFirstName . ' ' . $rowFatherName);
+
+                                                $status = 'ok';
+                                                $message = 'Ready to import';
+                                                $studentId = 0;
+
+                                                $studStmt = $conn->prepare('SELECT id, full_name FROM students WHERE UPPER(student_no) = ?');
+                                                $studStmt->bind_param('s', $regNo);
+                                                $studStmt->execute();
+                                                $studRow = $studStmt->get_result()->fetch_assoc();
+                                                $studStmt->close();
+
+                                                if (!$studRow) {
+                                                    $status = 'error';
+                                                    $message = 'No student found with this REG/NO';
+                                                } else {
+                                                    $studentId = (int) $studRow['id'];
+                                                    if ($studentDisplayName === '') {
+                                                        $studentDisplayName = (string) $studRow['full_name'];
+                                                    }
+                                                }
+
+                                                $marks = [];
+                                                foreach ($mappedSessions as $ms) {
+                                                    $cellVal = trim((string) ($row[$ms['excel_col']] ?? ''));
+                                                    $marks[$ms['session_id']] = match (true) {
+                                                        $cellVal === '1' => 'present',
+                                                        $cellVal === '0' => 'absent',
+                                                        default => null,
+                                                    };
+                                                }
+
+                                                $previewRows[] = [
+                                                    'reg_no' => $regNo,
+                                                    'display_name' => $studentDisplayName,
+                                                    'student_id' => $studentId,
+                                                    'marks' => $marks,
+                                                    'status' => $status,
+                                                    'message' => $message,
+                                                ];
                                             }
 
-                                            $marks = [];
-                                            foreach ($mappedSessions as $ms) {
-                                                $cellVal = trim((string) ($row[$ms['excel_col']] ?? ''));
-                                                $marks[$ms['session_id']] = match (true) {
-                                                    $cellVal === '1' => 'present',
-                                                    $cellVal === '0' => 'absent',
-                                                    default => null,
-                                                };
+                                            if (empty($previewRows)) {
+                                                $errorMessage = 'No student rows were found in the uploaded file.';
+                                            } else {
+                                                $_SESSION['attendance_import_preview'] = [
+                                                    'course_id' => $courseId,
+                                                    'semester_id' => $semesterId,
+                                                    'mapped_sessions' => $mappedSessions,
+                                                    'skipped_column_count' => $skippedColumnCount,
+                                                    'rows' => $previewRows,
+                                                ];
+                                                $step = 'preview';
+                                                $previewCourseId = $courseId;
+                                                $previewSemesterId = $semesterId;
                                             }
-
-                                            $previewRows[] = [
-                                                'reg_no' => $regNo,
-                                                'display_name' => $studentDisplayName,
-                                                'student_id' => $studentId,
-                                                'marks' => $marks,
-                                                'status' => $status,
-                                                'message' => $message,
-                                            ];
-                                        }
-
-                                        if (empty($previewRows)) {
-                                            $errorMessage = 'No student rows were found in the uploaded file.';
-                                        } else {
-                                            $_SESSION['attendance_import_preview'] = [
-                                                'course_id' => $courseId,
-                                                'semester_id' => $semesterId,
-                                                'mapped_sessions' => $mappedSessions,
-                                                'skipped_dates' => $skippedDates,
-                                                'rows' => $previewRows,
-                                            ];
-                                            $step = 'preview';
-                                            $previewCourseId = $courseId;
-                                            $previewSemesterId = $semesterId;
                                         }
                                     }
                                 }
@@ -459,16 +460,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $conn->begin_transaction();
         try {
-            // Fill in any of the mapped sessions' dates that are still NULL.
-            foreach ($preview['mapped_sessions'] as $ms) {
-                if ($ms['existing_date'] === null) {
-                    $dateStmt = $conn->prepare('UPDATE sessions SET date = ? WHERE id = ?');
-                    $dateStmt->bind_param('si', $ms['excel_date'], $ms['session_id']);
-                    $dateStmt->execute();
-                    $dateStmt->close();
-                }
-            }
-
             $importedCells = 0;
             $studentsTouched = [];
             foreach ($validRows as $row) {
@@ -488,7 +479,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($mark === null) {
                         continue;
                     }
-                    $sessionDate = $ms['existing_date'] ?? $ms['excel_date'];
                     save_attendance_record(
                         $conn,
                         (int) $row['student_id'],
@@ -496,7 +486,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         (int) $ms['session_id'],
                         (int) $stuRow['academic_year_id'],
                         (string) $stuRow['shift'],
-                        (string) $sessionDate,
+                        (string) $ms['date'],
                         $mark,
                         (int) $currentUser['id']
                     );
@@ -584,13 +574,21 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
 
                         <div class="alert alert-light border small mb-3">
                             Select the Course and the Semester this file's data belongs to, then upload the .xlsx/.xls/.csv
-                            file. The file must have a <strong>REG/NO</strong> column, and one column per day
-                            (grouped under month-band headers like "Feb-2026" is fine). The first 12 dates found
-                            (in date order) are mapped to Xiiso 1–12 automatically; any extra dates are ignored.
+                            file. The file must have a <strong>REG/NO</strong> column, and one column per class
+                            session — <strong>dates in the file don't matter at all</strong> (headers, merged cells,
+                            whatever you have is fine, or none at all): any column with a <strong>1</strong>
+                            (Present) or <strong>0</strong> (Absent) mark is picked up automatically, in
+                            left-to-right order, and mapped straight onto the selected Semester's own Xiiso 1–12 —
+                            using that Semester's own already-assigned dates. Extra columns beyond 12 are ignored.
+                            If a Xiiso session doesn't have a date yet, assign it on the
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page first.
                             <strong>First Names</strong>, <strong>Father's</strong>, and <strong>G.Father's</strong>
                             name columns are optional (shown for your own confirmation only — matching is always by
-                            REG/NO). Cells should contain <strong>1</strong> for Present or <strong>0</strong> for
-                            Absent; blank cells are left unmarked.
+                            REG/NO); blank cells are left unmarked.
+                            <br>
+                            <a href="?action=template" class="fw-semibold">
+                                <i class="bi bi-download"></i> Download a starter template (.xlsx)
+                            </a>
                         </div>
 
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/attendance_import.php" enctype="multipart/form-data">
@@ -650,34 +648,25 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
                         <table class="table admas-table align-middle">
                             <thead>
                                 <tr>
+                                    <th>File column #</th>
                                     <th>Xiiso</th>
-                                    <th>Date (from file)</th>
-                                    <th>Status</th>
+                                    <th>Date (from this semester)</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php foreach ($mappedSessions as $ms): ?>
+                                <?php foreach ($mappedSessions as $msPos => $ms): ?>
                                     <tr>
+                                        <td><?= $msPos + 1 ?></td>
                                         <td><?= htmlspecialchars($ms['label']) ?></td>
-                                        <td><?= htmlspecialchars($ms['excel_date']) ?></td>
-                                        <td>
-                                            <?php if ($ms['date_conflict']): ?>
-                                                <span class="badge-pill badge-absent">Already has a different date (<?= htmlspecialchars((string) $ms['existing_date']) ?>) — will keep the existing date</span>
-                                            <?php elseif ($ms['existing_date'] !== null): ?>
-                                                <span class="badge-pill badge-active">Matches existing date</span>
-                                            <?php else: ?>
-                                                <span class="badge-pill badge-active">Will set this date</span>
-                                            <?php endif; ?>
-                                        </td>
+                                        <td><?= htmlspecialchars((string) $ms['date']) ?></td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
-                    <?php if (!empty($skippedDates)): ?>
+                    <?php if ($skippedColumnCount > 0): ?>
                         <div class="alert alert-warning small mb-0">
-                            <strong><?= count($skippedDates) ?> extra date column(s) were ignored</strong> (a semester only has 12 Xiiso sessions):
-                            <?= htmlspecialchars(implode(', ', $skippedDates)) ?>
+                            <strong><?= $skippedColumnCount ?> extra mark column(s) beyond the 12 Xiiso sessions were ignored.</strong>
                         </div>
                     <?php endif; ?>
                 </div>

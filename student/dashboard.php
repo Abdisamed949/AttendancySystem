@@ -34,7 +34,8 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // logic student/courses.php already uses.
 // ---------------------------------------------------------------------
 $ownStmt = $conn->prepare(
-    'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, f.name AS faculty_name, d.name AS department_name
+    'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, s.semester_id,
+            f.name AS faculty_name, f.total_semesters, d.name AS department_name
      FROM students s
      JOIN faculties f ON f.id = s.faculty_id
      JOIN departments d ON d.id = s.department_id
@@ -47,6 +48,33 @@ $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
 $ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
 $ownShift = (string) ($ownRow['shift'] ?? '');
+
+// ---------------------------------------------------------------------
+// Program-completion banner: true only when the student's OWN semester
+// (students.semester_id — the last one they were placed into) is both
+// (a) the final semester number for their own faculty (semester name
+// "Semester {total_semesters}", the same "Semester N" naming
+// semester_name_options_for_faculty() generates and student/courses.php's
+// own Semester Box Picker already matches against) and (b) that semester's
+// status is 'ended' — i.e. the program's last semester has actually
+// concluded, not just that the student happens to be sitting on the
+// highest-numbered semester while it's still current/waiting.
+// ---------------------------------------------------------------------
+$programComplete = false;
+if ($ownRow && (int) ($ownRow['semester_id'] ?? 0) > 0) {
+    $ownSemStmt = $conn->prepare('SELECT name, status FROM semesters WHERE id = ?');
+    $ownSemStmt->bind_param('i', $ownRow['semester_id']);
+    $ownSemStmt->execute();
+    $ownSemRow = $ownSemStmt->get_result()->fetch_assoc();
+    $ownSemStmt->close();
+
+    if ($ownSemRow
+        && $ownSemRow['status'] === 'ended'
+        && $ownSemRow['name'] === 'Semester ' . (int) $ownRow['total_semesters']
+    ) {
+        $programComplete = true;
+    }
+}
 
 // Resolved from this student's own faculty's current semester, not a
 // single global settings value.
@@ -202,6 +230,16 @@ if ($ownStudentId > 0) {
                 <i class="bi bi-shield-check"></i>
                 Access scope: Own personal record only
             </div>
+
+            <?php if ($programComplete): ?>
+                <div class="alert alert-success d-flex align-items-center gap-2 mb-3" role="alert">
+                    <i class="bi bi-mortarboard-fill fs-4"></i>
+                    <div>
+                        <strong>Congratulations!</strong> You've completed all the semesters for
+                        <?= htmlspecialchars((string) $ownRow['faculty_name']) ?>.
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <h4 class="fw-bold mb-2" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
             <?php if ($ownRow): ?>

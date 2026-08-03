@@ -693,7 +693,7 @@ $studentsStmt->close();
                             <div class="d-flex gap-2">
                                 <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                 <?php if ($role !== 'dean'): ?>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-outline-secondary btn-sm">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
                                 <?php endif; ?>
@@ -760,7 +760,7 @@ $studentsStmt->close();
                                 <div class="input-group input-group-sm">
                                     <input type="text" class="form-control" name="search" placeholder="Search name or student no"
                                            value="<?= htmlspecialchars($filterSearch) ?>">
-                                    <button type="submit" class="btn btn-outline-secondary"><i class="bi bi-search"></i></button>
+                                    <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                                 </div>
                             </div>
                             <?php if ($filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepartmentId > 0 || $filterSemesterId > 0 || $filterShift !== '' || $filterSearch !== ''): ?>

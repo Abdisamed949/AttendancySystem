@@ -170,7 +170,8 @@ function export_branding(mysqli $conn): array
         }
     }
 
-    $logoPath = __DIR__ . '/../logo/logo.jpg';
+    require_once __DIR__ . '/university_logo.php';
+    $logoPath = __DIR__ . '/../' . get_university_logo_relative_path($settings);
     $logoBase64 = is_file($logoPath) ? base64_encode((string) file_get_contents($logoPath)) : '';
     $campusLine = trim(($settings['campus'] ?? '') . ' — ' . ($settings['contact_email'] ?? '') . ' — ' . ($settings['contact_phone'] ?? ''), ' —');
 

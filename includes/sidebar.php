@@ -5,10 +5,13 @@
  */
 declare(strict_types=1);
 
+require_once __DIR__ . '/university_logo.php';
+
 $activeRole = current_role();
 $activeFolder = role_folder($activeRole);
 $activeScript = basename((string) ($_SERVER['SCRIPT_NAME'] ?? ''));
 $sidebarUniversityName = $settings['university_name'] ?? 'ADMAS University';
+$sidebarLogoPath = get_university_logo_relative_path($settings ?? []);
 ?>
 <script>
     (function () {
@@ -19,7 +22,7 @@ $sidebarUniversityName = $settings['university_name'] ?? 'ADMAS University';
 </script>
 <aside class="sidebar">
     <div class="sidebar-brand">
-        <img src="<?= htmlspecialchars(BASE_URL) ?>/logo/logo.jpg" alt="<?= htmlspecialchars($sidebarUniversityName) ?> logo">
+        <img src="<?= htmlspecialchars(BASE_URL . '/' . $sidebarLogoPath) ?>" alt="<?= htmlspecialchars($sidebarUniversityName) ?> logo">
         <div>
             <span class="brand-title"><?= htmlspecialchars($sidebarUniversityName) ?></span>
             <span class="brand-subtitle">Attendance System</span>

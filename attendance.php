@@ -578,7 +578,7 @@ $scopeBanner = match ($role) {
                                 <?php endif; ?>
                             </h6>
                             <?php if ($xiisoGridUrl !== ''): ?>
-                                <a href="<?= htmlspecialchars($xiisoGridUrl) ?>" target="_blank" rel="noopener" class="btn btn-outline-secondary btn-sm">
+                                <a href="<?= htmlspecialchars($xiisoGridUrl) ?>" target="_blank" rel="noopener" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                     <i class="bi bi-bar-chart"></i> View as Report
                                 </a>
                             <?php endif; ?>

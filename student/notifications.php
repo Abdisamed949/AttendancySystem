@@ -148,7 +148,7 @@ $unreadCount = count(array_filter($notifications, static fn ($n) => (int) $n['is
                                                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/student/notifications.php" style="display:inline;">
                                                     <input type="hidden" name="action" value="mark_read">
                                                     <input type="hidden" name="notification_id" value="<?= (int) $n['id'] ?>">
-                                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Mark as Read</button>
+                                                    <button type="submit" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">Mark as Read</button>
                                                 </form>
                                             <?php endif; ?>
                                         </td>

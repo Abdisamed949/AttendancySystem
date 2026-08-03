@@ -224,8 +224,8 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                 </div>
                 <div class="d-flex gap-2">
                     <?php if ($isValid): ?>
-                        <a href="?<?= htmlspecialchars(http_build_query(['course_id' => $courseId, 'semester_id' => $semesterId, 'export' => 'excel'])) ?>" class="btn btn-outline-secondary btn-sm"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
-                        <a href="?<?= htmlspecialchars(http_build_query(['course_id' => $courseId, 'semester_id' => $semesterId, 'export' => 'pdf'])) ?>" class="btn btn-outline-secondary btn-sm"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
+                        <a href="?<?= htmlspecialchars(http_build_query(['course_id' => $courseId, 'semester_id' => $semesterId, 'export' => 'excel'])) ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
+                        <a href="?<?= htmlspecialchars(http_build_query(['course_id' => $courseId, 'semester_id' => $semesterId, 'export' => 'pdf'])) ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
                     <?php endif; ?>
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="btn btn-outline-secondary btn-sm">
                         <i class="bi bi-arrow-left"></i> Back to My Courses

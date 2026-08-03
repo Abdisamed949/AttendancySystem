@@ -301,7 +301,7 @@ $faculties = $conn->query('SELECT id, name, semesters_per_year FROM faculties OR
                                                         <input type="number" class="form-control form-control-sm" name="semesters_per_year"
                                                                min="1" max="6" required style="max-width: 100px;"
                                                                value="<?= (int) $f['semesters_per_year'] ?>">
-                                                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                                        <button type="submit" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                             <i class="bi bi-save"></i> Save
                                                         </button>
                                                     </form>

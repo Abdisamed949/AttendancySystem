@@ -497,6 +497,82 @@ function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?stri
 }
 
 /**
+ * Real roster — the student ids for a (course, semester[, shift])
+ * combination — the exact same enrollment-then-department-fallback
+ * resolution get_xiiso_grid_data() uses to build the actual grid, kept in
+ * sync on purpose so a "Students" count shown anywhere else (e.g.
+ * lecturer/courses.php's or lecturer/dashboard.php's summary tables) never
+ * disagrees with what the Grid View itself would show for that same
+ * course. A bare `course_enrollments` count alone understates this
+ * whenever a course has no explicit enrollment rows yet and is only ever
+ * reachable via the department-roster fallback.
+ *
+ * @return int[] student ids
+ */
+function get_course_roster_student_ids(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): array
+{
+    if ($shift !== null && $shift !== '') {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM course_enrollments ce
+             JOIN students s ON s.id = ce.student_id
+             WHERE ce.course_id = ? AND s.status = 'active' AND s.shift = ?"
+        );
+        $stmt->bind_param('is', $courseId, $shift);
+    } else {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM course_enrollments ce
+             JOIN students s ON s.id = ce.student_id
+             WHERE ce.course_id = ? AND s.status = 'active'"
+        );
+        $stmt->bind_param('i', $courseId);
+    }
+    $stmt->execute();
+    $ids = array_map(static fn ($r) => (int) $r['id'], $stmt->get_result()->fetch_all(MYSQLI_ASSOC));
+    $stmt->close();
+
+    if (!empty($ids)) {
+        return $ids;
+    }
+
+    $rosterDepartmentId = resolve_roster_department_id($conn, $courseId, $semesterId, $shift);
+    if ($rosterDepartmentId !== null) {
+        if ($shift !== null && $shift !== '') {
+            $stmt = $conn->prepare("SELECT id FROM students WHERE department_id = ? AND status = 'active' AND shift = ?");
+            $stmt->bind_param('is', $rosterDepartmentId, $shift);
+        } else {
+            $stmt = $conn->prepare("SELECT id FROM students WHERE department_id = ? AND status = 'active'");
+            $stmt->bind_param('i', $rosterDepartmentId);
+        }
+    } elseif ($shift !== null && $shift !== '') {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM students s JOIN courses c ON c.department_id = s.department_id
+             WHERE c.id = ? AND s.status = 'active' AND s.shift = ?"
+        );
+        $stmt->bind_param('is', $courseId, $shift);
+    } else {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM students s JOIN courses c ON c.department_id = s.department_id
+             WHERE c.id = ? AND s.status = 'active'"
+        );
+        $stmt->bind_param('i', $courseId);
+    }
+    $stmt->execute();
+    $ids = array_map(static fn ($r) => (int) $r['id'], $stmt->get_result()->fetch_all(MYSQLI_ASSOC));
+    $stmt->close();
+
+    return $ids;
+}
+
+/**
+ * Real roster SIZE for a (course, semester[, shift]) combination — see
+ * get_course_roster_student_ids() above (this is just its count()).
+ */
+function get_course_roster_count(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): int
+{
+    return count(get_course_roster_student_ids($conn, $courseId, $semesterId, $shift));
+}
+
+/**
  * Groups a semester's sessions (as returned by get_sessions_for_semester(),
  * already ordered by session_number) into consecutive same-month bands for
  * the Xiiso grid's two-row <thead>. Sessions with no date assigned yet are
