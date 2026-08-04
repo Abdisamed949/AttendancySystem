@@ -106,8 +106,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $thresholdFormValues = ['min_attendance_pct' => $minAttendancePctInput];
 
         $validationError = '';
-        if (!is_numeric($minAttendancePctInput) || (float) $minAttendancePctInput < 0 || (float) $minAttendancePctInput > 100) {
-            $validationError = 'Minimum Attendance % must be a number between 0 and 100.';
+        if (!is_numeric($minAttendancePctInput) || (float) $minAttendancePctInput < 0 || (float) $minAttendancePctInput > 10) {
+            $validationError = 'Minimum Attendance must be a number between 0 and 10 (out of the 10 regular Xiiso sessions).';
         }
 
         if ($validationError === '') {
@@ -253,11 +253,11 @@ $faculties = $conn->query('SELECT id, name, semesters_per_year FROM faculties OR
                             <input type="hidden" name="action" value="save_threshold">
 
                             <div class="mb-3">
-                                <label for="minAttendancePctInput" class="form-label">Minimum Attendance %</label>
+                                <label for="minAttendancePctInput" class="form-label">Minimum Attendance (out of 10)</label>
                                 <input type="number" class="form-control" id="minAttendancePctInput" name="min_attendance_pct"
-                                       min="0" max="100" step="0.01" required
+                                       min="0" max="10" step="0.1" required
                                        value="<?= htmlspecialchars($thresholdFormValues['min_attendance_pct']) ?>">
-                                <div class="form-text">Students below this percentage are surfaced in Notifications / Alerts.</div>
+                                <div class="form-text">Out of 10 — each Present regular Xiiso session is worth 1 point (Midterm/Final don't count). Students below this score are surfaced in Notifications / Alerts.</div>
                             </div>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">

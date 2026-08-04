@@ -261,7 +261,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // foreign course into the Dean's own faculty possible.
 if ($role === 'dean') {
     $semestersStmt = $conn->prepare(
-        'SELECT s.id, s.name, s.is_current, s.faculty_id, f.name AS faculty_name, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.is_current, s.status, s.faculty_id, f.name AS faculty_name, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          JOIN faculties f ON f.id = s.faculty_id
@@ -271,7 +271,7 @@ if ($role === 'dean') {
     $semestersStmt->bind_param('i', $deanFacultyId);
 } else {
     $semestersStmt = $conn->prepare(
-        'SELECT s.id, s.name, s.is_current, s.faculty_id, f.name AS faculty_name, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.is_current, s.status, s.faculty_id, f.name AS faculty_name, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          JOIN faculties f ON f.id = s.faculty_id
@@ -344,6 +344,19 @@ $offeringsStmt->execute();
 $offerings = $offeringsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $offeringsStmt->close();
 
+// Enrolled-student count for this course (course_enrollments — the same
+// real, explicit roster "Enroll Students" manages). Not split by
+// shift/semester, since course_enrollments has no shift column — every
+// offering row below shares this one course-wide number. Used to mark a
+// row "Complete" only once it has both a lecturer AND at least one
+// enrolled student (same definition as admin/courses.php's own
+// Current-Offering completeness badge).
+$enrolledCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_enrollments WHERE course_id = ?');
+$enrolledCountStmt->bind_param('i', $courseId);
+$enrolledCountStmt->execute();
+$enrolledCount = (int) ($enrolledCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+$enrolledCountStmt->close();
+
 // (semester_id, shift) pairs already offered — used both by the "already
 // offered" JS annotation below and, indirectly, by uniqueness itself.
 $offeredSemesterShiftPairs = [];
@@ -368,11 +381,13 @@ foreach ($offerings as $o) {
         <?php include __DIR__ . '/../includes/topbar.php'; ?>
 
         <div class="page-body">
-            <div class="scope-banner">
-                <i class="bi bi-shield-check"></i>
-                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="text-decoration-none">&larr; Back to Courses</a>
-                &nbsp;&middot;&nbsp;
-                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" class="text-decoration-none">Enroll Students</a>
+            <div class="d-flex flex-wrap gap-2 mb-4">
+                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary px-4 py-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                    <i class="bi bi-arrow-left"></i> Back to Courses
+                </a>
+                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" class="btn btn-primary px-4 py-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                    <i class="bi bi-person-plus"></i> Enroll Students
+                </a>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -415,6 +430,7 @@ foreach ($offerings as $o) {
                                         <th>Shift</th>
                                         <th>Academic Year</th>
                                         <th>Lecturer</th>
+                                        <th>Enrolled</th>
                                         <th>Roster Department</th>
                                         <th>Teaching Period</th>
                                         <th></th>
@@ -423,7 +439,7 @@ foreach ($offerings as $o) {
                                 <tbody>
                                     <?php if (empty($offerings)): ?>
                                         <tr>
-                                            <td colspan="8" class="text-center text-muted py-3">No offerings yet — add one on the right.</td>
+                                            <td colspan="9" class="text-center text-muted py-3">No offerings yet — add one on the right.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($offerings as $o): ?>
@@ -448,6 +464,22 @@ foreach ($offerings as $o) {
                                                         <?= htmlspecialchars($o['lecturer_name']) ?>
                                                     <?php else: ?>
                                                         <span class="text-muted fst-italic">Unassigned</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php $offeringIsComplete = $o['lecturer_name'] !== null && $enrolledCount > 0; ?>
+                                                    <div class="fw-semibold" style="color: var(--admas-text);">
+                                                        <i class="bi bi-people-fill text-muted"></i> <?= number_format($enrolledCount) ?>
+                                                    </div>
+                                                    <?php if ($offeringIsComplete): ?>
+                                                        <span class="badge-pill badge-active"><i class="bi bi-check-circle-fill"></i> Complete</span>
+                                                    <?php else: ?>
+                                                        <span class="badge-pill badge-warning" title="Missing: <?= htmlspecialchars(trim(($o['lecturer_name'] !== null ? '' : 'lecturer ') . ($enrolledCount > 0 ? '' : 'enrolled students'))) ?>">
+                                                            <i class="bi bi-exclamation-triangle-fill"></i> Incomplete
+                                                        </span>
+                                                    <?php endif; ?>
+                                                    <?php if ($enrolledCount === 0): ?>
+                                                        <div><a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" class="small">Enroll students &rarr;</a></div>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
@@ -503,7 +535,7 @@ foreach ($offerings as $o) {
                                         <optgroup label="<?= htmlspecialchars($facultyName) ?>">
                                             <?php foreach ($facultySemesters as $s): ?>
                                                 <option value="<?= (int) $s['id'] ?>" data-academic-year="<?= htmlspecialchars($s['academic_year_label']) ?>" data-faculty-id="<?= (int) $s['faculty_id'] ?>">
-                                                    <?= htmlspecialchars($s['name']) ?><?= (int) $s['is_current'] === 1 ? ' — Current' : '' ?>
+                                                    <?= htmlspecialchars($s['name']) ?> (<?= htmlspecialchars($s['academic_year_label']) ?> · <?= htmlspecialchars(ucfirst($s['status'])) ?>) — <?= htmlspecialchars($s['faculty_name']) ?>
                                                 </option>
                                             <?php endforeach; ?>
                                         </optgroup>
@@ -559,14 +591,14 @@ foreach ($offerings as $o) {
                             <div class="row g-2">
                                 <div class="col-6">
                                     <label class="form-label small mb-1">Start Date</label>
-                                    <input type="date" class="form-control form-control-sm" name="start_date">
+                                    <input type="date" class="form-control form-control-sm" name="start_date" id="offeringStartDate">
                                 </div>
                                 <div class="col-6">
                                     <label class="form-label small mb-1">End Date</label>
-                                    <input type="date" class="form-control form-control-sm" name="end_date">
+                                    <input type="date" class="form-control form-control-sm" name="end_date" id="offeringEndDate">
                                 </div>
                             </div>
-                            <div class="form-text">Optional — this course's actual teaching period within the selected semester.</div>
+                            <div class="form-text">Optional — this course's actual teaching period within the selected semester. End Date auto-fills 3 months after Start Date (same as a semester's 12 Xiiso sessions); you can still edit it by hand.</div>
 
                             <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($semesters) ? 'disabled' : '' ?>>
                                 <i class="bi bi-save"></i> Save Offering
@@ -579,6 +611,7 @@ foreach ($offerings as $o) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/offering_dates.js"></script>
     <script>
         function admasUpdateAcademicYearDisplay() {
             const select = document.getElementById('offeringSemesterSelect');
@@ -647,6 +680,7 @@ foreach ($offerings as $o) {
             admasUpdateAcademicYearDisplay();
             admasUpdateAlreadyOfferedNote();
             admasUpdateRosterDepartmentOptions();
+            admasWireOfferingDateAutoFill('offeringStartDate', 'offeringEndDate');
         });
     </script>
 </body>

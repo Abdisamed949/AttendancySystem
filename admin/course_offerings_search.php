@@ -116,8 +116,8 @@ $coursesStmt->close();
             </div>
 
             <div class="admas-card p-4">
-                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings_search.php" class="d-flex gap-2 mb-3">
-                    <input type="text" name="q" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Search by course code or name" value="<?= htmlspecialchars($searchTerm) ?>">
+                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings_search.php" class="d-flex gap-2 mb-3" id="courseOfferingsSearchForm">
+                    <input type="text" name="q" class="form-control form-control-sm" style="max-width: 320px;" placeholder="Search by course code or name" data-live-search value="<?= htmlspecialchars($searchTerm) ?>">
                     <button type="submit" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                         <i class="bi bi-search"></i> Search
                     </button>
@@ -176,5 +176,11 @@ $coursesStmt->close();
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            admasInitLiveFilter('#courseOfferingsSearchForm');
+        });
+    </script>
 </body>
 </html>

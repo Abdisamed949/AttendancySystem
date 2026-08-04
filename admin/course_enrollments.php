@@ -192,22 +192,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 if ($role === 'dean') {
     $enrolledStmt = $conn->prepare(
-        'SELECT s.id, s.student_no, s.full_name, f.name AS faculty_name, d.name AS department_name
+        'SELECT s.id, s.student_no, s.full_name, s.shift, s.semester_id AS student_semester_id,
+                f.name AS faculty_name, d.name AS department_name,
+                ay.label AS academic_year_label, sem.name AS semester_name
          FROM course_enrollments ce
          JOIN students s ON s.id = ce.student_id
          JOIN faculties f ON f.id = s.faculty_id
          JOIN departments d ON d.id = s.department_id
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         LEFT JOIN semesters sem ON sem.id = s.semester_id
          WHERE ce.course_id = ? AND s.faculty_id = ?
          ORDER BY s.full_name'
     );
     $enrolledStmt->bind_param('ii', $courseId, $deanFacultyId);
 } else {
     $enrolledStmt = $conn->prepare(
-        'SELECT s.id, s.student_no, s.full_name, f.name AS faculty_name, d.name AS department_name
+        'SELECT s.id, s.student_no, s.full_name, s.shift, s.semester_id AS student_semester_id,
+                f.name AS faculty_name, d.name AS department_name,
+                ay.label AS academic_year_label, sem.name AS semester_name
          FROM course_enrollments ce
          JOIN students s ON s.id = ce.student_id
          JOIN faculties f ON f.id = s.faculty_id
          JOIN departments d ON d.id = s.department_id
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         LEFT JOIN semesters sem ON sem.id = s.semester_id
          WHERE ce.course_id = ?
          ORDER BY s.full_name'
     );
@@ -216,6 +224,27 @@ if ($role === 'dean') {
 $enrolledStmt->execute();
 $enrolledStudents = $enrolledStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $enrolledStmt->close();
+
+// ---------------------------------------------------------------------
+// Which semester(s) this course is actively offered in right now (any
+// faculty, any shift) — lets the "Currently Enrolled" list show, per
+// student, whether their OWN current semester is one this course is
+// actually being taught in (vs. an enrollment left over from a semester
+// they've since moved past).
+// ---------------------------------------------------------------------
+$courseCurrentSemesterIds = [];
+$curSemStmt = $conn->prepare(
+    "SELECT DISTINCT co.semester_id
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id
+     WHERE co.course_id = ? AND se.status = 'current'"
+);
+$curSemStmt->bind_param('i', $courseId);
+$curSemStmt->execute();
+foreach ($curSemStmt->get_result()->fetch_all(MYSQLI_ASSOC) as $row) {
+    $courseCurrentSemesterIds[] = (int) $row['semester_id'];
+}
+$curSemStmt->close();
 
 // ---------------------------------------------------------------------
 // Student filter bar — same shape/query-building pattern as
@@ -259,18 +288,31 @@ foreach ($departments as $dept) {
 }
 
 if ($role === 'dean') {
-    $semStmt = $conn->prepare('SELECT id, name, faculty_id FROM semesters WHERE faculty_id = ? ORDER BY start_date DESC');
+    $semStmt = $conn->prepare(
+        'SELECT se.id, se.name, se.faculty_id, se.status, ay.label AS academic_year_label
+         FROM semesters se JOIN academic_years ay ON ay.id = se.academic_year_id
+         WHERE se.faculty_id = ? ORDER BY se.start_date DESC'
+    );
     $semStmt->bind_param('i', $deanFacultyId);
     $semStmt->execute();
     $semesters = $semStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $semStmt->close();
 } else {
-    $semesters = $conn->query('SELECT id, name, faculty_id FROM semesters ORDER BY start_date DESC')->fetch_all(MYSQLI_ASSOC);
+    $semesters = $conn->query(
+        'SELECT se.id, se.name, se.faculty_id, se.status, ay.label AS academic_year_label
+         FROM semesters se JOIN academic_years ay ON ay.id = se.academic_year_id
+         ORDER BY se.start_date DESC'
+    )->fetch_all(MYSQLI_ASSOC);
 }
 
 $semestersByFacultyId = [];
 foreach ($semesters as $sem) {
-    $semestersByFacultyId[(int) $sem['faculty_id']][] = ['id' => (int) $sem['id'], 'name' => $sem['name']];
+    $semestersByFacultyId[(int) $sem['faculty_id']][] = [
+        'id' => (int) $sem['id'],
+        'name' => $sem['name'],
+        'academic_year_label' => $sem['academic_year_label'],
+        'status' => $sem['status'],
+    ];
 }
 
 $conditions = [];
@@ -337,6 +379,74 @@ $studentsStmt->close();
 
 $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepartmentId > 0
     || $filterSemesterId > 0 || $filterShift !== '' || $filterSearch !== '';
+
+/**
+ * Renders the candidate-students <tbody> rows — shared by the normal
+ * full-page render below and the AJAX partial branch right after this
+ * function, so this page's own AJAX live-filtering (see the inline script
+ * at the bottom of this file, fetching this same page with an
+ * X-Requested-With header) can never drift from what a full page load
+ * would show.
+ */
+function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilter): void
+{
+    if (empty($candidateStudents)) {
+        ?>
+        <tr>
+            <td colspan="9" class="text-center text-muted py-4">
+                <?= $hasAnyFilter ? 'No students match the current filters.' : 'Use the filters above to find students.' ?>
+            </td>
+        </tr>
+        <?php
+        return;
+    }
+
+    foreach ($candidateStudents as $s) {
+        $alreadyEnrolled = $s['enrollment_id'] !== null;
+        ?>
+        <tr>
+            <td>
+                <?php if ($alreadyEnrolled): ?>
+                    <input type="checkbox" disabled title="Already enrolled">
+                <?php else: ?>
+                    <input type="checkbox" class="row-check-candidate" value="<?= (int) $s['id'] ?>"
+                           data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
+                <?php endif; ?>
+            </td>
+            <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
+            <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
+            <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
+            <td><?= htmlspecialchars($s['faculty_name']) ?></td>
+            <td><?= htmlspecialchars($s['department_name']) ?></td>
+            <td>
+                <?php if ($s['semester_name']): ?>
+                    <?= htmlspecialchars($s['semester_name']) ?>
+                <?php else: ?>
+                    <span class="text-muted fst-italic">Not set</span>
+                <?php endif; ?>
+            </td>
+            <td><?= htmlspecialchars(ENROLL_SHIFT_LABELS[$s['shift']] ?? $s['shift']) ?></td>
+            <td>
+                <?php if ($alreadyEnrolled): ?>
+                    <span class="badge-pill badge-active">Already Enrolled</span>
+                <?php endif; ?>
+            </td>
+        </tr>
+        <?php
+    }
+}
+
+// A live-filter fetch() (the inline script at the bottom of this file)
+// sends this header to ask for just the candidate-rows HTML instead of the
+// whole page — every query/scoping rule above this point (dean's
+// own-faculty restriction included) already ran identically either way, so
+// a partial request is exactly as safe as a full page load, just cheaper
+// to render and swap in without ever navigating the browser at all (so the
+// page truly cannot move, not even a full-reload flash).
+if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
+    render_enroll_candidate_rows($candidateStudents, $hasAnyFilter);
+    exit;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -400,6 +510,12 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
 
             <div class="admas-card p-4 mb-3">
                 <h6 class="small text-uppercase text-muted mb-2">Currently Enrolled (<?= count($enrolledStudents) ?>)</h6>
+                <?php if (!empty($enrolledStudents) && !empty($courseCurrentSemesterIds)): ?>
+                    <p class="small text-muted mb-2">
+                        <span class="badge-pill badge-present">Current</span> = this student's own current semester matches a semester this course is actively offered in right now.
+                        <span class="badge-pill badge-neutral">Other</span> = enrolled, but their current semester differs (likely a past or future cohort).
+                    </p>
+                <?php endif; ?>
                 <?php if (empty($enrolledStudents)): ?>
                     <p class="text-muted mb-0">No students enrolled yet — use the filter below to find and enroll some.</p>
                 <?php else: ?>
@@ -411,16 +527,34 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                                     <th>Full Name</th>
                                     <th>Faculty</th>
                                     <th>Department</th>
+                                    <th>Academic Year</th>
+                                    <th>Semester</th>
+                                    <th>Shift</th>
                                     <th></th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php foreach ($enrolledStudents as $es): ?>
+                                    <?php
+                                    $studentSemesterId = $es['student_semester_id'] !== null ? (int) $es['student_semester_id'] : null;
+                                    $isCurrentForCourse = $studentSemesterId !== null && in_array($studentSemesterId, $courseCurrentSemesterIds, true);
+                                    ?>
                                     <tr>
                                         <td><span class="badge-pill badge-active"><?= htmlspecialchars($es['student_no']) ?></span></td>
                                         <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($es['full_name']) ?></td>
                                         <td><?= htmlspecialchars($es['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($es['department_name']) ?></td>
+                                        <td><?= htmlspecialchars($es['academic_year_label']) ?></td>
+                                        <td>
+                                            <?php if ($es['semester_name']): ?>
+                                                <span class="badge-pill <?= $isCurrentForCourse ? 'badge-present' : 'badge-neutral' ?>">
+                                                    <?= htmlspecialchars($es['semester_name']) ?><?= $isCurrentForCourse ? ' — Current' : '' ?>
+                                                </span>
+                                            <?php else: ?>
+                                                <span class="text-muted fst-italic">Not set</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td><?= htmlspecialchars(ENROLL_SHIFT_LABELS[$es['shift']] ?? $es['shift']) ?></td>
                                         <td class="text-end">
                                             <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" style="display:inline;"
                                                   onsubmit="return confirm('Remove this student\'s enrollment?');">
@@ -453,7 +587,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                 </form>
 
                 <!-- Filter bar: real SQL WHERE filters via GET -->
-                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php" class="row g-2 mb-3">
+                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php" class="row g-2 mb-3" id="enrollFilterForm">
                     <input type="hidden" name="course_id" value="<?= (int) $courseId ?>">
                     <div class="col-sm-6 col-md-2">
                         <select class="form-select form-select-sm" name="academic_year_id">
@@ -503,7 +637,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                     </div>
                     <div class="col-sm-6 col-md-2">
                         <div class="input-group input-group-sm">
-                            <input type="text" class="form-control" name="search" placeholder="Search name or student no"
+                            <input type="text" class="form-control" name="search" placeholder="Search name or student no" data-live-search
                                    value="<?= htmlspecialchars($filterSearch) ?>">
                             <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                         </div>
@@ -530,46 +664,8 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                                 <th></th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <?php if (empty($candidateStudents)): ?>
-                                <tr>
-                                    <td colspan="9" class="text-center text-muted py-4">
-                                        <?= $hasAnyFilter ? 'No students match the current filters.' : 'Use the filters above to find students.' ?>
-                                    </td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($candidateStudents as $s): ?>
-                                    <?php $alreadyEnrolled = $s['enrollment_id'] !== null; ?>
-                                    <tr>
-                                        <td>
-                                            <?php if ($alreadyEnrolled): ?>
-                                                <input type="checkbox" disabled title="Already enrolled">
-                                            <?php else: ?>
-                                                <input type="checkbox" class="row-check-candidate" value="<?= (int) $s['id'] ?>"
-                                                       data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
-                                            <?php endif; ?>
-                                        </td>
-                                        <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
-                                        <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
-                                        <td><?= htmlspecialchars($s['faculty_name']) ?></td>
-                                        <td><?= htmlspecialchars($s['department_name']) ?></td>
-                                        <td>
-                                            <?php if ($s['semester_name']): ?>
-                                                <?= htmlspecialchars($s['semester_name']) ?>
-                                            <?php else: ?>
-                                                <span class="text-muted fst-italic">Not set</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td><?= htmlspecialchars(ENROLL_SHIFT_LABELS[$s['shift']] ?? $s['shift']) ?></td>
-                                        <td>
-                                            <?php if ($alreadyEnrolled): ?>
-                                                <span class="badge-pill badge-active">Already Enrolled</span>
-                                            <?php endif; ?>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
+                        <tbody id="candidateStudentsBody">
+                            <?php render_enroll_candidate_rows($candidateStudents, $hasAnyFilter); ?>
                         </tbody>
                     </table>
                 </div>
@@ -579,6 +675,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_enroll.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -619,7 +716,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name;
+                opt.textContent = admasSemesterLabel(sem);
                 select.appendChild(opt);
             });
 
@@ -629,11 +726,11 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
             }
         }
 
-        window.addEventListener('DOMContentLoaded', () => {
-            const filterFacultyId = document.getElementById('filterFacultySelect').value;
-            updateFilterDepartmentOptions(filterFacultyId, <?= (int) $filterDepartmentId ?>);
-            updateFilterSemesterOptions(filterFacultyId, <?= (int) $filterSemesterId ?>);
-
+        // Live-filtering here never navigates the browser at all — it
+        // fetches this same page's own filtered rows in the background and
+        // swaps just the <tbody>, so the page genuinely cannot move/flash/
+        // reload while filtering, not even briefly.
+        function admasWireCandidateRowCheckboxes() {
             admasInitBulkEnroll({
                 checkboxSelector: '.row-check-candidate',
                 selectAllSelector: '#selectAllCandidates',
@@ -642,6 +739,55 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
                 hiddenContainerSelector: '#bulkEnrollIds',
                 hiddenInputName: 'student_ids[]',
             });
+        }
+
+        function admasFetchCandidates() {
+            const form = document.getElementById('enrollFilterForm');
+            const tbody = document.getElementById('candidateStudentsBody');
+            const query = new URLSearchParams(new FormData(form)).toString();
+            const url = form.action + '?' + query;
+
+            fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error('Request failed');
+                    }
+                    return response.text();
+                })
+                .then((html) => {
+                    tbody.innerHTML = html;
+                    history.replaceState(null, '', url);
+                    admasWireCandidateRowCheckboxes();
+                })
+                .catch(() => {
+                    // Network/server error — fall back to a real page load
+                    // so the filter still works even if the fetch failed.
+                    form.submit();
+                });
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const filterFacultyId = document.getElementById('filterFacultySelect').value;
+            updateFilterDepartmentOptions(filterFacultyId, <?= (int) $filterDepartmentId ?>);
+            updateFilterSemesterOptions(filterFacultyId, <?= (int) $filterSemesterId ?>);
+
+            const enrollFilterForm = document.getElementById('enrollFilterForm');
+            enrollFilterForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                admasFetchCandidates();
+            });
+            enrollFilterForm.querySelectorAll('select').forEach((select) => {
+                select.addEventListener('change', admasFetchCandidates);
+            });
+            let debounceTimer = null;
+            enrollFilterForm.querySelectorAll('[data-live-search]').forEach((input) => {
+                input.addEventListener('input', () => {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(admasFetchCandidates, 500);
+                });
+            });
+
+            admasWireCandidateRowCheckboxes();
         });
     </script>
 </body>

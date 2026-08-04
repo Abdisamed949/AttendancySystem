@@ -222,14 +222,26 @@ $currentSemesterIdByFacultyId = [];
 if (!empty($facultyIds)) {
     $placeholders = implode(',', array_fill(0, count($facultyIds), '?'));
     $types = str_repeat('i', count($facultyIds));
-    $semStmt = $conn->prepare("SELECT id, name, faculty_id, is_current FROM semesters WHERE faculty_id IN ($placeholders) ORDER BY start_date DESC");
+    $semStmt = $conn->prepare(
+        "SELECT se.id, se.name, se.faculty_id, se.is_current, se.status, ay.label AS academic_year_label, f.name AS faculty_name
+         FROM semesters se
+         JOIN academic_years ay ON ay.id = se.academic_year_id
+         JOIN faculties f ON f.id = se.faculty_id
+         WHERE se.faculty_id IN ($placeholders) ORDER BY se.start_date DESC"
+    );
     $semStmt->bind_param($types, ...$facultyIds);
     $semStmt->execute();
     $semRows = $semStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $semStmt->close();
     foreach ($semRows as $sem) {
         $fid = (int) $sem['faculty_id'];
-        $semestersByFacultyId[$fid][] = ['id' => (int) $sem['id'], 'name' => $sem['name']];
+        $semestersByFacultyId[$fid][] = [
+            'id' => (int) $sem['id'],
+            'name' => $sem['name'],
+            'academic_year_label' => $sem['academic_year_label'],
+            'status' => $sem['status'],
+            'faculty_name' => $sem['faculty_name'],
+        ];
         if (!empty($sem['is_current'])) {
             $currentSemesterIdByFacultyId[$fid] = (int) $sem['id'];
         }
@@ -445,7 +457,7 @@ $scopeBanner = match ($role) {
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Faculty</label>
                             <?php if ($role === 'system_admin'): ?>
-                                <select class="form-select form-select-sm" id="facultySelect" onchange="rebuildCourseSelect(this.value, ''); admasFilterCourseByDepartment(document.getElementById('courseSelect'), document.getElementById('departmentFilterSelect').value); admasUpdateSemesterOptionsForCourse('');">
+                                <select class="form-select form-select-sm" id="facultySelect" onchange="rebuildCourseSelect(this.value, ''); admasFilterCourseSelect(); admasUpdateSemesterOptionsForCourse('');">
                                     <option value="0">All Faculties</option>
                                     <?php foreach ($faculties as $f): ?>
                                         <option value="<?= (int) $f['id'] ?>"><?= htmlspecialchars($f['name']) ?></option>
@@ -462,7 +474,7 @@ $scopeBanner = match ($role) {
 
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Department <span class="text-muted fw-normal">(optional)</span></label>
-                            <select class="form-select form-select-sm" id="departmentFilterSelect" onchange="admasFilterCourseByDepartment(document.getElementById('courseSelect'), this.value)">
+                            <select class="form-select form-select-sm" id="departmentFilterSelect" onchange="admasFilterCourseSelect()">
                                 <option value="">All Departments</option>
                                 <?php foreach ($departmentsForFilter as $d): ?>
                                     <option value="<?= (int) $d['id'] ?>">
@@ -475,6 +487,7 @@ $scopeBanner = match ($role) {
 
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Course</label>
+                            <input type="text" class="form-control form-control-sm mb-1" id="courseSearchInput" placeholder="Search course code or name" oninput="admasFilterCourseSelect()">
                             <select class="form-select form-select-sm" name="course_id" id="courseSelect" required onchange="admasUpdateSemesterOptionsForCourse(this.value)">
                                 <option value="">Select course</option>
                                 <?php if ($role === 'lecturer'): ?>
@@ -604,8 +617,11 @@ $scopeBanner = match ($role) {
                                     </tr>
                                     <tr>
                                         <?php foreach ($gridData['sessions'] as $sIndex => $s): ?>
-                                            <?php $sIsGroupEnd = $sIndex === count($gridData['sessions']) - 1 || isset($xiisoChunkEndSessionIds[(int) $s['id']]); ?>
-                                            <th class="text-center<?= $sIsGroupEnd ? ' col-group-end' : '' ?>"><?= htmlspecialchars($s['label']) ?></th>
+                                            <?php
+                                            $sIsGroupEnd = $sIndex === count($gridData['sessions']) - 1 || isset($xiisoChunkEndSessionIds[(int) $s['id']]);
+                                            $sIsExam = $s['type'] !== 'regular';
+                                            ?>
+                                            <th class="text-center<?= $sIsGroupEnd ? ' col-group-end' : '' ?><?= $sIsExam ? ' col-exam' : '' ?>" <?= $sIsExam ? 'title="Exam — not part of the attendance score"' : '' ?>><?= htmlspecialchars($s['label']) ?></th>
                                         <?php endforeach; ?>
                                     </tr>
                                 </thead>
@@ -615,19 +631,18 @@ $scopeBanner = match ($role) {
                                         $gsid = (int) $st['id'];
                                         $gPresentCount = 0;
                                         $gAbsentCount = 0;
-                                        $gTotalMarks = 0;
                                         foreach ($gridData['sessions'] as $s) {
+                                            if ($s['type'] !== 'regular') {
+                                                continue;
+                                            }
                                             $gStatus = $gridData['marks'][$gsid][(int) $s['id']] ?? null;
-                                            if ($gStatus !== null) {
-                                                $gTotalMarks++;
-                                                if ($gStatus === 'present') {
-                                                    $gPresentCount++;
-                                                } elseif ($gStatus === 'absent') {
-                                                    $gAbsentCount++;
-                                                }
+                                            if ($gStatus === 'present') {
+                                                $gPresentCount++;
+                                            } elseif ($gStatus === 'absent') {
+                                                $gAbsentCount++;
                                             }
                                         }
-                                        $gPct = $gTotalMarks > 0 ? round(100 * $gPresentCount / $gTotalMarks, 1) : 0.0;
+                                        $gPct = min(ATTENDANCE_MAX_SCORE, $gPresentCount);
                                         ?>
                                         <tr data-student-row="<?= $gsid ?>">
                                             <td><?= htmlspecialchars($st['student_no']) ?></td>
@@ -637,26 +652,29 @@ $scopeBanner = match ($role) {
                                                 $gSessId = (int) $s['id'];
                                                 $gCellStatus = $gridData['marks'][$gsid][$gSessId] ?? '';
                                                 $gHasDate = $s['date'] ? true : false;
+                                                $gIsExam = $s['type'] !== 'regular';
                                                 $gCellGlyph = match ($gCellStatus) {
                                                     'present' => 'P',
                                                     'absent' => 'A',
                                                     default => '',
                                                 };
                                                 $gIsGroupEnd = $sIndex === count($gridData['sessions']) - 1 || isset($xiisoChunkEndSessionIds[$gSessId]);
-                                                $gDisabled = !$gHasDate || !$canWriteAttendance;
-                                                $gTitle = !$gHasDate
-                                                    ? 'No date assigned yet — ask an admin to assign one in Semesters.'
-                                                    : (!$canWriteAttendance ? 'Read-only — you do not have write access to this course/semester.' : '');
+                                                $gDisabled = $gIsExam || !$gHasDate || !$canWriteAttendance;
+                                                $gTitle = $gIsExam
+                                                    ? 'Exam session — not an attendance session, cannot be marked.'
+                                                    : (!$gHasDate
+                                                        ? 'No date assigned yet — ask an admin to assign one in Semesters.'
+                                                        : (!$canWriteAttendance ? 'Read-only — you do not have write access to this course/semester.' : ''));
                                                 ?>
-                                                <td class="text-center p-1<?= $gIsGroupEnd ? ' col-group-end' : '' ?>">
+                                                <td class="text-center p-1<?= $gIsGroupEnd ? ' col-group-end' : '' ?><?= $gIsExam ? ' col-exam' : '' ?>">
                                                     <button type="button"
-                                                            class="grid-cell"
+                                                            class="grid-cell<?= $gIsExam ? ' grid-cell-exam' : '' ?>"
                                                             data-student-id="<?= $gsid ?>"
                                                             data-session-id="<?= $gSessId ?>"
                                                             data-course-id="<?= (int) $filterCourseId ?>"
                                                             data-status="<?= htmlspecialchars($gCellStatus) ?>"
                                                             <?= $gDisabled ? 'disabled' : '' ?> <?= $gTitle !== '' ? 'title="' . htmlspecialchars($gTitle) . '"' : '' ?>>
-                                                        <?= htmlspecialchars($gCellGlyph) ?>
+                                                        <?= htmlspecialchars($gIsExam ? '—' : $gCellGlyph) ?>
                                                     </button>
                                                 </td>
                                             <?php endforeach; ?>
@@ -675,6 +693,7 @@ $scopeBanner = match ($role) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script>
         window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
@@ -714,10 +733,11 @@ $scopeBanner = match ($role) {
                 return;
             }
 
+            const multiFaculty = facultyIds.length > 1;
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name;
+                opt.textContent = admasSemesterLabel(sem) + (multiFaculty && sem.faculty_name ? ' — ' + sem.faculty_name : '');
                 select.appendChild(opt);
             });
 
@@ -738,17 +758,27 @@ $scopeBanner = match ($role) {
             }
         }
 
-        // Phase 2 — Department filter: purely a client-side show/hide over
-        // the Course dropdown's already-loaded, already-permission-scoped
-        // <option> elements. Never changes which courses exist in the
-        // select, never re-queries anything — just narrows what's visible.
-        function admasFilterCourseByDepartment(select, departmentId) {
+        // Phase 2 — Department filter, plus a course code/name search box on
+        // top of it: both are purely client-side show/hide over the Course
+        // dropdown's already-loaded, already-permission-scoped <option>
+        // elements. Never changes which courses exist in the select, never
+        // re-queries anything — just narrows what's visible, and an option
+        // must satisfy BOTH criteria at once to stay visible.
+        function admasFilterCourseSelect() {
+            const select = document.getElementById('courseSelect');
             if (!select) {
                 return;
             }
+            const departmentSelect = document.getElementById('departmentFilterSelect');
+            const departmentId = departmentSelect ? departmentSelect.value : '';
+            const searchInput = document.getElementById('courseSearchInput');
+            const searchText = searchInput ? searchInput.value.trim().toLowerCase() : '';
+
             const options = select.querySelectorAll('option[data-department-id]');
             options.forEach((opt) => {
-                opt.hidden = Boolean(departmentId) && opt.dataset.departmentId !== String(departmentId);
+                const matchesDepartment = !departmentId || opt.dataset.departmentId === String(departmentId);
+                const matchesSearch = !searchText || opt.textContent.toLowerCase().includes(searchText);
+                opt.hidden = !(matchesDepartment && matchesSearch);
             });
             const selected = select.options[select.selectedIndex];
             if (selected && selected.hidden) {

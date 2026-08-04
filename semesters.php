@@ -566,6 +566,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['flash_success'] = '"' . $semRow['name'] . '" set to ' . $statusLabel . '.';
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
+    } elseif ($action === 'toggle_picker_visibility') {
+        // Purely cosmetic — hides this semester from student/courses.php's
+        // own Semester Box Picker only (built for the real case of two
+        // same-named semesters across different academic years, where the
+        // older one already has real historical data and the newer one
+        // already has real students/offerings — deleting either is unsafe,
+        // this just declutters the student-facing picker). Every other
+        // page (attendance.php, reports.php, this page itself) is
+        // completely unaffected.
+        $semesterId = (int) ($_POST['semester_id'] ?? 0);
+        if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+            redirect_to('semesters.php');
+        }
+
+        $semStmt = $conn->prepare('SELECT name, hidden_from_picker FROM semesters WHERE id = ?');
+        $semStmt->bind_param('i', $semesterId);
+        $semStmt->execute();
+        $semRow = $semStmt->get_result()->fetch_assoc();
+        $semStmt->close();
+
+        if (!$semRow) {
+            $_SESSION['flash_error'] = 'Selected semester does not exist.';
+        } else {
+            $newHidden = (int) $semRow['hidden_from_picker'] === 1 ? 0 : 1;
+            $updateStmt = $conn->prepare('UPDATE semesters SET hidden_from_picker = ? WHERE id = ?');
+            $updateStmt->bind_param('ii', $newHidden, $semesterId);
+            $updateStmt->execute();
+            $updateStmt->close();
+
+            $_SESSION['flash_success'] = '"' . $semRow['name'] . '" is now '
+                . ($newHidden ? 'hidden from' : 'visible in') . ' students\' Semester Box Picker.';
+        }
+        redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'generate_sessions') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
         if ($role === 'dean' && !dean_owns_semester($conn, $semesterId, $deanFacultyId)) {
@@ -664,7 +698,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 if ($role === 'dean') {
     $semListStmt = $conn->prepare(
-        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status,
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status, s.hidden_from_picker,
                 ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
@@ -679,7 +713,7 @@ if ($role === 'dean') {
     $semListStmt->close();
 } else {
     $semesters = $conn->query(
-        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status,
+        "SELECT s.id, s.academic_year_id, s.faculty_id, s.context_department_id, s.name, s.start_date, s.end_date, s.is_current, s.status, s.hidden_from_picker,
                 ay.label AS academic_year_label, f.name AS faculty_name, cd.name AS context_department_name
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
@@ -996,6 +1030,17 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= $selectedSemesterId ?>&edit=1" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-pencil"></i> Edit
                                     </a>
+                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" title="Only affects student/courses.php's own Semester Box Picker — every other page still sees this semester normally.">
+                                        <input type="hidden" name="action" value="toggle_picker_visibility">
+                                        <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
+                                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                            <?php if ((int) $selectedSemester['hidden_from_picker'] === 1): ?>
+                                                <i class="bi bi-eye-slash"></i> Hidden from Students — Show
+                                            <?php else: ?>
+                                                <i class="bi bi-eye"></i> Hide from Students
+                                            <?php endif; ?>
+                                        </button>
+                                    </form>
                                 </div>
                             </div>
 

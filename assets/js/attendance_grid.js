@@ -28,25 +28,28 @@ document.addEventListener('DOMContentLoaded', function () {
         return button.dataset.studentId + ':' + button.dataset.sessionId;
     }
 
+    // Only regular (non-exam) sessions count toward the score — matches
+    // ajax/save_attendance_cell.php's ATTENDANCE_MAX_SCORE-capped formula.
+    // Exam cells are always disabled/unclickable, but a legacy mark could
+    // still exist on one, so they're explicitly excluded here rather than
+    // relying on them never having a status.
+    var ATTENDANCE_MAX_SCORE = 10;
+
     function recomputeRowLocally(row) {
-        var buttons = row.querySelectorAll('.grid-cell');
+        var buttons = row.querySelectorAll('.grid-cell:not(.grid-cell-exam)');
         var present = 0;
         var absent = 0;
-        var total = 0;
 
         buttons.forEach(function (btn) {
             var status = btn.dataset.status;
-            if (status !== '') {
-                total++;
-                if (status === 'present') {
-                    present++;
-                } else if (status === 'absent') {
-                    absent++;
-                }
+            if (status === 'present') {
+                present++;
+            } else if (status === 'absent') {
+                absent++;
             }
         });
 
-        var pct = total > 0 ? Math.round((100 * present / total) * 10) / 10 : 0;
+        var pct = Math.min(ATTENDANCE_MAX_SCORE, present);
         row.querySelector('[data-role="present-count"]').textContent = present;
         row.querySelector('[data-role="absent-count"]').textContent = absent;
         row.querySelector('[data-role="pct"]').textContent = pct;

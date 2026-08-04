@@ -18,6 +18,18 @@ $conn = db();
 $currentUser = current_user();
 
 // ---------------------------------------------------------------------
+// University settings (needed for the Attendance Alerts threshold)
+// ---------------------------------------------------------------------
+$settings = [];
+$settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
+if ($settingsResult) {
+    while ($row = $settingsResult->fetch_assoc()) {
+        $settings[$row['key']] = $row['value'];
+    }
+}
+$minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
+
+// ---------------------------------------------------------------------
 // KPI cards
 // ---------------------------------------------------------------------
 $totalFaculties = (int) ($conn->query('SELECT COUNT(*) AS c FROM faculties')->fetch_assoc()['c'] ?? 0);
@@ -31,6 +43,34 @@ $todayRow = $todayResult ? $todayResult->fetch_assoc() : null;
 $universityAvgAttendance = $todayRow && $todayRow['pct'] !== null ? (float) $todayRow['pct'] : null;
 
 // ---------------------------------------------------------------------
+// Weekly attendance (last 7 days) for the Bar chart — university-wide, same
+// unscoped query as admin/dashboard.php's own weekly chart.
+// ---------------------------------------------------------------------
+$weeklyByDate = [];
+$weekStmt = $conn->prepare(
+    "SELECT attendance_date, ROUND(100 * SUM(status = 'present') / COUNT(*), 1) AS pct
+     FROM attendance
+     WHERE attendance_date BETWEEN DATE_SUB(CURDATE(), INTERVAL 6 DAY) AND CURDATE()
+     GROUP BY attendance_date"
+);
+if ($weekStmt) {
+    $weekStmt->execute();
+    $weekResult = $weekStmt->get_result();
+    while ($row = $weekResult->fetch_assoc()) {
+        $weeklyByDate[$row['attendance_date']] = (float) $row['pct'];
+    }
+    $weekStmt->close();
+}
+
+$trendLabels = [];
+$trendData = [];
+for ($i = 6; $i >= 0; $i--) {
+    $date = date('Y-m-d', strtotime("-{$i} days"));
+    $trendLabels[] = date('D', strtotime($date));
+    $trendData[] = $weeklyByDate[$date] ?? 0;
+}
+
+// ---------------------------------------------------------------------
 // Attendance by Faculty — each faculty has its own current semester (and
 // therefore its own current academic year), so this is a genuine
 // cross-faculty aggregate: one small query per faculty against that
@@ -40,25 +80,91 @@ $universityAvgAttendance = $todayRow && $todayRow['pct'] !== null ? (float) $tod
 $faculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 
 $avgAttendanceByFaculty = [];
+// Attendance by Department (pie chart) — university-wide, accumulated in the
+// same per-faculty-current-year loop above rather than a second pass.
+$departmentsForChart = $conn->query('SELECT id, name FROM departments ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$avgAttendanceByDeptChart = [];
+// Attendance Alerts widget — same per-student/per-course below-threshold
+// query shape as admin/dashboard.php's own alerts widget and
+// notifications.php, accumulated in this same per-faculty loop.
+$alerts = [];
 foreach ($faculties as $f) {
     $facultyId = (int) $f['id'];
     $facultyCurrentSemester = get_current_semester($conn, $facultyId);
-    $facultyAcademicYearId = (int) ($facultyCurrentSemester['academic_year_id'] ?? 0);
-    if ($facultyAcademicYearId <= 0) {
+    $facultySemesterId = (int) ($facultyCurrentSemester['id'] ?? 0);
+    if ($facultySemesterId <= 0) {
         continue;
     }
 
+    // Average of each (student, course) pair's own out-of-10 score — not a
+    // pooled ratio — same "average of capped scores" semantics used by
+    // reports.php's Faculty/Department Summary. Only *regular* sessions
+    // count (Midterm/Final never do).
+    $scoreSql = "SELECT a.student_id, a.course_id,
+                        LEAST(10, SUM(a.status = 'present')) AS present_score
+                 FROM attendance a
+                 JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+                 WHERE sess.semester_id = ?
+                 GROUP BY a.student_id, a.course_id";
+
     $facAttStmt = $conn->prepare(
-        "SELECT ROUND(100 * SUM(a.status = 'present') / COUNT(*), 1) AS pct
-         FROM attendance a JOIN students s ON s.id = a.student_id
-         WHERE s.faculty_id = ? AND a.academic_year_id = ?"
+        "SELECT ROUND(AVG(t.present_score), 1) AS pct
+         FROM ({$scoreSql}) t
+         JOIN students s ON s.id = t.student_id
+         WHERE s.faculty_id = ?"
     );
-    $facAttStmt->bind_param('ii', $facultyId, $facultyAcademicYearId);
+    $facAttStmt->bind_param('ii', $facultySemesterId, $facultyId);
     $facAttStmt->execute();
     $facAttRow = $facAttStmt->get_result()->fetch_assoc();
     $facAttStmt->close();
     if ($facAttRow && $facAttRow['pct'] !== null) {
         $avgAttendanceByFaculty[$facultyId] = (float) $facAttRow['pct'];
+    }
+
+    $deptAttStmt = $conn->prepare(
+        "SELECT s.department_id, ROUND(AVG(t.present_score), 1) AS pct
+         FROM ({$scoreSql}) t
+         JOIN students s ON s.id = t.student_id
+         WHERE s.faculty_id = ?
+         GROUP BY s.department_id"
+    );
+    $deptAttStmt->bind_param('ii', $facultySemesterId, $facultyId);
+    $deptAttStmt->execute();
+    $deptAttRes = $deptAttStmt->get_result();
+
+    $alertStmt = $conn->prepare(
+        "SELECT s.full_name, s.student_no, c.name AS course_name,
+                LEAST(10, SUM(a.status = 'present')) AS attendance_pct
+         FROM attendance a
+         JOIN students s ON s.id = a.student_id
+         JOIN courses c ON c.id = a.course_id
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+         WHERE sess.semester_id = ? AND s.faculty_id = ?
+         GROUP BY s.id, a.course_id
+         HAVING attendance_pct < ?
+         ORDER BY attendance_pct ASC
+         LIMIT 8"
+    );
+    $alertStmt->bind_param('iid', $facultySemesterId, $facultyId, $minAttendancePct);
+    $alertStmt->execute();
+    $alerts = array_merge($alerts, $alertStmt->get_result()->fetch_all(MYSQLI_ASSOC));
+    $alertStmt->close();
+
+    while ($row = $deptAttRes->fetch_assoc()) {
+        $avgAttendanceByDeptChart[(int) $row['department_id']] = (float) $row['pct'];
+    }
+    $deptAttStmt->close();
+}
+usort($alerts, static fn ($a, $b) => $a['attendance_pct'] <=> $b['attendance_pct']);
+$alerts = array_slice($alerts, 0, 8);
+
+$deptChartLabels = [];
+$deptChartData = [];
+foreach ($departmentsForChart as $d) {
+    $did = (int) $d['id'];
+    if (isset($avgAttendanceByDeptChart[$did])) {
+        $deptChartLabels[] = $d['name'];
+        $deptChartData[] = $avgAttendanceByDeptChart[$did];
     }
 }
 
@@ -137,45 +243,152 @@ while ($row = $fscRes->fetch_assoc()) {
                 </div>
             </div>
 
-            <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Faculty</h6>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Faculty</th>
-                                <th>Students</th>
-                                <th>Avg Attendance</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($faculties)): ?>
-                                <tr>
-                                    <td colspan="3" class="text-center text-muted py-4">No faculties exist yet.</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($faculties as $f): ?>
-                                    <?php $fid = (int) $f['id']; ?>
+            <!-- Charts -->
+            <div class="row g-3 mb-3">
+                <div class="col-xl-8">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Weekly Attendance (This Week)</h6>
+                        <canvas id="weeklyAttendanceChart" height="130"></canvas>
+                    </div>
+                </div>
+                <div class="col-xl-4">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Department</h6>
+                        <?php if (empty($deptChartLabels)): ?>
+                            <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
+                        <?php else: ?>
+                            <canvas id="deptPieChart" height="220"></canvas>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-xl-8">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Faculty</h6>
+                        <div class="table-responsive">
+                            <table class="table admas-table align-middle">
+                                <thead>
                                     <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
-                                        <td><?= number_format($studentCountByFaculty[$fid] ?? 0) ?></td>
-                                        <td>
-                                            <?php if (isset($avgAttendanceByFaculty[$fid])): ?>
-                                                <?= number_format($avgAttendanceByFaculty[$fid], 1) ?>%
-                                            <?php else: ?>
-                                                <span class="text-muted">—</span>
-                                            <?php endif; ?>
-                                        </td>
+                                        <th>Faculty</th>
+                                        <th>Students</th>
+                                        <th>Avg Attendance</th>
                                     </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
+                                </thead>
+                                <tbody>
+                                    <?php if (empty($faculties)): ?>
+                                        <tr>
+                                            <td colspan="3" class="text-center text-muted py-4">No faculties exist yet.</td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php foreach ($faculties as $f): ?>
+                                            <?php $fid = (int) $f['id']; ?>
+                                            <tr>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
+                                                <td><?= number_format($studentCountByFaculty[$fid] ?? 0) ?></td>
+                                                <td>
+                                                    <?php if (isset($avgAttendanceByFaculty[$fid])): ?>
+                                                        <?= number_format($avgAttendanceByFaculty[$fid], 1) ?>%
+                                                    <?php else: ?>
+                                                        <span class="text-muted">—</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-4">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
+                            <i class="bi bi-exclamation-triangle-fill text-warning"></i>
+                            Attendance Alerts
+                        </h6>
+                        <?php if (empty($alerts)): ?>
+                            <p class="text-muted small mb-0">No students are currently below the <?= htmlspecialchars((string) $minAttendancePct) ?>% attendance threshold.</p>
+                        <?php else: ?>
+                            <?php foreach ($alerts as $alert): ?>
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
+                                    <div>
+                                        <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
+                                        <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
+                                    </div>
+                                    <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
+                                </a>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        const cssVar = (name, fallback) => {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            return v || fallback;
+        };
+        const chartSky = cssVar('--admas-sky', '#0ea5e9');
+        const chartTextMuted = cssVar('--admas-text-muted', '#64748b');
+        const chartGrid = cssVar('--admas-border', '#e2e8f0');
+        const chartSurface = cssVar('--admas-surface', '#ffffff');
+        const pieColors = ['#0ea5e9', '#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#14b8a6', '#a855f7', '#ef4444', '#84cc16', '#0891b2'];
+
+        new Chart(document.getElementById('weeklyAttendanceChart'), {
+            type: 'bar',
+            data: {
+                labels: <?= json_encode($trendLabels) ?>,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: <?= json_encode($trendData) ?>,
+                    backgroundColor: chartSky,
+                    borderRadius: 6,
+                    maxBarThickness: 48,
+                }],
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: {
+                        min: 0,
+                        max: 100,
+                        ticks: { color: chartTextMuted, callback: (value) => value + '%' },
+                        grid: { color: chartGrid },
+                    },
+                },
+            },
+        });
+
+        <?php if (!empty($deptChartLabels)): ?>
+        new Chart(document.getElementById('deptPieChart'), {
+            type: 'pie',
+            data: {
+                labels: <?= json_encode($deptChartLabels) ?>,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: <?= json_encode($deptChartData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
+                    tooltip: { callbacks: { label: (item) => `${item.label}: ${item.formattedValue}%` } },
+                },
+            },
+        });
+        <?php endif; ?>
+    </script>
 </body>
 </html>

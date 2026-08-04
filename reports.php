@@ -46,11 +46,28 @@ const REPORT_TYPES_BY_ROLE = [
 // loop instead of three separate hand-written tables.
 // ---------------------------------------------------------------------
 
-function build_course_attendance_report(mysqli $conn, string $role, int $facultyId, int $departmentId, int $lecturerRecordId, string $dateFrom, string $dateTo): array
+/**
+ * Per-student attendance score for a semester: LEAST(10, SUM(present)),
+ * counting only *regular* sessions (Midterm/Final never count) — see
+ * ATTENDANCE_MAX_SCORE in includes/attendance_helpers.php. Shared derived-
+ * table shape reused by all three summary report builders below, each
+ * rolling it up to its own dimension (course / department / faculty).
+ */
+function attendance_score_subquery(): string
+{
+    return "SELECT a.student_id, a.course_id,
+                    LEAST(10, SUM(a.status = 'present')) AS present_score,
+                    LEAST(10, SUM(a.status = 'absent')) AS absent_score
+             FROM attendance a
+             JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+             WHERE sess.semester_id = ?";
+}
+
+function build_course_attendance_report(mysqli $conn, string $role, int $facultyId, int $departmentId, int $lecturerRecordId, int $semesterId): array
 {
     $conditions = [];
-    $params = [$dateFrom, $dateTo];
-    $types = 'ss';
+    $params = [$semesterId, $semesterId];
+    $types = 'ii';
 
     if ($role === 'lecturer') {
         // Reports are historical — a lecturer can report on any course
@@ -73,16 +90,24 @@ function build_course_attendance_report(mysqli $conn, string $role, int $faculty
     }
 
     $whereExtra = empty($conditions) ? '' : (' AND ' . implode(' AND ', $conditions));
+    $scoreSql = attendance_score_subquery();
 
     $sql = "SELECT c.code, c.name, d.name AS department_name, f.name AS faculty_name,
-                   COUNT(DISTINCT a.attendance_date) AS total_sessions,
-                   COUNT(a.id) AS total_marks,
-                   SUM(a.status = 'present') AS present_count,
-                   SUM(a.status = 'absent') AS absent_count
+                   COUNT(DISTINCT t.student_id) AS student_count,
+                   COALESCE(ROUND(AVG(t.present_score), 1), 0) AS avg_present_pct,
+                   COALESCE(ROUND(AVG(t.absent_score), 1), 0) AS avg_absent_pct,
+                   COALESCE(MAX(u.sessions_recorded), 0) AS sessions_recorded
             FROM courses c
             JOIN departments d ON d.id = c.department_id
             JOIN faculties f ON f.id = d.faculty_id
-            LEFT JOIN attendance a ON a.course_id = c.id AND a.attendance_date BETWEEN ? AND ?
+            LEFT JOIN ({$scoreSql} GROUP BY a.student_id, a.course_id) t ON t.course_id = c.id
+            LEFT JOIN (
+                SELECT a.course_id, COUNT(DISTINCT a.session_id) AS sessions_recorded
+                FROM attendance a
+                JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+                WHERE sess.semester_id = ?
+                GROUP BY a.course_id
+            ) u ON u.course_id = c.id
             WHERE 1 = 1{$whereExtra}
             GROUP BY c.id, c.code, c.name, d.name, f.name
             ORDER BY f.name, d.name, c.code";
@@ -97,28 +122,27 @@ function build_course_attendance_report(mysqli $conn, string $role, int $faculty
         ['key' => 'course', 'label' => 'Course'],
         ['key' => 'department', 'label' => 'Department'],
         ['key' => 'faculty', 'label' => 'Faculty'],
-        ['key' => 'total_sessions', 'label' => 'Total Sessions'],
-        ['key' => 'avg_present_pct', 'label' => 'Avg Present %'],
-        ['key' => 'avg_absent_pct', 'label' => 'Avg Absent %'],
+        ['key' => 'sessions_recorded', 'label' => 'Sessions Recorded (of 10)'],
+        ['key' => 'avg_present_pct', 'label' => 'Avg Attendance (of 10)'],
+        ['key' => 'avg_absent_pct', 'label' => 'Avg Absent (of 10)'],
     ];
 
     $data = [];
     foreach ($rows as $r) {
-        $totalMarks = (int) $r['total_marks'];
         $data[] = [
             'course' => $r['code'] . ' — ' . $r['name'],
             'department' => $r['department_name'],
             'faculty' => $r['faculty_name'],
-            'total_sessions' => (int) $r['total_sessions'],
-            'avg_present_pct' => $totalMarks > 0 ? round(100 * (int) $r['present_count'] / $totalMarks, 1) : 0.0,
-            'avg_absent_pct' => $totalMarks > 0 ? round(100 * (int) $r['absent_count'] / $totalMarks, 1) : 0.0,
+            'sessions_recorded' => (int) $r['sessions_recorded'],
+            'avg_present_pct' => (float) $r['avg_present_pct'],
+            'avg_absent_pct' => (float) $r['avg_absent_pct'],
         ];
     }
 
     return [$columns, $data];
 }
 
-function build_department_summary_report(mysqli $conn, string $role, int $facultyId, int $departmentId, string $dateFrom, string $dateTo): array
+function build_department_summary_report(mysqli $conn, string $role, int $facultyId, int $departmentId, int $semesterId): array
 {
     $conditions = [];
     $params = [];
@@ -167,17 +191,17 @@ function build_department_summary_report(mysqli $conn, string $role, int $facult
     $attendanceByDept = [];
     $enrollmentsByDept = [];
     if ($includeAttendance) {
+        $scoreSql = attendance_score_subquery();
         $attStmt = $conn->prepare(
             "SELECT c.department_id,
-                    COUNT(a.id) AS total_marks,
-                    SUM(a.status = 'present') AS present_count,
-                    SUM(a.status = 'absent') AS absent_count
-             FROM attendance a
-             JOIN courses c ON c.id = a.course_id
-             WHERE a.attendance_date BETWEEN ? AND ?
+                    COUNT(DISTINCT t.student_id) AS student_count,
+                    ROUND(AVG(t.present_score), 1) AS avg_present_pct,
+                    ROUND(AVG(t.absent_score), 1) AS avg_absent_pct
+             FROM ({$scoreSql} GROUP BY a.student_id, a.course_id) t
+             JOIN courses c ON c.id = t.course_id
              GROUP BY c.department_id"
         );
-        $attStmt->bind_param('ss', $dateFrom, $dateTo);
+        $attStmt->bind_param('i', $semesterId);
         $attStmt->execute();
         $attRes = $attStmt->get_result();
         while ($row = $attRes->fetch_assoc()) {
@@ -203,8 +227,8 @@ function build_department_summary_report(mysqli $conn, string $role, int $facult
         ['key' => 'total_students', 'label' => 'Total Students'],
     ];
     if ($includeAttendance) {
-        $columns[] = ['key' => 'avg_present_pct', 'label' => 'Avg Present %'];
-        $columns[] = ['key' => 'avg_absent_pct', 'label' => 'Avg Absent %'];
+        $columns[] = ['key' => 'avg_present_pct', 'label' => 'Avg Attendance (of 10)'];
+        $columns[] = ['key' => 'avg_absent_pct', 'label' => 'Avg Absent (of 10)'];
     } else {
         $columns[] = ['key' => 'total_enrollments', 'label' => 'Total Enrollments'];
     }
@@ -220,9 +244,8 @@ function build_department_summary_report(mysqli $conn, string $role, int $facult
         ];
         if ($includeAttendance) {
             $att = $attendanceByDept[$deptId] ?? null;
-            $totalMarks = (int) ($att['total_marks'] ?? 0);
-            $row['avg_present_pct'] = $totalMarks > 0 ? round(100 * (int) $att['present_count'] / $totalMarks, 1) : 0.0;
-            $row['avg_absent_pct'] = $totalMarks > 0 ? round(100 * (int) $att['absent_count'] / $totalMarks, 1) : 0.0;
+            $row['avg_present_pct'] = (float) ($att['avg_present_pct'] ?? 0);
+            $row['avg_absent_pct'] = (float) ($att['avg_absent_pct'] ?? 0);
         } else {
             $row['total_enrollments'] = $enrollmentsByDept[$deptId] ?? 0;
         }
@@ -232,7 +255,7 @@ function build_department_summary_report(mysqli $conn, string $role, int $facult
     return [$columns, $data];
 }
 
-function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId, string $dateFrom, string $dateTo): array
+function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId, int $semesterId): array
 {
     $conditions = [];
     $params = [];
@@ -276,18 +299,18 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
     $attendanceByFaculty = [];
     $enrollmentsByFaculty = [];
     if ($includeAttendance) {
+        $scoreSql = attendance_score_subquery();
         $attStmt = $conn->prepare(
             "SELECT d.faculty_id,
-                    COUNT(a.id) AS total_marks,
-                    SUM(a.status = 'present') AS present_count,
-                    SUM(a.status = 'absent') AS absent_count
-             FROM attendance a
-             JOIN courses c ON c.id = a.course_id
+                    COUNT(DISTINCT t.student_id) AS student_count,
+                    ROUND(AVG(t.present_score), 1) AS avg_present_pct,
+                    ROUND(AVG(t.absent_score), 1) AS avg_absent_pct
+             FROM ({$scoreSql} GROUP BY a.student_id, a.course_id) t
+             JOIN courses c ON c.id = t.course_id
              JOIN departments d ON d.id = c.department_id
-             WHERE a.attendance_date BETWEEN ? AND ?
              GROUP BY d.faculty_id"
         );
-        $attStmt->bind_param('ss', $dateFrom, $dateTo);
+        $attStmt->bind_param('i', $semesterId);
         $attStmt->execute();
         $attRes = $attStmt->get_result();
         while ($row = $attRes->fetch_assoc()) {
@@ -314,8 +337,8 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
         ['key' => 'total_students', 'label' => 'Total Students'],
     ];
     if ($includeAttendance) {
-        $columns[] = ['key' => 'avg_present_pct', 'label' => 'Avg Present %'];
-        $columns[] = ['key' => 'avg_absent_pct', 'label' => 'Avg Absent %'];
+        $columns[] = ['key' => 'avg_present_pct', 'label' => 'Avg Attendance (of 10)'];
+        $columns[] = ['key' => 'avg_absent_pct', 'label' => 'Avg Absent (of 10)'];
     } else {
         $columns[] = ['key' => 'total_enrollments', 'label' => 'Total Enrollments'];
     }
@@ -331,9 +354,8 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
         ];
         if ($includeAttendance) {
             $att = $attendanceByFaculty[$fid] ?? null;
-            $totalMarks = (int) ($att['total_marks'] ?? 0);
-            $row['avg_present_pct'] = $totalMarks > 0 ? round(100 * (int) $att['present_count'] / $totalMarks, 1) : 0.0;
-            $row['avg_absent_pct'] = $totalMarks > 0 ? round(100 * (int) $att['absent_count'] / $totalMarks, 1) : 0.0;
+            $row['avg_present_pct'] = (float) ($att['avg_present_pct'] ?? 0);
+            $row['avg_absent_pct'] = (float) ($att['avg_absent_pct'] ?? 0);
         } else {
             $row['total_enrollments'] = $enrollmentsByFaculty[$fid] ?? 0;
         }
@@ -373,6 +395,9 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): 
             'key' => 'session_' . $s['id'],
             'label' => $s['label'],
             'group_end' => isset($sessionIdsAtChunkEnd[(int) $s['id']]),
+            // Midterm/Final are exams, not attendance sessions — greyed out
+            // and excluded from the P/A/% score below.
+            'exam' => $s['type'] !== 'regular',
         ];
     }
     $columns[] = ['key' => 'present_count', 'label' => 'P', 'group_end' => true, 'summary' => true];
@@ -386,7 +411,6 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): 
 
         $presentCount = 0;
         $absentCount = 0;
-        $totalMarks = 0;
         foreach ($sessions as $s) {
             $status = $marksByStudentSession[$sid][(int) $s['id']] ?? null;
             $row['session_' . $s['id']] = match ($status) {
@@ -394,30 +418,23 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): 
                 'absent' => '0',
                 default => '',
             };
-            if ($status !== null) {
-                $totalMarks++;
-                if ($status === 'present') {
-                    $presentCount++;
-                } elseif ($status === 'absent') {
-                    $absentCount++;
-                }
+            if ($s['type'] !== 'regular') {
+                continue;
+            }
+            if ($status === 'present') {
+                $presentCount++;
+            } elseif ($status === 'absent') {
+                $absentCount++;
             }
         }
 
         $row['present_count'] = $presentCount;
         $row['absent_count'] = $absentCount;
-        $row['attendance_pct'] = $totalMarks > 0 ? round(100 * $presentCount / $totalMarks, 1) : 0.0;
+        $row['attendance_pct'] = min(ATTENDANCE_MAX_SCORE, $presentCount);
         $data[] = $row;
     }
 
     return [$columns, $data];
-}
-
-function report_export_filename(string $reportType, string $dateFrom, string $dateTo): string
-{
-    $slug = str_replace(' ', '_', strtolower(REPORT_TYPE_LABELS[$reportType] ?? 'report'));
-
-    return $slug . '_' . $dateFrom . '_to_' . $dateTo;
 }
 
 /**
@@ -451,6 +468,8 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
     th.col-group-end, td.col-group-end { border-right: 3px solid #0ea5e9; }
     th.col-summary { background: #0ea5e9; color: #fff; }
     td.col-summary { background: rgba(14, 165, 233, 0.15); }
+    /* Midterm/Final Xiiso columns — exams, not attendance sessions. */
+    th.col-exam, td.col-exam { background: #cbd5e1; color: #475569; }
 </style>
 </head>
 <body>
@@ -475,7 +494,8 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
                     <?php
                     $thClasses = trim(
                         (!empty($col['group_end']) ? 'col-group-end ' : '')
-                        . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary' : '')
+                        . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary ' : '')
+                        . (!empty($col['exam']) ? 'col-exam' : '')
                     );
                     ?>
                     <th class="<?= $thClasses ?>"><?= htmlspecialchars($col['label']) ?></th>
@@ -492,7 +512,8 @@ function render_report_pdf_html(string $universityName, string $campusLine, stri
                             <?php
                             $tdClasses = trim(
                                 (!empty($col['group_end']) ? 'col-group-end ' : '')
-                                . (!empty($col['summary']) ? 'col-summary' : '')
+                                . (!empty($col['summary']) ? 'col-summary ' : '')
+                                . (!empty($col['exam']) ? 'col-exam' : '')
                             );
                             ?>
                             <td class="<?= $tdClasses ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
@@ -579,18 +600,34 @@ if ($role !== 'lecturer' && $filterReportType !== 'faculty_summary') {
     $filterDepartmentId = isset($_GET['department_id']) ? (int) $_GET['department_id'] : $defaultDepartmentIdSetting;
 }
 
-$defaultDateFrom = date('Y-m-01');
-$defaultDateTo = date('Y-m-t');
-$filterDateFrom = (string) ($_GET['date_from'] ?? $defaultDateFrom);
-$filterDateTo = (string) ($_GET['date_to'] ?? $defaultDateTo);
-if (!DateTime::createFromFormat('Y-m-d', $filterDateFrom)) {
-    $filterDateFrom = $defaultDateFrom;
+// Semester picker for the three summary report types (course_attendance,
+// department_summary, faculty_summary) — replaces the old Date From/To
+// range now that attendance is scored per-semester (out of 10), not as a
+// date-range ratio. Dean is scoped to their own faculty's semesters (a
+// dean has no legitimate reason to browse another faculty's semester list,
+// even though the underlying report queries are already faculty-locked
+// regardless — same defense-in-depth convention as the rest of this file).
+// registration's own two report types don't use this at all (their
+// enrollment-count columns have never been time-scoped), so it's ignored
+// for that role rather than required.
+$reportSemesters = $conn->query(
+    "SELECT s.id, s.faculty_id, s.name, s.status, ay.label AS academic_year_label, f.name AS faculty_name
+     FROM semesters s
+     JOIN academic_years ay ON ay.id = s.academic_year_id
+     JOIN faculties f ON f.id = s.faculty_id
+     ORDER BY f.name, ay.label DESC, s.name"
+)->fetch_all(MYSQLI_ASSOC);
+if ($role === 'dean') {
+    $reportSemesters = array_values(array_filter($reportSemesters, static fn ($s) => (int) $s['faculty_id'] === $deanFacultyId));
 }
-if (!DateTime::createFromFormat('Y-m-d', $filterDateTo)) {
-    $filterDateTo = $defaultDateTo;
+$reportSemesterById = [];
+foreach ($reportSemesters as $s) {
+    $reportSemesterById[(int) $s['id']] = $s;
 }
-if ($filterDateFrom > $filterDateTo) {
-    [$filterDateFrom, $filterDateTo] = [$filterDateTo, $filterDateFrom];
+
+$filterReportSemesterId = isset($_GET['report_semester_id']) ? (int) $_GET['report_semester_id'] : 0;
+if ($filterReportSemesterId > 0 && !isset($reportSemesterById[$filterReportSemesterId])) {
+    $filterReportSemesterId = 0;
 }
 
 // ---------------------------------------------------------------------
@@ -657,9 +694,10 @@ foreach ($xiisoCourses as $c) {
 // belong to the same faculty.
 $xiisoSemesters = in_array('xiiso_grid', $allowedReportTypes, true)
     ? $conn->query(
-        "SELECT s.id, s.faculty_id, s.name, ay.label AS academic_year_label
+        "SELECT s.id, s.faculty_id, s.name, s.status, ay.label AS academic_year_label, f.name AS faculty_name
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
+         JOIN faculties f ON f.id = s.faculty_id
          ORDER BY s.start_date DESC"
     )->fetch_all(MYSQLI_ASSOC)
     : [];
@@ -740,10 +778,21 @@ $deanDepartments = $role === 'dean'
 // ---------------------------------------------------------------------
 // Build the report data for the current filters
 // ---------------------------------------------------------------------
+// registration's department/faculty summary is enrollment-based (no
+// attendance %, never time-scoped) — it can render with no semester chosen
+// at all; the other roles/report types genuinely need one selected first.
+$reportSemesterOptional = $role === 'registration';
+
 [$reportColumns, $reportRows] = match ($filterReportType) {
-    'course_attendance' => build_course_attendance_report($conn, $role, $filterFacultyId, $filterDepartmentId, $lecturerRecordId, $filterDateFrom, $filterDateTo),
-    'department_summary' => build_department_summary_report($conn, $role, $filterFacultyId, $filterDepartmentId, $filterDateFrom, $filterDateTo),
-    'faculty_summary' => build_faculty_summary_report($conn, $role, $filterFacultyId, $filterDateFrom, $filterDateTo),
+    'course_attendance' => $filterReportSemesterId > 0
+        ? build_course_attendance_report($conn, $role, $filterFacultyId, $filterDepartmentId, $lecturerRecordId, $filterReportSemesterId)
+        : [[], []],
+    'department_summary' => ($reportSemesterOptional || $filterReportSemesterId > 0)
+        ? build_department_summary_report($conn, $role, $filterFacultyId, $filterDepartmentId, $filterReportSemesterId)
+        : [[], []],
+    'faculty_summary' => ($reportSemesterOptional || $filterReportSemesterId > 0)
+        ? build_faculty_summary_report($conn, $role, $filterFacultyId, $filterReportSemesterId)
+        : [[], []],
     'xiiso_grid' => (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
         ? build_xiiso_grid_report($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
         : [[], []],
@@ -772,16 +821,20 @@ if ($filterReportType === 'xiiso_grid') {
         . '   |   Semester: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? '')
         . '   |   Academic Year: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? '')
         . '   |   Lecturer: ' . $xiisoLecturerLine;
+} elseif ($filterReportSemesterId > 0 && isset($reportSemesterById[$filterReportSemesterId])) {
+    $rs = $reportSemesterById[$filterReportSemesterId];
+    $reportMetaLine = 'Semester: ' . $rs['name'] . ' (' . $rs['academic_year_label'] . ')   |   Faculty: ' . $rs['faculty_name'];
+} elseif ($reportSemesterOptional) {
+    $reportMetaLine = 'All-time enrollment totals (not semester-scoped)';
 } else {
-    $reportMetaLine = 'Period: ' . $filterDateFrom . ' to ' . $filterDateTo;
+    $reportMetaLine = 'Semester: (none selected)';
 }
 
 $currentQuery = [
     'report_type' => $filterReportType,
     'faculty_id' => $filterFacultyId,
     'department_id' => $filterDepartmentId,
-    'date_from' => $filterDateFrom,
-    'date_to' => $filterDateTo,
+    'report_semester_id' => $filterReportSemesterId,
     'xiiso_course_id' => $filterXiisoCourseId,
     'xiiso_semester_id' => $filterXiisoSemesterId,
 ];
@@ -801,7 +854,9 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
         $filename = str_replace(' ', '_', strtolower(REPORT_TYPE_LABELS[$filterReportType]))
             . '_' . preg_replace('/\s+/', '_', $xiisoCourseLabel) . '_' . preg_replace('/\s+/', '_', $xiisoSemesterLabel);
     } else {
-        $filename = report_export_filename($filterReportType, $filterDateFrom, $filterDateTo);
+        $semesterLabel = $reportSemesterById[$filterReportSemesterId]['name'] ?? 'all_time';
+        $filename = str_replace(' ', '_', strtolower(REPORT_TYPE_LABELS[$filterReportType]))
+            . '_' . preg_replace('/\s+/', '_', $semesterLabel);
     }
 
     if ($exportFormat === 'excel') {
@@ -847,7 +902,12 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
         if ($lastDataRow >= $headerRow) {
             $colLetter = 'A';
             foreach ($reportColumns as $col) {
-                if (!empty($col['summary']) || !empty($col['header_accent'])) {
+                if (!empty($col['exam'])) {
+                    // Midterm/Final Xiiso columns — exams, not attendance
+                    // sessions; grey instead of the sky-blue summary tint.
+                    $sheet->getStyle($colLetter . $headerRow . ':' . $colLetter . max($lastDataRow, $headerRow))
+                        ->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('CBD5E1');
+                } elseif (!empty($col['summary']) || !empty($col['header_accent'])) {
                     $sheet->getStyle($colLetter . $headerRow)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setRGB('0EA5E9');
                 }
                 if (!empty($col['summary']) && $lastDataRow > $headerRow) {
@@ -930,7 +990,7 @@ $scopeBanner = match ($role) {
             </div>
 
             <div class="admas-card p-4 mb-3">
-                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="row g-2 align-items-end">
+                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="row g-2 align-items-end" id="reportsFilterForm">
                     <div class="col-sm-6 col-md-3">
                         <label class="form-label small mb-1">Report Type</label>
                         <select class="form-select form-select-sm" name="report_type" id="reportTypeSelect" onchange="toggleReportFilters()">
@@ -982,13 +1042,19 @@ $scopeBanner = match ($role) {
                         <?php endif; ?>
                     </div>
 
-                    <div class="col-sm-6 col-md-2" id="dateFromWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
-                        <label class="form-label small mb-1">From</label>
-                        <input type="date" class="form-control form-control-sm" name="date_from" value="<?= htmlspecialchars($filterDateFrom) ?>">
-                    </div>
-                    <div class="col-sm-6 col-md-2" id="dateToWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
-                        <label class="form-label small mb-1">To</label>
-                        <input type="date" class="form-control form-control-sm" name="date_to" value="<?= htmlspecialchars($filterDateTo) ?>">
+                    <div class="col-sm-6 col-md-3" id="reportSemesterWrap" style="<?= $filterReportType === 'xiiso_grid' ? 'display:none;' : '' ?>">
+                        <label class="form-label small mb-1">Semester</label>
+                        <select class="form-select form-select-sm" name="report_semester_id">
+                            <option value="0"><?= $reportSemesterOptional ? 'All-time' : 'Select semester' ?></option>
+                            <?php foreach ($reportSemesters as $s): ?>
+                                <option value="<?= (int) $s['id'] ?>" <?= $filterReportSemesterId === (int) $s['id'] ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($s['name'] . ' (' . $s['academic_year_label'] . ' · ' . ucfirst($s['status']) . ') — ' . $s['faculty_name']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <?php if (!$reportSemesterOptional): ?>
+                            <div class="form-text">Each Present regular Xiiso session = 1 point (out of 10).</div>
+                        <?php endif; ?>
                     </div>
 
                     <div class="col-sm-6 col-md-3" id="xiisoCourseWrap" style="<?= $filterReportType === 'xiiso_grid' ? '' : 'display:none;' ?>">
@@ -1008,7 +1074,7 @@ $scopeBanner = match ($role) {
                             <option value="">Select semester</option>
                             <?php foreach ($xiisoSemesters as $s): ?>
                                 <option value="<?= (int) $s['id'] ?>" <?= $filterXiisoSemesterId === (int) $s['id'] ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($s['name'] . ' (' . $s['academic_year_label'] . ')') ?>
+                                    <?= htmlspecialchars($s['name'] . ' (' . $s['academic_year_label'] . ' · ' . ucfirst($s['status']) . ') — ' . $s['faculty_name']) ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -1063,7 +1129,7 @@ $scopeBanner = match ($role) {
                             <?php endif; ?>
                             <tr>
                                 <?php foreach ($reportColumns as $col): ?>
-                                    <th class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary' : '')) ?>"><?= htmlspecialchars($col['label']) ?></th>
+                                    <th class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) || !empty($col['header_accent']) ? 'col-summary' : '') . ' ' . (!empty($col['exam']) ? 'col-exam' : '')) ?>"<?= !empty($col['exam']) ? ' title="Exam — not part of the attendance score"' : '' ?>><?= htmlspecialchars($col['label']) ?></th>
                                 <?php endforeach; ?>
                             </tr>
                         </thead>
@@ -1076,7 +1142,7 @@ $scopeBanner = match ($role) {
                                 <?php foreach ($reportRows as $r): ?>
                                     <tr>
                                         <?php foreach ($reportColumns as $col): ?>
-                                            <td class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) ? 'col-summary' : '')) ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
+                                            <td class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) ? 'col-summary' : '') . ' ' . (!empty($col['exam']) ? 'col-exam' : '')) ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
                                         <?php endforeach; ?>
                                     </tr>
                                 <?php endforeach; ?>
@@ -1089,7 +1155,12 @@ $scopeBanner = match ($role) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            admasInitLiveFilter('#reportsFilterForm');
+        });
+
         function toggleReportFilters() {
             const reportType = document.getElementById('reportTypeSelect').value;
             const isXiiso = reportType === 'xiiso_grid';
@@ -1103,8 +1174,7 @@ $scopeBanner = match ($role) {
 
             setDisplay('facultyFilterWrap', !isXiiso);
             setDisplay('departmentFilterWrap', !isXiiso && reportType !== 'faculty_summary');
-            setDisplay('dateFromWrap', !isXiiso);
-            setDisplay('dateToWrap', !isXiiso);
+            setDisplay('reportSemesterWrap', !isXiiso);
             setDisplay('xiisoCourseWrap', isXiiso);
             setDisplay('xiisoSemesterWrap', isXiiso);
         }

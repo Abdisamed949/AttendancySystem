@@ -41,11 +41,12 @@ if ($deanFacultyId > 0) {
     $deanFacultyName = $fRow ? (string) $fRow['name'] : '';
 }
 
-// "Current academic year" is now resolved from this faculty's own current
-// semester, not a single global settings value — different faculties can
-// be on different semesters/years at once.
+// This faculty's own current semester — not a single global settings
+// value, and not just its academic_year_id (two of this faculty's own
+// semesters can share one academic year, so filtering by year alone can
+// mix an already-ended semester in with the current one).
 $deanCurrentSemester = get_current_semester($conn, $deanFacultyId);
-$currentAcademicYearId = (int) ($deanCurrentSemester['academic_year_id'] ?? 0);
+$currentSemesterId = (int) ($deanCurrentSemester['id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // KPI cards
@@ -116,14 +117,25 @@ while ($row = $lRes->fetch_assoc()) {
 $lStmt->close();
 
 $avgAttendanceByDept = [];
-if ($currentAcademicYearId > 0) {
+if ($currentSemesterId > 0) {
+    // Average of each (student, course) pair's own out-of-10 score — not a
+    // pooled ratio — same "average of capped scores" semantics used by
+    // reports.php's Department Summary. Only *regular* sessions count.
     $aStmt = $conn->prepare(
-        "SELECT s.department_id, ROUND(100 * SUM(a.status = 'present') / COUNT(*), 1) AS pct
-         FROM attendance a JOIN students s ON s.id = a.student_id
-         WHERE s.faculty_id = ? AND a.academic_year_id = ?
+        "SELECT s.department_id, ROUND(AVG(t.present_score), 1) AS pct
+         FROM (
+             SELECT a.student_id, a.course_id,
+                    LEAST(10, SUM(a.status = 'present')) AS present_score
+             FROM attendance a
+             JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+             WHERE sess.semester_id = ?
+             GROUP BY a.student_id, a.course_id
+         ) t
+         JOIN students s ON s.id = t.student_id
+         WHERE s.faculty_id = ?
          GROUP BY s.department_id"
     );
-    $aStmt->bind_param('ii', $deanFacultyId, $currentAcademicYearId);
+    $aStmt->bind_param('ii', $currentSemesterId, $deanFacultyId);
     $aStmt->execute();
     $aRes = $aStmt->get_result();
     while ($row = $aRes->fetch_assoc()) {
@@ -133,24 +145,72 @@ if ($currentAcademicYearId > 0) {
 }
 
 // ---------------------------------------------------------------------
+// Attendance by Semester (bar chart) — every semester in my faculty, not
+// just the current one, joined through sessions (only Xiiso-based rows have
+// a session_id, matching how the rest of the Semester/Xiiso system reports
+// per-semester figures elsewhere in this app).
+// ---------------------------------------------------------------------
+$semesterChartLabels = [];
+$semesterChartData = [];
+// Average of each (student, course) pair's own out-of-10 score, per
+// semester — not a pooled ratio — same semantics as the department query
+// above. Only *regular* sessions count (Midterm/Final never do).
+$semChartStmt = $conn->prepare(
+    "SELECT sem.id, sem.name, ROUND(AVG(t.present_score), 1) AS pct
+     FROM semesters sem
+     JOIN (
+         SELECT a.student_id, a.course_id, sess.semester_id,
+                LEAST(10, SUM(a.status = 'present')) AS present_score
+         FROM attendance a
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+         GROUP BY a.student_id, a.course_id, sess.semester_id
+     ) t ON t.semester_id = sem.id
+     JOIN students s ON s.id = t.student_id AND s.faculty_id = sem.faculty_id
+     WHERE sem.faculty_id = ?
+     GROUP BY sem.id, sem.name
+     ORDER BY sem.id"
+);
+$semChartStmt->bind_param('i', $deanFacultyId);
+$semChartStmt->execute();
+$semChartRows = $semChartStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$semChartStmt->close();
+foreach ($semChartRows as $row) {
+    $semesterChartLabels[] = $row['name'];
+    $semesterChartData[] = (float) $row['pct'];
+}
+
+// Attendance by Department (pie chart) — reshapes the $avgAttendanceByDept
+// data already computed above for the Departments table, so no new query.
+$deptChartLabels = [];
+$deptChartData = [];
+foreach ($departmentRows as $d) {
+    $did = (int) $d['id'];
+    if (isset($avgAttendanceByDept[$did])) {
+        $deptChartLabels[] = $d['name'];
+        $deptChartData[] = $avgAttendanceByDept[$did];
+    }
+}
+
+// ---------------------------------------------------------------------
 // Low Attendance — My Faculty (same live query shape as notifications.php,
 // scoped to this Dean's own faculty)
 // ---------------------------------------------------------------------
 $lowAttendanceAlerts = [];
-if ($currentAcademicYearId > 0) {
+if ($currentSemesterId > 0) {
     $alertsStmt = $conn->prepare(
         "SELECT s.full_name, s.student_no, c.name AS course_name,
-                ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
+                LEAST(10, SUM(a.status = 'present')) AS attendance_pct
          FROM attendance a
          JOIN students s ON s.id = a.student_id
          JOIN courses c ON c.id = a.course_id
-         WHERE a.academic_year_id = ? AND s.faculty_id = ?
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+         WHERE sess.semester_id = ? AND s.faculty_id = ?
          GROUP BY s.id, a.course_id
          HAVING attendance_pct < ?
          ORDER BY attendance_pct ASC
          LIMIT 8"
     );
-    $alertsStmt->bind_param('iid', $currentAcademicYearId, $deanFacultyId, $minAttendancePct);
+    $alertsStmt->bind_param('iid', $currentSemesterId, $deanFacultyId, $minAttendancePct);
     $alertsStmt->execute();
     $lowAttendanceAlerts = $alertsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $alertsStmt->close();
@@ -276,14 +336,38 @@ if ($currentAcademicYearId > 0) {
                             <p class="text-muted small mb-0">No students in your faculty are currently below the <?= htmlspecialchars((string) $minAttendancePct) ?>% attendance threshold.</p>
                         <?php else: ?>
                             <?php foreach ($lowAttendanceAlerts as $alert): ?>
-                                <div class="alert-row">
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
                                     <div>
                                         <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
                                         <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
                                     </div>
                                     <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
-                                </div>
+                                </a>
                             <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="row g-3 mt-0">
+                <div class="col-xl-8">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Semester</h6>
+                        <?php if (empty($semesterChartLabels)): ?>
+                            <p class="text-muted small mb-0">No Xiiso attendance recorded yet for any semester in this faculty.</p>
+                        <?php else: ?>
+                            <canvas id="semesterBarChart" height="130"></canvas>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-4">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Department</h6>
+                        <?php if (empty($deptChartLabels)): ?>
+                            <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
+                        <?php else: ?>
+                            <canvas id="deptPieChart" height="220"></canvas>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -292,5 +376,69 @@ if ($currentAcademicYearId > 0) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        const cssVar = (name, fallback) => {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            return v || fallback;
+        };
+        const chartSky = cssVar('--admas-sky', '#0ea5e9');
+        const chartTextMuted = cssVar('--admas-text-muted', '#64748b');
+        const chartGrid = cssVar('--admas-border', '#e2e8f0');
+        const chartSurface = cssVar('--admas-surface', '#ffffff');
+        const pieColors = ['#0ea5e9', '#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#14b8a6', '#a855f7', '#ef4444', '#84cc16', '#0891b2'];
+
+        <?php if (!empty($semesterChartLabels)): ?>
+        new Chart(document.getElementById('semesterBarChart'), {
+            type: 'bar',
+            data: {
+                labels: <?= json_encode($semesterChartLabels) ?>,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: <?= json_encode($semesterChartData) ?>,
+                    backgroundColor: chartSky,
+                    borderRadius: 6,
+                    maxBarThickness: 48,
+                }],
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: {
+                        min: 0,
+                        max: 10,
+                        ticks: { color: chartTextMuted, stepSize: 1, callback: (value) => value + '%' },
+                        grid: { color: chartGrid },
+                    },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        <?php if (!empty($deptChartLabels)): ?>
+        new Chart(document.getElementById('deptPieChart'), {
+            type: 'pie',
+            data: {
+                labels: <?= json_encode($deptChartLabels) ?>,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: <?= json_encode($deptChartData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
+                    tooltip: { callbacks: { label: (item) => `${item.label}: ${item.formattedValue}%` } },
+                },
+            },
+        });
+        <?php endif; ?>
+    </script>
 </body>
 </html>

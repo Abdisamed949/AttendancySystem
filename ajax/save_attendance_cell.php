@@ -86,6 +86,10 @@ if (!array_key_exists($sessionId, $sessionById)) {
     respond(false, 'Invalid Xiiso session.');
 }
 
+if ($sessionById[$sessionId]['type'] !== 'regular') {
+    respond(false, 'Cannot mark attendance for Midterm/Final sessions — they are exams, not attendance sessions.');
+}
+
 $sessionDate = (string) ($sessionById[$sessionId]['date'] ?? '');
 if ($sessionDate === '') {
     respond(false, 'This Xiiso session has no calendar date assigned yet — ask an admin to assign one in Semesters.');
@@ -141,23 +145,27 @@ try {
 }
 
 // Recompute this student's P/A/% across the whole current semester for
-// this course — same present/absent/total-non-empty logic as
+// this course — same present/absent/regular-only logic as
 // build_xiiso_grid_report(), so the client's row totals stay authoritative.
+// Only *regular* sessions count toward the score (out of ATTENDANCE_MAX_SCORE
+// = 10) — Midterm/Final are excluded even if a legacy mark exists for one.
 $presentCount = 0;
 $absentCount = 0;
-$totalMarks = 0;
 
-if (!empty($semesterSessions)) {
-    $sessionIds = array_map(static fn ($s) => (int) $s['id'], $semesterSessions);
-    $placeholders = implode(',', array_fill(0, count($sessionIds), '?'));
+$regularSessionIds = array_values(array_map(
+    static fn ($s) => (int) $s['id'],
+    array_filter($semesterSessions, static fn ($s) => $s['type'] === 'regular')
+));
+
+if (!empty($regularSessionIds)) {
+    $placeholders = implode(',', array_fill(0, count($regularSessionIds), '?'));
     $stmt = $conn->prepare(
         "SELECT status FROM attendance WHERE course_id = ? AND student_id = ? AND session_id IN ({$placeholders})"
     );
-    $stmt->bind_param('ii' . str_repeat('i', count($sessionIds)), $courseId, $studentId, ...$sessionIds);
+    $stmt->bind_param('ii' . str_repeat('i', count($regularSessionIds)), $courseId, $studentId, ...$regularSessionIds);
     $stmt->execute();
     $res = $stmt->get_result();
     while ($row = $res->fetch_assoc()) {
-        $totalMarks++;
         if ($row['status'] === 'present') {
             $presentCount++;
         } elseif ($row['status'] === 'absent') {
@@ -173,5 +181,5 @@ respond(true, 'Saved.', [
     'status' => $status,
     'present_count' => $presentCount,
     'absent_count' => $absentCount,
-    'attendance_pct' => $totalMarks > 0 ? round(100 * $presentCount / $totalMarks, 1) : 0.0,
+    'attendance_pct' => (float) min(ATTENDANCE_MAX_SCORE, $presentCount),
 ]);

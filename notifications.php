@@ -38,7 +38,7 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // ---------------------------------------------------------------------
 $deanFacultyId = 0;
 $deanFacultyName = '';
-$deanCurrentAcademicYearId = 0;
+$deanCurrentSemesterId = 0;
 if ($role === 'dean') {
     $deanFacultyId = (int) ($_SESSION['faculty_id'] ?? 0);
     if ($deanFacultyId > 0) {
@@ -50,20 +50,23 @@ if ($role === 'dean') {
         $deanFacultyName = $fRow ? (string) $fRow['name'] : '';
 
         $deanCurrentSemester = get_current_semester($conn, $deanFacultyId);
-        $deanCurrentAcademicYearId = (int) ($deanCurrentSemester['academic_year_id'] ?? 0);
+        $deanCurrentSemesterId = (int) ($deanCurrentSemester['id'] ?? 0);
     }
 }
 
-// Every faculty (id => its own current academic_year_id, 0 if none set) —
-// "current academic year" is per-faculty, so alerts spanning every faculty
+// Every faculty (id => its own current semester id, 0 if none set) — a
+// faculty's "current" is per-faculty, so alerts spanning every faculty
 // (system_admin/head_academic) are built per-faculty and merged, never off
-// one shared global value.
+// one shared global value. Keyed by semester, not academic_year_id — two of
+// a faculty's own semesters can share one academic year (e.g. a just-ended
+// semester and its successor), so filtering by year alone could mix an
+// already-ended semester's marks in with the current one.
 $allFaculties = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
-$academicYearIdByFaculty = [];
+$semesterIdByFaculty = [];
 foreach ($allFaculties as $f) {
     $fid = (int) $f['id'];
     $sem = get_current_semester($conn, $fid);
-    $academicYearIdByFaculty[$fid] = (int) ($sem['academic_year_id'] ?? 0);
+    $semesterIdByFaculty[$fid] = (int) ($sem['id'] ?? 0);
 }
 
 // ---------------------------------------------------------------------
@@ -89,32 +92,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
     $studentId = (int) ($_POST['student_id'] ?? 0);
     $courseId = (int) ($_POST['course_id'] ?? 0);
 
-    // The verify query needs an academic_year_id to filter by, but which
-    // one depends on the target student's own faculty (its own current
-    // semester) — resolve that first rather than assuming one shared year.
+    // The verify query needs a semester to filter by, but which one depends
+    // on the target student's own faculty (its own current semester) —
+    // resolve that first rather than assuming one shared value. Only
+    // *regular* Xiiso sessions count toward the score (Midterm/Final never
+    // do) — see ATTENDANCE_MAX_SCORE.
     $studentFacultyStmt = $conn->prepare('SELECT faculty_id FROM students WHERE id = ?');
     $studentFacultyStmt->bind_param('i', $studentId);
     $studentFacultyStmt->execute();
     $studentFacultyRow = $studentFacultyStmt->get_result()->fetch_assoc();
     $studentFacultyStmt->close();
-    $targetAcademicYearId = $studentFacultyRow
-        ? ($academicYearIdByFaculty[(int) $studentFacultyRow['faculty_id']] ?? 0)
+    $targetSemesterId = $studentFacultyRow
+        ? ($semesterIdByFaculty[(int) $studentFacultyRow['faculty_id']] ?? 0)
         : 0;
 
     $verifyStmt = $conn->prepare(
-        "SELECT s.faculty_id, ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
+        "SELECT s.faculty_id, LEAST(10, SUM(a.status = 'present')) AS attendance_pct
          FROM attendance a
          JOIN students s ON s.id = a.student_id
-         WHERE a.student_id = ? AND a.course_id = ? AND a.academic_year_id = ?
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+         WHERE a.student_id = ? AND a.course_id = ? AND sess.semester_id = ?
          GROUP BY s.faculty_id"
     );
-    $verifyStmt->bind_param('iii', $studentId, $courseId, $targetAcademicYearId);
+    $verifyStmt->bind_param('iii', $studentId, $courseId, $targetSemesterId);
     $verifyStmt->execute();
     $verifyRow = $verifyStmt->get_result()->fetch_assoc();
     $verifyStmt->close();
 
     if (!$verifyRow) {
-        $_SESSION['flash_error'] = 'That student/course combination has no attendance records for the current academic year.';
+        $_SESSION['flash_error'] = 'That student/course combination has no attendance records for the current semester.';
     } elseif ((float) $verifyRow['attendance_pct'] >= $minAttendancePct) {
         $_SESSION['flash_error'] = 'That student is no longer below the attendance threshold.';
     } elseif ($role === 'dean' && (int) $verifyRow['faculty_id'] !== $deanFacultyId) {
@@ -146,43 +152,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 }
 
 // ---------------------------------------------------------------------
-// Live below-threshold list (schema's suggested Reports/Notifications
-// query — see admas_attendance_schema.sql), scoped by role. Dean is a
-// single faculty (one query, its own current academic year); system_admin
-// / head_academic span every faculty, each with its own current academic
-// year, so that's one query per faculty merged together rather than one
-// shared global year.
+// Live below-threshold list, scoped by role. Dean is a single faculty (one
+// query, its own current semester); system_admin/head_academic span every
+// faculty, each with its own current semester, so that's one query per
+// faculty merged together rather than one shared global value. Only
+// *regular* Xiiso sessions count toward the score (out of
+// ATTENDANCE_MAX_SCORE = 10) — Midterm/Final never do, and filtering by
+// this semester's own sessions (not academic_year_id) avoids mixing an
+// already-ended semester's marks in with the current one when two
+// semesters share an academic year.
 // ---------------------------------------------------------------------
 $alertsBaseSql = "SELECT s.id AS student_id, s.full_name, s.student_no, sem.name AS semester_name,
                           f.id AS faculty_id, f.name AS faculty_name,
                           c.id AS course_id, c.code, c.name AS course_name,
-                          ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
+                          LEAST(10, SUM(a.status = 'present')) AS attendance_pct
                    FROM attendance a
                    JOIN students s ON s.id = a.student_id
                    JOIN faculties f ON f.id = s.faculty_id
                    JOIN courses c ON c.id = a.course_id
+                   JOIN sessions xsess ON xsess.id = a.session_id AND xsess.type = 'regular'
                    LEFT JOIN semesters sem ON sem.id = s.semester_id
-                   WHERE a.academic_year_id = ? AND s.faculty_id = ?
+                   WHERE xsess.semester_id = ? AND s.faculty_id = ?
                    GROUP BY s.id, s.full_name, s.student_no, sem.name, f.id, f.name, c.id, c.code, c.name
                    HAVING attendance_pct < ?
                    ORDER BY attendance_pct ASC, s.full_name";
 
 $alerts = [];
 if ($role === 'dean') {
-    if ($deanCurrentAcademicYearId > 0) {
+    if ($deanCurrentSemesterId > 0) {
         $stmt = $conn->prepare($alertsBaseSql);
-        $stmt->bind_param('iid', $deanCurrentAcademicYearId, $deanFacultyId, $minAttendancePct);
+        $stmt->bind_param('iid', $deanCurrentSemesterId, $deanFacultyId, $minAttendancePct);
         $stmt->execute();
         $alerts = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
         $stmt->close();
     }
 } else {
-    foreach ($academicYearIdByFaculty as $facultyId => $academicYearId) {
-        if ($academicYearId <= 0) {
+    foreach ($semesterIdByFaculty as $facultyId => $facultySemesterId) {
+        if ($facultySemesterId <= 0) {
             continue;
         }
         $stmt = $conn->prepare($alertsBaseSql);
-        $stmt->bind_param('iid', $academicYearId, $facultyId, $minAttendancePct);
+        $stmt->bind_param('iid', $facultySemesterId, $facultyId, $minAttendancePct);
         $stmt->execute();
         $alerts = array_merge($alerts, $stmt->get_result()->fetch_all(MYSQLI_ASSOC));
         $stmt->close();
@@ -273,9 +283,9 @@ $scopeBanner = match ($role) {
                 </div>
             <?php endif; ?>
 
-            <?php if ($role === 'dean' && $deanCurrentAcademicYearId <= 0): ?>
+            <?php if ($role === 'dean' && $deanCurrentSemesterId <= 0): ?>
                 <div class="alert alert-warning">No current semester is set for <?= htmlspecialchars($deanFacultyName) ?>. Ask an administrator to set one on the Semesters page before alerts can be computed.</div>
-            <?php elseif ($role !== 'dean' && !array_filter($academicYearIdByFaculty)): ?>
+            <?php elseif ($role !== 'dean' && !array_filter($semesterIdByFaculty)): ?>
                 <div class="alert alert-warning">No faculty has a current semester set yet. Configure one for at least one faculty on the Semesters page before alerts can be computed.</div>
             <?php endif; ?>
 

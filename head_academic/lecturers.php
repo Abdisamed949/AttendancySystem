@@ -12,6 +12,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
+require_once __DIR__ . '/../includes/attendance_helpers.php';
 
 require_role(['head_academic']);
 
@@ -287,6 +288,43 @@ $lecturers = $conn->query(
      JOIN users u ON u.id = l.user_id
      ORDER BY f.name, d.name, l.full_name"
 )->fetch_all(MYSQLI_ASSOC);
+
+// ---------------------------------------------------------------------
+// Teaching-setup completeness + student count, same definition and query
+// shape as admin/lecturers.php: "Complete" only once a lecturer has a
+// CURRENT-semester course assignment with a real (non-empty) roster.
+// ---------------------------------------------------------------------
+$lecturerIds = array_map(static fn ($l) => (int) $l['id'], $lecturers);
+$currentOfferingsByLecturer = [];
+if (!empty($lecturerIds)) {
+    $idPlaceholders = implode(',', array_fill(0, count($lecturerIds), '?'));
+    $curOffStmt = $conn->prepare(
+        "SELECT co.lecturer_id, co.course_id, co.semester_id, co.shift
+         FROM course_offerings co
+         JOIN semesters se ON se.id = co.semester_id AND se.is_current = 1
+         WHERE co.lecturer_id IN ({$idPlaceholders})"
+    );
+    $curOffStmt->bind_param(str_repeat('i', count($lecturerIds)), ...$lecturerIds);
+    $curOffStmt->execute();
+    $curOffRes = $curOffStmt->get_result();
+    while ($row = $curOffRes->fetch_assoc()) {
+        $currentOfferingsByLecturer[(int) $row['lecturer_id']][] = $row;
+    }
+    $curOffStmt->close();
+}
+
+$studentCountByLecturerId = [];
+$isCompleteByLecturerId = [];
+foreach ($lecturerIds as $lid) {
+    $offeringsForLecturer = $currentOfferingsByLecturer[$lid] ?? [];
+    $studentCount = 0;
+    foreach ($offeringsForLecturer as $off) {
+        $shiftFilter = ($off['shift'] !== null && $off['shift'] !== 'any') ? $off['shift'] : null;
+        $studentCount += get_course_roster_count($conn, (int) $off['course_id'], (int) $off['semester_id'], $shiftFilter);
+    }
+    $studentCountByLecturerId[$lid] = $studentCount;
+    $isCompleteByLecturerId[$lid] = !empty($offeringsForLecturer) && $studentCount > 0;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -353,14 +391,16 @@ $lecturers = $conn->query(
                                         <th>Department</th>
                                         <th>Faculty</th>
                                         <th># Courses</th>
+                                        <th>Students</th>
                                         <th>Status</th>
+                                        <th>Setup</th>
                                         <th></th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     <?php if (empty($lecturers)): ?>
                                         <tr>
-                                            <td colspan="8" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
+                                            <td colspan="10" class="text-center text-muted py-4">No lecturers have been registered yet.</td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($lecturers as $l): ?>
@@ -374,11 +414,19 @@ $lecturers = $conn->query(
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['faculty_name']) ?></td>
                                                 <td><?= number_format((int) $l['course_count']) ?></td>
+                                                <td><i class="bi bi-people-fill text-muted"></i> <?= number_format($studentCountByLecturerId[(int) $l['id']] ?? 0) ?></td>
                                                 <td>
                                                     <?php if ($l['user_status'] === 'active'): ?>
-                                                        <span class="badge-pill badge-active">Active</span>
+                                                        <span class="badge-pill badge-active"><i class="bi bi-check-circle-fill"></i> Active</span>
                                                     <?php else: ?>
-                                                        <span class="badge-pill badge-inactive">Inactive</span>
+                                                        <span class="badge-pill badge-inactive"><i class="bi bi-slash-circle-fill"></i> Inactive</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($isCompleteByLecturerId[(int) $l['id']] ?? false): ?>
+                                                        <span class="badge-pill badge-active"><i class="bi bi-check-circle-fill"></i> Complete</span>
+                                                    <?php else: ?>
+                                                        <span class="badge-pill badge-warning" title="No current course assignment with enrolled students yet"><i class="bi bi-exclamation-triangle-fill"></i> Incomplete</span>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>

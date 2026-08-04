@@ -255,7 +255,7 @@ foreach ($courses as $c) {
 }
 
 $semesters = $conn->query(
-    'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.label AS academic_year_label
+    'SELECT s.id, s.name, s.faculty_id, s.is_current, s.status, ay.label AS academic_year_label
      FROM semesters s
      JOIN academic_years ay ON ay.id = s.academic_year_id
      WHERE s.faculty_id IS NOT NULL
@@ -268,6 +268,7 @@ foreach ($semesters as $sem) {
         'name' => $sem['name'],
         'academic_year_label' => $sem['academic_year_label'],
         'is_current' => (int) $sem['is_current'] === 1,
+        'status' => $sem['status'],
     ];
 }
 ?>
@@ -443,14 +444,14 @@ foreach ($semesters as $sem) {
                             <div class="row g-2 mb-3">
                                 <div class="col-6">
                                     <label class="form-label small mb-1">Start Date</label>
-                                    <input type="date" class="form-control form-control-sm" name="start_date">
+                                    <input type="date" class="form-control form-control-sm" name="start_date" id="assignStartDate">
                                 </div>
                                 <div class="col-6">
                                     <label class="form-label small mb-1">End Date</label>
-                                    <input type="date" class="form-control form-control-sm" name="end_date">
+                                    <input type="date" class="form-control form-control-sm" name="end_date" id="assignEndDate">
                                 </div>
                             </div>
-                            <div class="form-text mb-3">Optional — this course's actual teaching period within the selected semester.</div>
+                            <div class="form-text mb-3">Optional — this course's actual teaching period within the selected semester. End Date auto-fills 3 months after Start Date (same as a semester's 12 Xiiso sessions); you can still edit it by hand.</div>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-plus-lg"></i> Assign
@@ -463,6 +464,8 @@ foreach ($semesters as $sem) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/offering_dates.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const coursesByDepartmentId = <?= json_encode($coursesByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -510,7 +513,7 @@ foreach ($semesters as $sem) {
             (semestersByFacultyId[facultyId] || []).forEach((s) => {
                 const opt = document.createElement('option');
                 opt.value = String(s.id);
-                opt.textContent = s.name + ' (' + s.academic_year_label + ')' + (s.is_current ? ' — Current' : '');
+                opt.textContent = admasSemesterLabel(s);
                 semSelect.appendChild(opt);
             });
         }
@@ -523,6 +526,7 @@ foreach ($semesters as $sem) {
             } else {
                 document.getElementById('assignDepartmentSelect').addEventListener('change', (e) => admasUpdateAssignCourses(e.target.value));
             }
+            admasWireOfferingDateAutoFill('assignStartDate', 'assignEndDate');
         });
     </script>
 </body>

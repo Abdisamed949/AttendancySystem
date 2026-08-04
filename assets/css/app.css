@@ -49,6 +49,40 @@
     color: var(--admas-text-muted);
 }
 
+/* Same class of bug as .form-label/.form-text above: Bootstrap's own
+   .text-muted/.text-secondary utility classes (used raw across ~45 files —
+   e.g. the offering shift/semester sub-lines in admin/courses.php's
+   "Current Offering" column) are never touched by our theme variables, so
+   in dark mode they render Bootstrap's light-mode gray on the dark navy
+   surface — nearly invisible next to normal-color text right above/below
+   it. */
+[data-theme="dark"] .text-muted,
+[data-theme="dark"] .text-secondary {
+    color: var(--admas-text-muted) !important;
+}
+
+/* Bootstrap's flat --bs-secondary gray (#6c757d) used by raw
+   .btn-outline-secondary/.btn-secondary buttons (23 files — mostly Cancel
+   buttons and collapse toggles) sits at ~3.8:1 contrast against our dark
+   navy surfaces — passable for light mode's white background but noticeably
+   dim/washed out on dark, well under the ~7:1 our own --admas-text-muted
+   already gets on the same background. Routed through Bootstrap's own
+   per-component custom properties (not a blanket --bs-secondary override,
+   which other unrelated components also read) so hover/active states stay
+   correctly paired. */
+[data-theme="dark"] .btn-outline-secondary {
+    --bs-btn-color: var(--admas-text-muted);
+    --bs-btn-border-color: var(--admas-text-muted);
+    --bs-btn-hover-color: var(--admas-bg);
+    --bs-btn-hover-bg: var(--admas-text-muted);
+    --bs-btn-hover-border-color: var(--admas-text-muted);
+    --bs-btn-active-color: var(--admas-bg);
+    --bs-btn-active-bg: var(--admas-text-muted);
+    --bs-btn-active-border-color: var(--admas-text-muted);
+    --bs-btn-disabled-color: var(--admas-text-faint);
+    --bs-btn-disabled-border-color: var(--admas-text-faint);
+}
+
 body {
     background: var(--admas-bg);
     font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
@@ -450,7 +484,10 @@ a.kpi-card:hover .kpi-arrow {
 .badge-active { background: rgb(34 197 94 / var(--admas-tint-opacity)); color: #16a34a; }
 .badge-inactive { background: rgb(148 163 184 / var(--admas-tint-opacity)); color: var(--admas-text-muted); }
 
-/* Attendance alerts widget */
+/* Attendance alerts widget — rows are <a> links into notifications.php (the
+   page with the actual "Notify" action), so these three properties undo the
+   browser's default link styling since every child already sets its own
+   color via .alert-student-name/.alert-student-meta/.alert-pct. */
 .alert-row {
     display: flex;
     align-items: center;
@@ -460,6 +497,9 @@ a.kpi-card:hover .kpi-arrow {
     border-bottom: 1px solid var(--admas-border);
     border-radius: 10px;
     transition: background-color 0.15s ease;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
 }
 
 .alert-row:hover {
@@ -604,6 +644,25 @@ table.admas-table td.col-summary {
     pointer-events: none;
 }
 
+/* Midterm/Final Xiiso columns — exams, not attendance sessions, so they're
+   never markable and never count toward the out-of-10 attendance score.
+   Used on attendance.php's Grid View, reports.php's Xiiso Grid report, and
+   student/xiiso_grid.php. */
+.grid-cell-exam,
+.grid-cell-exam:disabled {
+    background: var(--admas-border) !important;
+    color: var(--admas-text-faint) !important;
+    border-color: var(--admas-border) !important;
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+th.col-exam,
+td.col-exam {
+    background: var(--admas-border);
+    color: var(--admas-text-muted);
+}
+
 /* Shared small icon-button (edit/delete row actions) — previously
    copy-pasted into a local <style> block on 8 different pages. */
 .btn-icon {
@@ -629,6 +688,39 @@ table.admas-table td.col-summary {
 }
 
 .btn-icon.text-sky:hover {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+}
+
+.btn-icon-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: none;
+    background: transparent;
+    color: var(--admas-text-muted);
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.btn-icon-label:hover {
+    background: var(--admas-bg);
+    color: var(--admas-text);
+}
+
+.btn-icon-label.text-danger:hover {
+    background: rgba(220, 38, 38, 0.08);
+    color: #dc2626;
+}
+
+.btn-icon-label.text-sky {
+    color: var(--admas-sky);
+}
+
+.btn-icon-label.text-sky:hover {
     background: rgb(14 165 233 / var(--admas-tint-opacity));
     color: var(--admas-sky);
 }

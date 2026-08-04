@@ -73,29 +73,54 @@ if ($ownFacultyId > 0) {
     $facStmt->close();
 }
 
-// Real semester rows for this faculty, keyed by name — if a faculty ever
-// has two rows with the same name (different academic years), the most
-// recently created one wins, same tie-break as get_current_semester().
+// Real semester rows for this faculty, keyed by name. The DB allows two
+// rows to legitimately share one name across different academic years
+// (the unique key is (faculty, academic_year, name), not (faculty, name)
+// — e.g. a faculty re-using "Semester 6" for a later cohort/year after the
+// earlier one has ended) — every matching row is kept here, not just the
+// newest, so an older same-named semester's real historical data can never
+// be silently swallowed behind a newer one and become unreachable.
 $semestersByName = [];
 if ($ownFacultyId > 0) {
-    $semStmt = $conn->prepare('SELECT id, name, status FROM semesters WHERE faculty_id = ? ORDER BY id ASC');
+    $semStmt = $conn->prepare(
+        'SELECT s.id, s.name, s.status, ay.label AS academic_year_label
+         FROM semesters s
+         JOIN academic_years ay ON ay.id = s.academic_year_id
+         WHERE s.faculty_id = ? AND s.hidden_from_picker = 0
+         ORDER BY s.id ASC'
+    );
     $semStmt->bind_param('i', $ownFacultyId);
     $semStmt->execute();
     $semRes = $semStmt->get_result();
     while ($row = $semRes->fetch_assoc()) {
-        $semestersByName[$row['name']] = $row;
+        $semestersByName[$row['name']][] = $row;
     }
     $semStmt->close();
 }
 
 $semesterBoxes = [];
 foreach (semester_name_options_for_faculty($facultyTotalSemesters) as $semName) {
-    $match = $semestersByName[$semName] ?? null;
-    $semesterBoxes[] = [
-        'name' => $semName,
-        'semester_id' => $match !== null ? (int) $match['id'] : 0,
-        'status' => $match['status'] ?? null,
-    ];
+    $matches = $semestersByName[$semName] ?? [];
+    if (empty($matches)) {
+        $semesterBoxes[] = ['name' => $semName, 'semester_id' => 0, 'status' => null];
+    } elseif (count($matches) === 1) {
+        $semesterBoxes[] = [
+            'name' => $semName,
+            'semester_id' => (int) $matches[0]['id'],
+            'status' => $matches[0]['status'],
+        ];
+    } else {
+        // Name collision across academic years — render one disambiguated
+        // box per real row (oldest first, since $matches is already in id
+        // order) instead of collapsing to just the newest.
+        foreach ($matches as $match) {
+            $semesterBoxes[] = [
+                'name' => $semName . ' (' . $match['academic_year_label'] . ')',
+                'semester_id' => (int) $match['id'],
+                'status' => $match['status'],
+            ];
+        }
+    }
 }
 
 $filterSemesterId = (int) ($_GET['semester_id'] ?? 0);
@@ -213,7 +238,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
     // offering per course, preferring the exact shift match over 'any'
     // when both exist, so this can never fan out into duplicate rows.
     $sql = "SELECT c.id, c.code, c.name, l.full_name AS lecturer_name,
-                   SUM(a.status = 'present') AS present_count,
+                   LEAST(10, SUM(a.status = 'present')) AS present_count,
                    COUNT(a.id) AS total_marks
             FROM courses c
             LEFT JOIN course_offerings co ON co.id = (
@@ -224,7 +249,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
             )
             LEFT JOIN lecturers l ON l.id = co.lecturer_id
             LEFT JOIN attendance a ON a.course_id = c.id AND a.student_id = ?
-                AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ?)
+                AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ? AND type = 'regular')
             WHERE c.id IN ({$placeholders})
                 AND (co.id IS NOT NULL OR a.id IS NOT NULL)
             GROUP BY c.id, c.code, c.name, l.full_name
@@ -311,7 +336,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                                 <?php foreach ($courses as $c): ?>
                                     <?php
                                     $totalMarks = (int) $c['total_marks'];
-                                    $pct = $totalMarks > 0 ? round(100 * (int) $c['present_count'] / $totalMarks, 1) : null;
+                                    $pct = $totalMarks > 0 ? min(ATTENDANCE_MAX_SCORE, (int) $c['present_count']) : null;
                                     ?>
                                     <tr>
                                         <td><span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span></td>
@@ -327,7 +352,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                                             <?php if ($pct === null): ?>
                                                 <span class="text-muted">No records yet</span>
                                             <?php else: ?>
-                                                <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= number_format($pct, 1) ?>%</span>
+                                                <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= $pct ?>%</span>
                                             <?php endif; ?>
                                         </td>
                                         <?php

@@ -4228,6 +4228,185 @@ data/configuration task for the university admin, not further code work.
         (a genuine bulk import, not test data) were left untouched
         throughout.
 
+### Attendance Scoring Overhaul: 0-100% Ratio -> Out-of-10 Present Count
+- [x] Replaced the ratio-based attendance percentage
+      (`ROUND(100 * SUM(present)/COUNT(*), 2)`, 0-100%) used everywhere in
+      the app with the university's real grading rule: attendance is a 10%
+      component of a course's grade, and each of the 10 *regular* Xiiso
+      sessions (1-5, 7-11) is worth exactly 1 point when Present — so a
+      student Present in 9 of 10 regular sessions shows **"9%"**, not 90%,
+      and the score reflects real progress through the semester rather than
+      a ratio (a student Present in all 3 sessions held so far shows "3%",
+      not 100%). Midterm (Xiiso 6) and Final (Xiiso 12) are exams, not
+      attendance sessions, and are fully excluded from scoring. Planned via
+      Plan Mode (3 parallel Explore-agent research passes auditing every
+      percentage calculation, every Xiiso-grid rendering site, and every
+      `min_attendance_pct` consumer) plus `AskUserQuestion` to confirm four
+      design forks before writing any code: exclude Midterm/Final entirely
+      (not just cap them) with their grid boxes rendered grey/disabled;
+      Late/Excused irrelevant since only `present`/`absent` exist in the
+      schema; **full replace** of the old 0-100% display everywhere, not a
+      side-by-side addition; and the three date-range summary reports
+      (Course/Department/Faculty Summary) also convert to the new scheme,
+      switching from a Date-From/Date-To filter to a Semester picker.
+      - **Core formula** (`includes/attendance_helpers.php`): new
+        `ATTENDANCE_MAX_SCORE = 10` constant.
+        `attendance_badge_class()`'s yellow-band buffer scaled from 10 to 1
+        point (same 10%-of-max proportion). The transformation, repeated at
+        every site rather than centralized in one giant query helper (each
+        site groups by a different dimension): join `attendance` to
+        `sessions` filtered `type = 'regular'`, replace
+        `ROUND(100*SUM(present)/COUNT(*),2)` with
+        `LEAST(10, SUM(status='present'))` — a raw capped count, no more
+        `/COUNT(*)` denominator. Legacy pre-Xiiso rows (`session_id IS
+        NULL`) are excluded automatically by the join.
+      - **Threshold**: new migration
+        `migrations/2026_08_min_attendance_pct_scale.sql`
+        (`UPDATE settings SET value = ROUND(value/10, 2) WHERE key =
+        'min_attendance_pct'` — 75 -> 7.5), applied to the live dev DB after
+        a `mysqldump` safety backup. `admin/settings.php` and
+        `head_academic/academic_settings.php`'s validation range changed
+        0-100 -> 0-10 (`step="0.1"`), with a help caption explaining the new
+        scale.
+      - **Midterm/Final become disabled, greyed-out boxes**: new
+        `.grid-cell-exam`/`.col-exam` CSS (theme-aware, `assets/css/app.css`)
+        applied on `attendance.php`'s Grid View, `reports.php`'s Xiiso Grid
+        report, and `student/xiiso_grid.php` — cells render grey with a "—"
+        glyph, `disabled`, and a tooltip; `assets/js/attendance_grid.js`'s
+        local P/A/% recompute excludes `.grid-cell-exam` buttons.
+        **Server-side enforcement** (the real boundary):
+        `ajax/save_attendance_cell.php` rejects any save where the target
+        session's `type !== 'regular'` with "Cannot mark attendance for
+        Midterm/Final sessions" — verified live via a direct POST against
+        both a Midterm and a Final session id, both rejected with zero DB
+        change. `attendance_import.php` still assigns a missing date to a
+        Midterm/Final slot if detected (informational) but never writes an
+        attendance row for it, flagging skipped exam columns in the preview
+        ("Xiiso 6 (Midterm) — not imported (exam session)").
+      - **`reports.php`'s Course/Department/Faculty Summary**: converted
+        from Date-From/Date-To to a role-scoped **Semester** picker (dean
+        locked to their own faculty's semesters, same convention as every
+        other Faculty-locked dropdown in this app), reusing the generic
+        `<select>` auto-submit already provided by `assets/js/live_filter.js`.
+        New shared `attendance_score_subquery()` derived-table pattern:
+        per-(student, course) capped score, then `AVG()` rolled up to
+        course/department/faculty — "average of capped scores," not a
+        pooled ratio, matching the semantics used everywhere else this
+        session. "Total Sessions" column became "Sessions Recorded (of
+        10)". The dead `report_export_filename()` function and the
+        now-unused Date From/To UI/parsing were removed entirely.
+        `registration`'s enrollment-count variant of these two report types
+        (no attendance access at all) is untouched and doesn't require a
+        semester selection.
+      - **Per-student/per-course/per-semester sites converted** (SQL
+        aggregate sites gained the `sessions`-join + `type='regular'`
+        filter + `LEAST(10, SUM(...))` formula; PHP-loop sites skip
+        non-regular sessions and use `min(ATTENDANCE_MAX_SCORE,
+        $presentCount)` instead of a division): `student/dashboard.php`
+        (`myAttendancePct` redefined as the **average of each scored
+        course's own out-of-10 score**, not a pooled ratio — a student
+        taking several courses could otherwise exceed 10; same averaging
+        semantics added to `student/attendance_history.php`'s new
+        `semester_average_score()` helper for its per-semester "overall"
+        figure), `student/courses.php`, `student/xiiso_grid.php`,
+        `lecturer/dashboard.php`'s per-course chart (`lecturer/courses.php`
+        was found to no longer display any percentage at all — a prior
+        session's refactor already removed it — so it needed no change).
+        Chart.js y-axis maxes changed from 100 to 10 everywhere a per-
+        course/per-semester score is plotted (student and lecturer
+        dashboards, dean's Attendance-by-Semester bar chart) — the day-
+        level "Avg Attendance Today"/"Weekly Attendance Trend" widgets on
+        admin/dean/head_academic dashboards were **deliberately left as
+        plain 0-100% same-day present-rates**, a different metric with no
+        "out of 10" interpretation.
+      - **`notifications.php`**: converted alongside a **real scoping bug
+        fix** discovered while touching this file — both the single-student
+        re-verify query and the alerts list still filtered by
+        `academic_year_id` (the exact bug already found and fixed in
+        `student/dashboard.php` earlier this project, since two of a
+        faculty's semesters can share one academic year); switched
+        `$academicYearIdByFaculty` to `$semesterIdByFaculty` and both
+        queries to join `sessions`/filter `semester_id` + `type='regular'`.
+        Same scoping fix + new formula applied to `admin/dashboard.php`'s
+        live-alerts fallback and Attendance-by-Department pie chart,
+        `dean/dashboard.php`'s Departments table/Low-Attendance
+        widget/Attendance-by-Semester chart, and
+        `head_academic/dashboard.php`'s per-faculty loop (faculty avg,
+        department chart, alerts) — all four now use the same
+        `attendance_score_subquery()`-style derived table and
+        `sess.semester_id` scoping instead of `academic_year_id`.
+      - **Verified end-to-end via real HTTP requests** against the live app
+        (temporary `system_admin`, `student`, `dean`, `head_academic`
+        accounts, all deleted afterward) with a temporary student enrolled
+        in a real current-semester course (36-student real roster):
+        marked 9 of the 10 regular sessions Present and 1 Absent one cell
+        at a time via the real AJAX endpoint, confirming the returned score
+        climbed 1/2/3.../9 (never a ratio) and landed on exactly **9**, not
+        90; confirmed the Grid View, `student/dashboard.php` ("9.0%"),
+        `student/courses.php` ("9%", green badge), and `reports.php`'s
+        Xiiso Grid report (P=9/A=1/%=9, last exam column blank/greyed) all
+        agreed; confirmed two direct POSTs against the Midterm and Final
+        session ids were both rejected with the exact expected message and
+        zero DB rows created; confirmed `reports.php`'s Course Attendance
+        Summary (now semester-scoped) rendered sensible blended real+test
+        figures with no errors; downloaded and validated both a real
+        `.xlsx` export (Course Attendance Summary) and a real `.pdf` export
+        (Xiiso Grid) — both valid files; confirmed
+        `admin/dashboard.php`, `admin/settings.php`, `notifications.php`,
+        `attendance.php`, `reports.php` (all 4 report types),
+        `attendance_import.php`, `dean/dashboard.php`,
+        `head_academic/dashboard.php`, and
+        `head_academic/academic_settings.php` all return 200 with zero PHP
+        warnings/notices/fatals; confirmed `admin/settings.php` rejects a
+        posted threshold of 15 (out of the new 0-10 range) with zero DB
+        change. All temporary accounts, the temporary student, its
+        enrollment, and its 10 attendance rows were deleted afterward;
+        confirmed the real, pre-existing student (id 158) used to find the
+        test course/semester — whose own genuine attendance included a
+        real historical Midterm mark — was completely untouched throughout
+        (its 7 attendance rows, including that Midterm row, byte-identical
+        before and after).
+
+### Forgot Password: Real Gmail SMTP Credentials Configured
+- [x] The Forgot Password / Reset Password feature (built in an earlier
+      session — "Login Redesign, Forgot Password (email), and Force
+      Password Change") had been fully coded from day one but never
+      actually delivered mail: `includes/mail_config.php` still held
+      placeholder `SMTP_USERNAME`/`SMTP_PASSWORD` values, so every send
+      attempt failed with `SMTP Error: Could not authenticate.` (confirmed
+      via `error.log` — this exact failure had already been silently
+      recurring on at least two earlier real-world attempts, 2026-07-09 and
+      2026-08-03, before this session).
+      - User walked through generating a real Gmail App Password (Google
+        Account → Security → 2-Step Verification → App Passwords) for a
+        real Gmail account (`maticn033@gmail.com`) and provided both values.
+      - Updated `includes/mail_config.php` with the real
+        `SMTP_USERNAME`/`SMTP_PASSWORD` (App Password, not the account's
+        normal login password — Gmail rejects SMTP auth with the regular
+        password once 2-Step Verification is on).
+      - **Verified via a real, live email round-trip** (not just "no
+        exception thrown"): created a temporary user
+        (`temp_mailtest`, id 471) with `email = 'maticn033@gmail.com'`,
+        submitted a real POST to `forgot_password.php`, confirmed
+        `error.log` recorded **no** new `Mail send failed` entry for this
+        attempt (every prior attempt, going back months, had logged one
+        immediately), confirmed the generated code landed in
+        `password_resets` (`323138`), and had the user directly confirm
+        via their own Gmail inbox that the received email's code
+        (`323138`) matched exactly. This is the strongest possible
+        confirmation available without direct inbox access: a code that
+        can only have come from this exact send now sitting in the user's
+        real inbox.
+      - Cleaned up afterward: deleted the temporary user's
+        `password_resets` row and the `temp_mailtest` user itself
+        (`users` id 471); confirmed zero rows remain for that username.
+      - **Note for future sessions**: `includes/mail_config.php` now holds
+        a real, working Gmail App Password directly in the file (per its
+        own header comment's existing convention) — this is a real
+        secret, not a placeholder; do not commit it to any public/shared
+        repository, and do not overwrite it with placeholder values again
+        without the user's explicit request.
+
 ### Deferred Decisions
 - **Student ID as username/password scheme**: scoped but paused before
   implementation — the user's request assumed a "Student ID" field

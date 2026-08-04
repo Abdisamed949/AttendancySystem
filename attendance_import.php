@@ -165,13 +165,22 @@ $semestersByFacultyId = [];
 if (!empty($facultyIds)) {
     $placeholders = implode(',', array_fill(0, count($facultyIds), '?'));
     $types = str_repeat('i', count($facultyIds));
-    $semStmt = $conn->prepare("SELECT id, name, faculty_id FROM semesters WHERE faculty_id IN ($placeholders) ORDER BY start_date DESC");
+    $semStmt = $conn->prepare(
+        "SELECT se.id, se.name, se.faculty_id, se.status, ay.label AS academic_year_label
+         FROM semesters se JOIN academic_years ay ON ay.id = se.academic_year_id
+         WHERE se.faculty_id IN ($placeholders) ORDER BY se.start_date DESC"
+    );
     $semStmt->bind_param($types, ...$facultyIds);
     $semStmt->execute();
     $semRows = $semStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $semStmt->close();
     foreach ($semRows as $sem) {
-        $semestersByFacultyId[(int) $sem['faculty_id']][] = ['id' => (int) $sem['id'], 'name' => $sem['name']];
+        $semestersByFacultyId[(int) $sem['faculty_id']][] = [
+            'id' => (int) $sem['id'],
+            'name' => $sem['name'],
+            'academic_year_label' => $sem['academic_year_label'],
+            'status' => $sem['status'],
+        ];
     }
 }
 
@@ -198,6 +207,7 @@ $step = 'upload';
 $previewRows = [];
 $mappedSessions = [];
 $skippedColumnCount = 0;
+$skippedExamLabels = [];
 $previewCourseId = 0;
 $previewSemesterId = 0;
 
@@ -332,9 +342,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         $semesterSessions = get_sessions_for_semester($conn, $semesterId);
 
                                         $missingDateLabels = [];
+                                        $skippedExamLabels = [];
                                         foreach ($semesterSessions as $i => $sess) {
                                             if (!isset($usedCols[$i])) {
                                                 break;
+                                            }
+                                            // Midterm/Final are exams, not attendance
+                                            // sessions — never imported as attendance,
+                                            // regardless of whether the file has a mark
+                                            // in that column.
+                                            if ($sess['type'] !== 'regular') {
+                                                $skippedExamLabels[] = $sess['label'];
+                                                continue;
                                             }
                                             if ($sess['date'] === null) {
                                                 $missingDateLabels[] = $sess['label'];
@@ -415,6 +434,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                     'semester_id' => $semesterId,
                                                     'mapped_sessions' => $mappedSessions,
                                                     'skipped_column_count' => $skippedColumnCount,
+                                                    'skipped_exam_labels' => $skippedExamLabels,
                                                     'rows' => $previewRows,
                                                 ];
                                                 $step = 'preview';
@@ -579,8 +599,9 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
                             whatever you have is fine, or none at all): any column with a <strong>1</strong>
                             (Present) or <strong>0</strong> (Absent) mark is picked up automatically, in
                             left-to-right order, and mapped straight onto the selected Semester's own Xiiso 1–12 —
-                            using that Semester's own already-assigned dates. Extra columns beyond 12 are ignored.
-                            If a Xiiso session doesn't have a date yet, assign it on the
+                            using that Semester's own already-assigned dates. Extra columns beyond 12 are ignored,
+                            and Xiiso 6 (Midterm) / Xiiso 12 (Final) are never imported — they're exams, not
+                            attendance sessions. If a regular Xiiso session doesn't have a date yet, assign it on the
                             <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php">Semesters</a> page first.
                             <strong>First Names</strong>, <strong>Father's</strong>, and <strong>G.Father's</strong>
                             name columns are optional (shown for your own confirmation only — matching is always by
@@ -669,6 +690,11 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
                             <strong><?= $skippedColumnCount ?> extra mark column(s) beyond the 12 Xiiso sessions were ignored.</strong>
                         </div>
                     <?php endif; ?>
+                    <?php if (!empty($skippedExamLabels)): ?>
+                        <div class="alert alert-warning small mb-0 mt-2">
+                            <strong><?= htmlspecialchars(implode(', ', $skippedExamLabels)) ?> — not imported (exam session, not an attendance session).</strong>
+                        </div>
+                    <?php endif; ?>
                 </div>
 
                 <div class="admas-card p-4">
@@ -736,6 +762,7 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script>
         const coursesFacultyById = <?= json_encode(array_map(static fn ($c) => (int) $c['faculty_id'], $courseById), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const importSemestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -754,7 +781,7 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name;
+                opt.textContent = admasSemesterLabel(sem);
                 select.appendChild(opt);
             });
         }

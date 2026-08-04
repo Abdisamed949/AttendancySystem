@@ -47,7 +47,7 @@ if ($ownStudentId > 0) {
                 SUM(a.status = 'absent') AS absent_count,
                 COUNT(a.id) AS total_marks
          FROM attendance a
-         JOIN sessions sess ON sess.id = a.session_id
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
          JOIN semesters se ON se.id = sess.semester_id
          WHERE a.student_id = ?
          GROUP BY se.id, se.name, se.start_date, se.end_date, se.is_current
@@ -66,11 +66,11 @@ $coursesBySemester = [];
 if ($ownStudentId > 0 && !empty($semesters)) {
     $stmt = $conn->prepare(
         "SELECT se.id AS semester_id, c.code, c.name,
-                SUM(a.status = 'present') AS present_count,
-                SUM(a.status = 'absent') AS absent_count,
+                LEAST(10, SUM(a.status = 'present')) AS present_count,
+                LEAST(10, SUM(a.status = 'absent')) AS absent_count,
                 COUNT(a.id) AS total_marks
          FROM attendance a
-         JOIN sessions sess ON sess.id = a.session_id
+         JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
          JOIN semesters se ON se.id = sess.semester_id
          JOIN courses c ON c.id = a.course_id
          WHERE a.student_id = ?
@@ -86,9 +86,29 @@ if ($ownStudentId > 0 && !empty($semesters)) {
     $stmt->close();
 }
 
+// Course-level score: the SQL above already caps present_count at
+// ATTENDANCE_MAX_SCORE (10) and only counts *regular* sessions — this just
+// applies the "no marks yet = null (not 0%)" rule on top.
 function pct(int $present, int $total): ?float
 {
-    return $total > 0 ? round(100 * $present / $total, 1) : null;
+    return $total > 0 ? (float) $present : null;
+}
+
+// Semester-level "overall": the average of each of that semester's courses'
+// own out-of-10 score (only courses with real marks) — not a pooled ratio,
+// since a student taking several courses could otherwise show a score
+// above 10. Matches the same "average of capped course scores" semantics
+// used on student/dashboard.php.
+function semester_average_score(array $courseRows): ?float
+{
+    $scores = [];
+    foreach ($courseRows as $c) {
+        if ((int) $c['total_marks'] > 0) {
+            $scores[] = min(ATTENDANCE_MAX_SCORE, (int) $c['present_count']);
+        }
+    }
+
+    return empty($scores) ? null : round(array_sum($scores) / count($scores), 1);
 }
 
 // ---------------------------------------------------------------------
@@ -143,6 +163,27 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        .attendance-history-wrap {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .semester-card {
+            border-left: 5px solid var(--admas-border);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .semester-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px var(--admas-shadow);
+        }
+
+        .semester-card.semester-current { border-left-color: #16a34a; }
+        .semester-card.semester-accent-sky { border-left-color: var(--admas-sky); }
+        .semester-card.semester-accent-navy { border-left-color: var(--admas-navy-start); }
+        .semester-card.semester-accent-amber { border-left-color: #d97706; }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -151,6 +192,7 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
         <?php include __DIR__ . '/../includes/topbar.php'; ?>
 
         <div class="page-body">
+            <div class="attendance-history-wrap">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 Access scope: Own personal record only
@@ -175,14 +217,18 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
                 </div>
             <?php endif; ?>
 
+            <?php
+            $semAccents = ['semester-accent-sky', 'semester-accent-navy', 'semester-accent-amber'];
+            $semIndex = 0;
+            ?>
             <?php foreach ($semesters as $sem): ?>
                 <?php
-                $semTotal = (int) $sem['total_marks'];
-                $semPresent = (int) $sem['present_count'];
-                $semPct = pct($semPresent, $semTotal);
                 $courses = $coursesBySemester[(int) $sem['id']] ?? [];
+                $semPct = semester_average_score($courses);
+                $accentClass = $sem['is_current'] ? 'semester-current' : $semAccents[$semIndex % count($semAccents)];
+                $semIndex++;
                 ?>
-                <div class="admas-card p-4 mb-3">
+                <div class="admas-card semester-card <?= $accentClass ?> p-4 mb-3">
                     <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
                         <div>
                             <h5 class="fw-bold mb-1" style="color: var(--admas-text);">
@@ -238,7 +284,7 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
                                             <?php if ($cPct === null): ?>
                                                 <span class="text-muted">&mdash;</span>
                                             <?php else: ?>
-                                                <span class="badge-pill <?= attendance_badge_class($cPct, $minAttendancePct) ?>"><?= number_format($cPct, 1) ?>%</span>
+                                                <span class="badge-pill <?= attendance_badge_class($cPct, $minAttendancePct) ?>"><?= (int) $cPct ?>%</span>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -248,6 +294,7 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $ownRow) {
                     </div>
                 </div>
             <?php endforeach; ?>
+            </div>
         </div>
     </div>
 

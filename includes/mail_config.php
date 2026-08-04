@@ -17,7 +17,7 @@ declare(strict_types=1);
 if (!defined('SMTP_HOST')) {
     define('SMTP_HOST', 'smtp.gmail.com');
     define('SMTP_PORT', 587);
-    define('SMTP_USERNAME', 'your-gmail-address@gmail.com'); // <-- replace with the sending Gmail address
-    define('SMTP_PASSWORD', 'your-16-char-app-password');    // <-- replace with a real Gmail App Password
+    define('SMTP_USERNAME', 'maticn033@gmail.com'); // <-- replace with the sending Gmail address
+    define('SMTP_PASSWORD', 'jtbexzfyamqmjwvf');    // <-- replace with a real Gmail App Password
     define('SMTP_FROM_NAME', 'ADMAS Attendance System');
 }

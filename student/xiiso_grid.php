@@ -137,6 +137,9 @@ if ($isValid) {
         $marksStmt->close();
 
         foreach ($sessions as $s) {
+            if ($s['type'] !== 'regular') {
+                continue;
+            }
             $status = $marksBySessionId[(int) $s['id']] ?? null;
             if ($status !== null) {
                 $totalMarks++;
@@ -152,7 +155,9 @@ if ($isValid) {
     }
 }
 
-$attendancePct = $totalMarks > 0 ? round(100 * $presentCount / $totalMarks, 1) : null;
+// Only regular sessions count (Midterm/Final are exams) — a raw capped
+// count out of ATTENDANCE_MAX_SCORE, not a ratio; see includes/attendance_helpers.php.
+$attendancePct = min(ATTENDANCE_MAX_SCORE, $presentCount);
 
 $settings = [];
 $settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
@@ -276,7 +281,8 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                 <tr>
                                     <th class="col-group-end col-summary text-start">Full Name</th>
                                     <?php foreach ($sessions as $s): ?>
-                                        <th class="<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? 'col-group-end' : '' ?>">
+                                        <?php $sIsExam = $s['type'] !== 'regular'; ?>
+                                        <th class="<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? 'col-group-end' : '' ?><?= $sIsExam ? ' col-exam' : '' ?>" <?= $sIsExam ? 'title="Exam — not part of the attendance score"' : '' ?>>
                                             <?= htmlspecialchars($s['label']) ?>
                                             <div class="text-muted small fw-normal">
                                                 <?= $s['date'] ? htmlspecialchars(date('M j', strtotime((string) $s['date']))) : '—' ?>
@@ -295,9 +301,14 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                         <div class="text-muted small fw-normal"><?= htmlspecialchars($ownRow['student_no']) ?></div>
                                     </td>
                                     <?php foreach ($sessions as $s): ?>
-                                        <?php $status = $marksBySessionId[(int) $s['id']] ?? null; ?>
-                                        <td class="p-2<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? ' col-group-end' : '' ?>">
-                                            <?php if ($status === 'present'): ?>
+                                        <?php
+                                        $status = $marksBySessionId[(int) $s['id']] ?? null;
+                                        $sIsExam = $s['type'] !== 'regular';
+                                        ?>
+                                        <td class="p-2<?= isset($xiisoChunkEndSessionIds[(int) $s['id']]) ? ' col-group-end' : '' ?><?= $sIsExam ? ' col-exam' : '' ?>">
+                                            <?php if ($sIsExam): ?>
+                                                <span class="text-muted">—</span>
+                                            <?php elseif ($status === 'present'): ?>
                                                 <span class="badge-pill badge-present">Present</span>
                                             <?php elseif ($status === 'absent'): ?>
                                                 <span class="badge-pill badge-absent">Absent</span>
@@ -309,11 +320,7 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                                     <td class="col-group-end col-summary fw-semibold"><?= $presentCount ?></td>
                                     <td class="col-group-end col-summary fw-semibold"><?= $absentCount ?></td>
                                     <td class="col-summary">
-                                        <?php if ($attendancePct !== null): ?>
-                                            <span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= number_format($attendancePct, 1) ?>%</span>
-                                        <?php else: ?>
-                                            <span class="text-muted">—</span>
-                                        <?php endif; ?>
+                                        <span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= $attendancePct ?>%</span>
                                     </td>
                                 </tr>
                             </tbody>

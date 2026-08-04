@@ -292,7 +292,7 @@ foreach ($academicYears as $ay) {
             </div>
 
             <div class="admas-card p-4 mb-3" style="border: 2px solid var(--admas-sky);">
-                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="row g-2 mb-0">
+                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="row g-2 mb-0" id="lecturerCoursesFilterForm">
                     <div class="col-sm-6 col-md-3">
                         <select class="form-select form-select-sm" name="academic_year_id">
                             <option value="0">All Academic Years</option>
@@ -320,7 +320,7 @@ foreach ($academicYears as $ay) {
                     </div>
                     <div class="col-sm-6 col-md-3">
                         <div class="input-group input-group-sm">
-                            <input type="text" class="form-control" name="search" placeholder="Search course code or name"
+                            <input type="text" class="form-control" name="search" placeholder="Search course code or name" data-live-search
                                    value="<?= htmlspecialchars($filterSearch) ?>">
                             <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                         </div>
@@ -441,6 +441,7 @@ foreach ($academicYears as $ay) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allDepartmentsFlat = <?= json_encode(array_map(static fn ($d) => ['id' => (int) $d['id'], 'name' => $d['name']], $departmentOptions), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -474,6 +475,7 @@ foreach ($academicYears as $ay) {
         window.addEventListener('DOMContentLoaded', () => {
             const facultySelect = document.getElementById('filterFacultySelect');
             updateFilterDepartmentOptions(facultySelect.value, <?= (int) $filterDepartmentId ?>);
+            admasInitLiveFilter('#lecturerCoursesFilterForm');
         });
     </script>
 </body>

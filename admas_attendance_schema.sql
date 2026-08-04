@@ -118,6 +118,7 @@ CREATE TABLE semesters (
   end_date          DATE NULL,
   is_current        TINYINT(1) NOT NULL DEFAULT 0,   -- kept in sync with status = 'current' whenever status changes
   status            ENUM('waiting', 'current', 'ended') NOT NULL DEFAULT 'waiting', -- set by hand via semesters.php's Start/End/Waiting buttons, not derived from dates
+  hidden_from_picker TINYINT(1) NOT NULL DEFAULT 0,   -- hides this semester from student/courses.php's Semester Box Picker only (a same-named duplicate across academic years) — never read by get_current_semester() or any scoping/write logic
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_semesters_academic_year
     FOREIGN KEY (academic_year_id) REFERENCES academic_years(id),
@@ -321,7 +322,7 @@ INSERT INTO settings (`key`, `value`) VALUES
   ('contact_email', 'info@admas.edu.so'),
   ('contact_phone', '+252 90 555 0142'),
   ('current_academic_year_id', '1'),
-  ('min_attendance_pct', '75'),
+  ('min_attendance_pct', '7.5'),
   ('current_semester_id', '');
 
 -- ---------------------------------------------------------------------
@@ -408,18 +409,22 @@ VALUES ('ADM-2601', 'Student', 'Test', @student_user_id,
 -- USEFUL QUERIES (for the Reports and Notifications modules)
 -- =====================================================================
 
--- Attendance % per student per course (use in Reports + Notifications):
+-- Attendance score per student per course (out of 10 — 1 point per Present
+-- *regular* Xiiso session; Midterm/Final never count; see
+-- includes/attendance_helpers.php's ATTENDANCE_MAX_SCORE):
 -- SELECT student_id, course_id,
---        ROUND(100 * SUM(status = 'present') / COUNT(*), 2) AS attendance_pct
--- FROM attendance
--- WHERE course_id = ? AND academic_year_id = ?
+--        LEAST(10, SUM(a.status = 'present')) AS attendance_pct
+-- FROM attendance a
+-- JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+-- WHERE course_id = ? AND sess.semester_id = ?
 -- GROUP BY student_id, course_id;
 
 -- Students below the current threshold (drives the Notifications module):
 -- SELECT s.id, s.full_name, a.course_id,
---        ROUND(100 * SUM(a.status = 'present') / COUNT(*), 2) AS attendance_pct
+--        LEAST(10, SUM(a.status = 'present')) AS attendance_pct
 -- FROM attendance a
 -- JOIN students s ON s.id = a.student_id
--- WHERE a.academic_year_id = (SELECT value FROM settings WHERE `key`='current_academic_year_id')
+-- JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+-- WHERE sess.semester_id = ?  -- that faculty's current semester
 -- GROUP BY s.id, a.course_id
 -- HAVING attendance_pct < (SELECT value FROM settings WHERE `key`='min_attendance_pct');

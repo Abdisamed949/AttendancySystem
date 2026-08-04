@@ -18,6 +18,15 @@ $sidebarLogoPath = get_university_logo_relative_path($settings ?? []);
         if (localStorage.getItem('admas-theme') === 'dark') {
             document.documentElement.setAttribute('data-theme', 'dark');
         }
+
+        // A live-filter reload (see assets/js/live_filter.js) leaves a
+        // pending scroll position for this exact page — hide the page
+        // until that script (loaded later, once the full page is parsed)
+        // restores it and reveals the page again, so the reload never
+        // visibly flashes at the top before jumping back down.
+        if (sessionStorage.getItem('admasFilterScroll:' + window.location.pathname) !== null) {
+            document.documentElement.style.visibility = 'hidden';
+        }
     })();
 </script>
 <aside class="sidebar">

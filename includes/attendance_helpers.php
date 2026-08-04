@@ -23,12 +23,14 @@ const GRID_STATUS_LABELS = [
 ];
 
 /**
- * Red below threshold, yellow near it (within 10 points), green at or above it —
+ * Red below threshold, yellow near it (within 1 point), green at or above it —
  * matches the Chapter Four mockup's color-coded attendance percentage badges.
+ * The 1-point buffer (not 10) matches the out-of-10 attendance scale: each
+ * point is one Present regular Xiiso session (see ATTENDANCE_MAX_SCORE).
  */
 function attendance_badge_class(float $pct, float $threshold): string
 {
-    if ($pct < $threshold - 10) {
+    if ($pct < $threshold - 1) {
         return 'badge-absent';
     }
     if ($pct < $threshold) {
@@ -37,6 +39,15 @@ function attendance_badge_class(float $pct, float $threshold): string
 
     return 'badge-present';
 }
+
+/**
+ * The attendance score is a raw capped count, not a ratio: 1 point per
+ * Present *regular* Xiiso session (Midterm/Final never count), out of a
+ * fixed 10-session semester — e.g. Present in 9 of 10 regular sessions =
+ * "9%", not 90%, and unaffected by how many sessions have been held so far.
+ * Shared by every SQL/PHP site that computes an attendance percentage.
+ */
+const ATTENDANCE_MAX_SCORE = 10;
 
 /**
  * The small "Course › Department › Faculty › Semester › Academic Year"

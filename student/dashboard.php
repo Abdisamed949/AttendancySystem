@@ -147,9 +147,13 @@ if ($ownStudentId > 0) {
 $courseAttendance = [];
 if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
     $placeholders = implode(',', array_fill(0, count($courseIds), '?'));
+    // Only *regular* sessions count toward the score (Midterm/Final are
+    // exams — see ATTENDANCE_MAX_SCORE); present_count/absent_count are
+    // each already capped at 10 by construction (only 10 regular sessions
+    // exist per semester), but LEAST() is kept for defense in depth.
     $sql = "SELECT c.id AS course_id, c.code, c.name,
-                   SUM(a.status = 'present') AS present_count,
-                   SUM(a.status = 'absent') AS absent_count,
+                   LEAST(10, SUM(a.status = 'present')) AS present_count,
+                   LEAST(10, SUM(a.status = 'absent')) AS absent_count,
                    COUNT(a.id) AS total_marks
             FROM courses c
             LEFT JOIN course_offerings co ON co.id = (
@@ -159,7 +163,7 @@ if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
                 LIMIT 1
             )
             LEFT JOIN attendance a ON a.course_id = c.id AND a.student_id = ?
-                AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ?)
+                AND a.session_id IN (SELECT id FROM sessions WHERE semester_id = ? AND type = 'regular')
             WHERE c.id IN ({$placeholders})
                 AND (co.id IS NOT NULL OR a.id IS NOT NULL)
             GROUP BY c.id, c.code, c.name
@@ -176,23 +180,39 @@ if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
 // ---------------------------------------------------------------------
 // KPI cards
 // ---------------------------------------------------------------------
-$totalMarksAll = 0;
-$totalPresentAll = 0;
+// "My Attendance %" is the average of each scored course's own out-of-10
+// score (not a pooled ratio) — matches the per-course scoring shown in the
+// table below and the same "average of capped scores" semantics used by
+// reports.php's summary reports.
+$scoredCourseCount = 0;
+$totalScore = 0;
 $coursesBelowThreshold = 0;
 foreach ($courseAttendance as $row) {
-    $totalMarksAll += (int) $row['total_marks'];
-    $totalPresentAll += (int) $row['present_count'];
-    // Only judge a course against the threshold once it has real marks —
-    // a course with zero attendance recorded yet isn't "below threshold",
-    // it's simply not marked yet.
+    // Only judge/score a course once it has real marks — a course with
+    // zero attendance recorded yet isn't "below threshold", it's simply
+    // not marked yet.
     if ((int) $row['total_marks'] > 0) {
-        $pct = 100 * (int) $row['present_count'] / (int) $row['total_marks'];
-        if ($pct < $minAttendancePct) {
+        $score = min(ATTENDANCE_MAX_SCORE, (int) $row['present_count']);
+        $totalScore += $score;
+        $scoredCourseCount++;
+        if ($score < $minAttendancePct) {
             $coursesBelowThreshold++;
         }
     }
 }
-$myAttendancePct = $totalMarksAll > 0 ? round(100 * $totalPresentAll / $totalMarksAll, 1) : null;
+$myAttendancePct = $scoredCourseCount > 0 ? round($totalScore / $scoredCourseCount, 1) : null;
+
+// Chart data for "My Attendance by Course" — only courses that actually
+// have marks yet (a course with total_marks = 0 has no score to plot).
+$courseChartLabels = [];
+$courseChartData = [];
+foreach ($courseAttendance as $row) {
+    $totalMarks = (int) $row['total_marks'];
+    if ($totalMarks > 0) {
+        $courseChartLabels[] = $row['code'];
+        $courseChartData[] = min(ATTENDANCE_MAX_SCORE, (int) $row['present_count']);
+    }
+}
 
 $enrolledCoursesCount = 0;
 if ($ownStudentId > 0) {
@@ -288,50 +308,107 @@ if ($ownStudentId > 0) {
                 </div>
             </div>
 
-            <div class="admas-card p-4">
-                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Course Attendance</h6>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Course</th>
-                                <th>Present</th>
-                                <th>Absent</th>
-                                <th>Attendance %</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($courseAttendance)): ?>
-                                <tr>
-                                    <td colspan="4" class="text-center text-muted py-4">No courses recorded for this semester yet.</td>
-                                </tr>
-                            <?php else: ?>
-                                <?php foreach ($courseAttendance as $row): ?>
-                                    <?php
-                                    $totalMarks = (int) $row['total_marks'];
-                                    $pct = $totalMarks > 0 ? round(100 * (int) $row['present_count'] / $totalMarks, 1) : null;
-                                    ?>
+            <div class="row g-3">
+                <?php if (!empty($courseChartLabels)): ?>
+                <div class="col-xl-5">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Attendance by Course</h6>
+                        <canvas id="courseAttendanceChart" height="200"></canvas>
+                    </div>
+                </div>
+                <?php endif; ?>
+                <div class="col-xl-<?= !empty($courseChartLabels) ? '7' : '12' ?>">
+                    <div class="admas-card p-4 h-100">
+                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Course Attendance</h6>
+                        <div class="table-responsive">
+                            <table class="table admas-table align-middle">
+                                <thead>
                                     <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
-                                        <td><?= (int) $row['present_count'] ?></td>
-                                        <td><?= (int) $row['absent_count'] ?></td>
-                                        <td>
-                                            <?php if ($pct === null): ?>
-                                                <span class="text-muted">No records yet</span>
-                                            <?php else: ?>
-                                                <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= number_format($pct, 1) ?>%</span>
-                                            <?php endif; ?>
-                                        </td>
+                                        <th>Course</th>
+                                        <th>Present</th>
+                                        <th>Absent</th>
+                                        <th>Attendance %</th>
                                     </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
+                                </thead>
+                                <tbody>
+                                    <?php if (empty($courseAttendance)): ?>
+                                        <tr>
+                                            <td colspan="4" class="text-center text-muted py-4">No courses recorded for this semester yet.</td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php foreach ($courseAttendance as $row): ?>
+                                            <?php
+                                            $totalMarks = (int) $row['total_marks'];
+                                            $pct = $totalMarks > 0 ? min(ATTENDANCE_MAX_SCORE, (int) $row['present_count']) : null;
+                                            ?>
+                                            <tr>
+                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($row['code'] . ' — ' . $row['name']) ?></td>
+                                                <td><?= (int) $row['present_count'] ?></td>
+                                                <td><?= (int) $row['absent_count'] ?></td>
+                                                <td>
+                                                    <?php if ($pct === null): ?>
+                                                        <span class="text-muted">No records yet</span>
+                                                    <?php else: ?>
+                                                        <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= $pct ?>%</span>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <?php if (!empty($courseChartLabels)): ?>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        const cssVar = (name, fallback) => {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            return v || fallback;
+        };
+        const chartTextMuted = cssVar('--admas-text-muted', '#64748b');
+        const chartGrid = cssVar('--admas-border', '#e2e8f0');
+        // One distinct color per course bar (cycled if there are more
+        // courses than colors), so e.g. Xisaab and Taxtion finance are never
+        // the same flat sky-blue — same categorical palette already used by
+        // the department/faculty pie charts elsewhere in this app.
+        const barPalette = ['#0ea5e9', '#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#14b8a6', '#a855f7', '#ef4444', '#84cc16', '#0891b2'];
+        const courseChartLabelsJs = <?= json_encode($courseChartLabels) ?>;
+        const barColors = courseChartLabelsJs.map((_, i) => barPalette[i % barPalette.length]);
+
+        new Chart(document.getElementById('courseAttendanceChart'), {
+            type: 'bar',
+            data: {
+                labels: courseChartLabelsJs,
+                datasets: [{
+                    label: 'Attendance %',
+                    data: <?= json_encode($courseChartData) ?>,
+                    backgroundColor: barColors,
+                    borderRadius: 6,
+                    maxBarThickness: 48,
+                }],
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: {
+                        min: 0,
+                        max: 10,
+                        ticks: { color: chartTextMuted, stepSize: 1, callback: (value) => value + '%' },
+                        grid: { color: chartGrid },
+                    },
+                },
+            },
+        });
+    </script>
+    <?php endif; ?>
 </body>
 </html>

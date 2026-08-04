@@ -377,6 +377,8 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
 // Data for rendering — Departments/Lecturers/Courses lists are all scoped
 // to the Dean's own faculty (never trusted from request input).
 // ---------------------------------------------------------------------
+$filterSearch = trim((string) ($_GET['search'] ?? ''));
+
 if ($role === 'dean') {
     $deptStmt = $conn->prepare(
         "SELECT d.id, d.code, d.name, d.faculty_id, f.name AS faculty_name
@@ -396,16 +398,24 @@ if ($role === 'dean') {
     // a course can now have more than one shift-offering per semester, so
     // a single flat LEFT JOIN here would fan out into duplicate course
     // rows once either of those is true.
-    $courseStmt = $conn->prepare(
-        "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
+    $courseSql = "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
                 d.name AS department_name, f.name AS faculty_name, d.faculty_id
          FROM courses c
          JOIN departments d ON d.id = c.department_id
          JOIN faculties f ON f.id = d.faculty_id
-         WHERE d.faculty_id = ?
-         ORDER BY d.name, c.code"
-    );
-    $courseStmt->bind_param('i', $deanFacultyId);
+         WHERE d.faculty_id = ?";
+    $courseParams = [$deanFacultyId];
+    $courseTypes = 'i';
+    if ($filterSearch !== '') {
+        $courseSql .= ' AND (c.code LIKE ? OR c.name LIKE ?)';
+        $likeParam = '%' . $filterSearch . '%';
+        $courseParams[] = $likeParam;
+        $courseParams[] = $likeParam;
+        $courseTypes .= 'ss';
+    }
+    $courseSql .= ' ORDER BY d.name, c.code';
+    $courseStmt = $conn->prepare($courseSql);
+    $courseStmt->bind_param($courseTypes, ...$courseParams);
     $courseStmt->execute();
     $courses = $courseStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $courseStmt->close();
@@ -417,14 +427,29 @@ if ($role === 'dean') {
          ORDER BY f.name, d.name"
     )->fetch_all(MYSQLI_ASSOC);
 
-    $courses = $conn->query(
-        "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
+    $courseSql = "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
                 d.name AS department_name, f.name AS faculty_name, d.faculty_id
          FROM courses c
          JOIN departments d ON d.id = c.department_id
-         JOIN faculties f ON f.id = d.faculty_id
-         ORDER BY f.name, d.name, c.code"
-    )->fetch_all(MYSQLI_ASSOC);
+         JOIN faculties f ON f.id = d.faculty_id";
+    $courseParams = [];
+    $courseTypes = '';
+    if ($filterSearch !== '') {
+        $courseSql .= ' WHERE (c.code LIKE ? OR c.name LIKE ?)';
+        $likeParam = '%' . $filterSearch . '%';
+        $courseParams = [$likeParam, $likeParam];
+        $courseTypes = 'ss';
+    }
+    $courseSql .= ' ORDER BY f.name, d.name, c.code';
+    if ($courseTypes !== '') {
+        $courseStmt = $conn->prepare($courseSql);
+        $courseStmt->bind_param($courseTypes, ...$courseParams);
+        $courseStmt->execute();
+        $courses = $courseStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        $courseStmt->close();
+    } else {
+        $courses = $conn->query($courseSql)->fetch_all(MYSQLI_ASSOC);
+    }
 }
 
 $departmentsByFaculty = [];
@@ -441,86 +466,60 @@ foreach ($departments as $dept) {
 // ---------------------------------------------------------------------
 $courseIdsForOfferings = array_map(static fn ($c) => (int) $c['id'], $courses);
 
-// Every faculty each course actually has a real course_offerings row in,
-// not just its own catalog/home faculty — a course can now be cross-listed
-// into a different faculty's own semester track (see the Multi-Faculty
-// Course Offerings plan), and this column should surface that too.
-$offeringFacultyIdsByCourseForList = [];
+// Every real course_offerings row for each course, in ANY semester
+// regardless of that semester's waiting/current/ended status. Previously
+// this column only showed offerings inside a "current" semester — but
+// "current" is one shared flag per faculty, and toggling it for an
+// unrelated reason (e.g. correcting a dashboard chart) silently hid a
+// completely different course's real, fully-set-up offering. The admin
+// explicitly asked that a course's own offering data (shift/lecturer/
+// students) decide whether it shows as Complete/Incomplete here — never
+// which semester happens to be flagged current system-wide. Semester
+// status is still shown alongside each offering as plain information, not
+// as a filter.
+$offeringsByCourse = [];
 if (!empty($courseIdsForOfferings)) {
-    $cIdPlaceholders = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
-    $offFacListStmt = $conn->prepare(
-        "SELECT DISTINCT co.course_id, se.faculty_id
+    $coursePlaceholders = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
+    $offStmt = $conn->prepare(
+        "SELECT co.course_id, co.semester_id, co.shift, ol.full_name AS lecturer_name, co.start_date, co.end_date,
+                se.name AS semester_name, se.status AS semester_status, ay.label AS academic_year_label,
+                se.faculty_id AS semester_faculty_id, f.name AS semester_faculty_name
          FROM course_offerings co
          JOIN semesters se ON se.id = co.semester_id
-         WHERE co.course_id IN ({$cIdPlaceholders})"
-    );
-    $offFacListStmt->bind_param(str_repeat('i', count($courseIdsForOfferings)), ...$courseIdsForOfferings);
-    $offFacListStmt->execute();
-    $offFacListRes = $offFacListStmt->get_result();
-    while ($row = $offFacListRes->fetch_assoc()) {
-        $offeringFacultyIdsByCourseForList[(int) $row['course_id']][] = (int) $row['faculty_id'];
-    }
-    $offFacListStmt->close();
-}
-
-$facultyIdsForOfferings = [];
-foreach ($courses as $c) {
-    $facultyIdsForOfferings[] = (int) $c['faculty_id'];
-    foreach ($offeringFacultyIdsByCourseForList[(int) $c['id']] ?? [] as $fid) {
-        $facultyIdsForOfferings[] = $fid;
-    }
-}
-$facultyIdsForOfferings = array_values(array_unique($facultyIdsForOfferings));
-
-$currentSemestersByFacultyId = [];
-if (!empty($facultyIdsForOfferings)) {
-    $placeholders = implode(',', array_fill(0, count($facultyIdsForOfferings), '?'));
-    $semStmt = $conn->prepare(
-        "SELECT f.id AS faculty_id, f.name AS faculty_name, se.id AS semester_id, se.name AS semester_name, ay.label AS academic_year_label
-         FROM faculties f
-         JOIN semesters se ON se.faculty_id = f.id AND se.is_current = 1
          JOIN academic_years ay ON ay.id = se.academic_year_id
-         WHERE f.id IN ({$placeholders})
-         ORDER BY se.name"
-    );
-    $semStmt->bind_param(str_repeat('i', count($facultyIdsForOfferings)), ...$facultyIdsForOfferings);
-    $semStmt->execute();
-    $semRes = $semStmt->get_result();
-    while ($row = $semRes->fetch_assoc()) {
-        $currentSemestersByFacultyId[(int) $row['faculty_id']][] = $row;
-    }
-    $semStmt->close();
-}
-
-$offeringsByCourseSemester = [];
-if (!empty($courseIdsForOfferings) && !empty($currentSemestersByFacultyId)) {
-    $semesterIdsForOfferings = [];
-    foreach ($currentSemestersByFacultyId as $semList) {
-        foreach ($semList as $sem) {
-            $semesterIdsForOfferings[] = (int) $sem['semester_id'];
-        }
-    }
-    $semesterIdsForOfferings = array_values(array_unique($semesterIdsForOfferings));
-
-    $coursePlaceholders = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
-    $semesterPlaceholders = implode(',', array_fill(0, count($semesterIdsForOfferings), '?'));
-    $offStmt = $conn->prepare(
-        "SELECT co.course_id, co.semester_id, co.shift, ol.full_name AS lecturer_name, co.start_date, co.end_date
-         FROM course_offerings co
+         JOIN faculties f ON f.id = se.faculty_id
          LEFT JOIN lecturers ol ON ol.id = co.lecturer_id
-         WHERE co.course_id IN ({$coursePlaceholders}) AND co.semester_id IN ({$semesterPlaceholders})
-         ORDER BY co.shift"
+         WHERE co.course_id IN ({$coursePlaceholders})
+         ORDER BY se.id DESC, co.shift"
     );
-    $offStmt->bind_param(
-        str_repeat('i', count($courseIdsForOfferings)) . str_repeat('i', count($semesterIdsForOfferings)),
-        ...array_merge($courseIdsForOfferings, $semesterIdsForOfferings)
-    );
+    $offStmt->bind_param(str_repeat('i', count($courseIdsForOfferings)), ...$courseIdsForOfferings);
     $offStmt->execute();
     $offRes = $offStmt->get_result();
     while ($row = $offRes->fetch_assoc()) {
-        $offeringsByCourseSemester[(int) $row['course_id']][(int) $row['semester_id']][] = $row;
+        $offeringsByCourse[(int) $row['course_id']][(int) $row['semester_id']][] = $row;
     }
     $offStmt->close();
+}
+
+// Enrolled-student count per course (from course_enrollments — the same
+// real, explicit roster "Enroll Students" manages), used below to mark an
+// offering "Complete" only once it has both a lecturer AND at least one
+// enrolled student. Not split by shift/semester — course_enrollments has no
+// shift column, so this is a per-course total, matching what
+// admin/course_enrollments.php itself manages.
+$enrolledCountByCourseId = [];
+if (!empty($courseIdsForOfferings)) {
+    $coursePlaceholders2 = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
+    $enrollCountStmt = $conn->prepare(
+        "SELECT course_id, COUNT(*) AS cnt FROM course_enrollments WHERE course_id IN ({$coursePlaceholders2}) GROUP BY course_id"
+    );
+    $enrollCountStmt->bind_param(str_repeat('i', count($courseIdsForOfferings)), ...$courseIdsForOfferings);
+    $enrollCountStmt->execute();
+    $enrollCountRes = $enrollCountStmt->get_result();
+    while ($row = $enrollCountRes->fetch_assoc()) {
+        $enrolledCountByCourseId[(int) $row['course_id']] = (int) $row['cnt'];
+    }
+    $enrollCountStmt->close();
 }
 
 $facultyIdByDepartmentId = [];
@@ -539,7 +538,7 @@ foreach ($departments as $dept) {
 // than being decorative).
 if ($role === 'dean') {
     $offeringSemStmt = $conn->prepare(
-        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.id AS academic_year_id, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, s.status, ay.id AS academic_year_id, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          WHERE s.faculty_id = ?
@@ -551,7 +550,7 @@ if ($role === 'dean') {
     $offeringSemStmt->close();
 } else {
     $offeringSemesters = $conn->query(
-        'SELECT s.id, s.name, s.faculty_id, s.is_current, ay.id AS academic_year_id, ay.label AS academic_year_label
+        'SELECT s.id, s.name, s.faculty_id, s.is_current, s.status, ay.id AS academic_year_id, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          WHERE s.faculty_id IS NOT NULL
@@ -571,6 +570,7 @@ foreach ($offeringSemesters as $sem) {
         'id' => (int) $sem['id'],
         'name' => $sem['name'],
         'is_current' => (int) $sem['is_current'] === 1,
+        'status' => $sem['status'],
     ];
     $offeringSemesterAcademicYearById[(int) $sem['id']] = (int) $sem['academic_year_id'];
 }
@@ -670,9 +670,20 @@ foreach ($offeringLecturers as $lec) {
                             </div>
                         </div>
 
-                        <form id="bulkDeleteCoursesForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="d-none">
+        <form id="bulkDeleteCoursesForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="d-none">
                             <input type="hidden" name="action" value="bulk_delete">
                             <div id="bulkDeleteCoursesIds"></div>
+                        </form>
+
+                        <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" id="coursesFilterForm" class="mb-3">
+                            <div class="input-group input-group-sm" style="max-width: 340px;">
+                                <span class="input-group-text bg-transparent"><i class="bi bi-search"></i></span>
+                                <input type="text" class="form-control" name="search" placeholder="Search by course code or name" data-live-search
+                                       value="<?= htmlspecialchars($filterSearch) ?>">
+                                <?php if ($filterSearch !== ''): ?>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-outline-secondary" title="Clear search"><i class="bi bi-x-lg"></i></a>
+                                <?php endif; ?>
+                            </div>
                         </form>
 
                         <div class="table-responsive">
@@ -692,7 +703,7 @@ foreach ($offeringLecturers as $lec) {
                                 <tbody>
                                     <?php if (empty($courses)): ?>
                                         <tr>
-                                            <td colspan="8" class="text-center text-muted py-4">No courses have been created yet.</td>
+                                            <td colspan="8" class="text-center text-muted py-4"><?= $filterSearch !== '' ? 'No courses match "' . htmlspecialchars($filterSearch) . '".' : 'No courses have been created yet.' ?></td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($courses as $c): ?>
@@ -707,72 +718,79 @@ foreach ($offeringLecturers as $lec) {
                                                 <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                                 <td>
                                                     <?php
-                                                    // Every faculty this course is actually offered in (home + any
-                                                    // cross-listed/guest faculties, see the Multi-Faculty Course
-                                                    // Offerings plan), not just its own catalog faculty.
-                                                    $courseRelevantFacultyIds = array_values(array_unique(array_merge(
-                                                        [(int) $c['faculty_id']],
-                                                        $offeringFacultyIdsByCourseForList[(int) $c['id']] ?? []
-                                                    )));
-                                                    $courseCurrentSemesters = [];
-                                                    foreach ($courseRelevantFacultyIds as $relFacId) {
-                                                        foreach ($currentSemestersByFacultyId[$relFacId] ?? [] as $sem) {
-                                                            $sem['__faculty_id'] = $relFacId;
-                                                            $courseCurrentSemesters[] = $sem;
-                                                        }
-                                                    }
+                                                    // Every real offering this course has, in ANY semester (any status —
+                                                    // Waiting/Current/Ended never filters what's shown here, only
+                                                    // informs it — see the note on $offeringsByCourse above).
+                                                    $courseOfferingsBySem = $offeringsByCourse[(int) $c['id']] ?? [];
+                                                    $semStatusBadgeClass = ['current' => 'badge-active', 'waiting' => 'badge-neutral', 'ended' => 'badge-inactive'];
                                                     ?>
-                                                    <?php if (empty($courseCurrentSemesters)): ?>
-                                                        <span class="text-muted fst-italic">No current semester</span>
+                                                    <?php if (empty($courseOfferingsBySem)): ?>
+                                                        <span class="text-muted fst-italic">No offering yet</span>
                                                     <?php else: ?>
-                                                        <?php foreach ($courseCurrentSemesters as $sem): ?>
+                                                        <?php foreach ($courseOfferingsBySem as $semOfferings): ?>
                                                             <?php
-                                                            $semOfferings = $offeringsByCourseSemester[(int) $c['id']][(int) $sem['semester_id']] ?? [];
-                                                            $isGuestFacultySem = (int) $sem['__faculty_id'] !== (int) $c['faculty_id'];
+                                                            $semMeta = $semOfferings[0];
+                                                            $isGuestFacultySem = (int) $semMeta['semester_faculty_id'] !== (int) $c['faculty_id'];
                                                             ?>
                                                             <div class="mb-1">
                                                                 <?php if ($isGuestFacultySem): ?>
-                                                                    <span class="badge-pill badge-warning">Guest: <?= htmlspecialchars($sem['faculty_name']) ?></span>
+                                                                    <span class="badge-pill badge-warning">Guest: <?= htmlspecialchars($semMeta['semester_faculty_name']) ?></span>
                                                                 <?php endif; ?>
-                                                                <?php if (empty($semOfferings)): ?>
-                                                                    <span class="text-muted fst-italic">No offering yet</span>
-                                                                <?php else: ?>
-                                                                    <?php foreach ($semOfferings as $off): ?>
-                                                                        <div>
-                                                                            <?php if ($off['shift'] !== 'any'): ?>
-                                                                                <span class="text-muted"><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$off['shift']] ?? $off['shift']) ?>:</span>
-                                                                            <?php endif; ?>
-                                                                            <?= $off['lecturer_name'] ? htmlspecialchars($off['lecturer_name']) : '<span class="text-muted fst-italic">Unassigned</span>' ?>
-                                                                            <?php if ($off['start_date'] || $off['end_date']): ?>
-                                                                                <span class="text-muted small">(<?= htmlspecialchars(($off['start_date'] ?? '?') . ' to ' . ($off['end_date'] ?? '?')) ?>)</span>
+                                                                <?php foreach ($semOfferings as $off): ?>
+                                                                    <?php
+                                                                    $offEnrolledCount = $enrolledCountByCourseId[(int) $c['id']] ?? 0;
+                                                                    $offHasLecturer = $off['lecturer_name'] !== null;
+                                                                    $offIsComplete = $offHasLecturer && $offEnrolledCount > 0;
+                                                                    ?>
+                                                                    <div class="mb-1">
+                                                                        <?php if ($off['shift'] !== 'any'): ?>
+                                                                            <span class="text-muted"><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$off['shift']] ?? $off['shift']) ?>:</span>
+                                                                        <?php endif; ?>
+                                                                        <?= $offHasLecturer ? htmlspecialchars($off['lecturer_name']) : '<span class="text-muted fst-italic">Unassigned</span>' ?>
+                                                                        <?php if ($off['start_date'] || $off['end_date']): ?>
+                                                                            <span class="text-muted small">(<?= htmlspecialchars(($off['start_date'] ?? '?') . ' to ' . ($off['end_date'] ?? '?')) ?>)</span>
+                                                                        <?php endif; ?>
+                                                                        <div class="small mt-1">
+                                                                            <span class="text-muted"><i class="bi bi-people-fill"></i> <?= number_format($offEnrolledCount) ?> enrolled</span>
+                                                                            <?php if ($offIsComplete): ?>
+                                                                                <span class="badge-pill badge-active ms-1"><i class="bi bi-check-circle-fill"></i> Complete</span>
+                                                                            <?php else: ?>
+                                                                                <span class="badge-pill badge-warning ms-1" title="Missing: <?= htmlspecialchars(trim(($offHasLecturer ? '' : 'lecturer ') . ($offEnrolledCount > 0 ? '' : 'enrolled students'))) ?>">
+                                                                                    <i class="bi bi-exclamation-triangle-fill"></i> Incomplete
+                                                                                </span>
                                                                             <?php endif; ?>
                                                                         </div>
-                                                                    <?php endforeach; ?>
-                                                                <?php endif; ?>
-                                                                <div class="text-muted small"><?= htmlspecialchars($sem['semester_name'] . ' (' . $sem['academic_year_label'] . ')') ?></div>
+                                                                    </div>
+                                                                <?php endforeach; ?>
+                                                                <div class="text-muted small">
+                                                                    <?= htmlspecialchars($semMeta['semester_name'] . ' (' . $semMeta['academic_year_label'] . ')') ?>
+                                                                    <span class="badge-pill <?= $semStatusBadgeClass[$semMeta['semester_status']] ?? 'badge-neutral' ?>"><?= htmlspecialchars(ucfirst($semMeta['semester_status'])) ?></span>
+                                                                </div>
                                                             </div>
                                                         <?php endforeach; ?>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= (int) $c['credit_hours'] ?></td>
                                                 <td>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon text-sky" title="Manage Offerings">
-                                                        <i class="bi bi-calendar2-week"></i>
-                                                    </a>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon text-sky" title="Enroll Students">
-                                                        <i class="bi bi-person-check"></i>
-                                                    </a>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php?edit=<?= (int) $c['id'] ?>" class="btn-icon" title="Edit">
-                                                        <i class="bi bi-pencil"></i>
-                                                    </a>
-                                                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" style="display:inline;"
-                                                          onsubmit="return confirm('Delete this course? This cannot be undone.');">
-                                                        <input type="hidden" name="action" value="delete">
-                                                        <input type="hidden" name="course_id" value="<?= (int) $c['id'] ?>">
-                                                        <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                            <i class="bi bi-trash"></i>
-                                                        </button>
-                                                    </form>
+                                                    <div class="d-flex flex-column align-items-start gap-1">
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="Manage Offerings">
+                                                            <i class="bi bi-calendar2-week"></i> Offerings
+                                                        </a>
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="Enroll Students">
+                                                            <i class="bi bi-person-check"></i> Enroll
+                                                        </a>
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php?edit=<?= (int) $c['id'] ?>" class="btn-icon-label" title="Edit">
+                                                            <i class="bi bi-pencil"></i> Edit
+                                                        </a>
+                                                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" style="display:inline;"
+                                                              onsubmit="return confirm('Delete this course? This cannot be undone.');">
+                                                            <input type="hidden" name="action" value="delete">
+                                                            <input type="hidden" name="course_id" value="<?= (int) $c['id'] ?>">
+                                                            <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                                <i class="bi bi-trash"></i> Delete
+                                                            </button>
+                                                        </form>
+                                                    </div>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -894,6 +912,8 @@ foreach ($offeringLecturers as $lec) {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
             admasInitBulkDelete({
@@ -906,6 +926,7 @@ foreach ($offeringLecturers as $lec) {
                 entityLabel: 'course',
                 entityLabelPlural: 'courses',
             });
+            admasInitLiveFilter('#coursesFilterForm');
         });
 
         // Add Course form's optional "first offering" section (create mode
@@ -950,7 +971,7 @@ foreach ($offeringLecturers as $lec) {
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name + (sem.is_current ? ' — Current' : '');
+                opt.textContent = admasSemesterLabel(sem);
                 semesterSelect.appendChild(opt);
             });
 

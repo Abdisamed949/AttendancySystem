@@ -560,18 +560,31 @@ foreach ($departments as $dept) {
 // pattern as Department — a student's semester is a position within
 // their own faculty's semester track, never a university-wide 1-5 scale.
 if ($role === 'dean') {
-    $semStmt = $conn->prepare('SELECT id, name, faculty_id FROM semesters WHERE faculty_id = ? ORDER BY start_date DESC');
+    $semStmt = $conn->prepare(
+        'SELECT se.id, se.name, se.faculty_id, se.status, ay.label AS academic_year_label
+         FROM semesters se JOIN academic_years ay ON ay.id = se.academic_year_id
+         WHERE se.faculty_id = ? ORDER BY se.start_date DESC'
+    );
     $semStmt->bind_param('i', $deanFacultyId);
     $semStmt->execute();
     $semesters = $semStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $semStmt->close();
 } else {
-    $semesters = $conn->query('SELECT id, name, faculty_id FROM semesters ORDER BY start_date DESC')->fetch_all(MYSQLI_ASSOC);
+    $semesters = $conn->query(
+        'SELECT se.id, se.name, se.faculty_id, se.status, ay.label AS academic_year_label
+         FROM semesters se JOIN academic_years ay ON ay.id = se.academic_year_id
+         ORDER BY se.start_date DESC'
+    )->fetch_all(MYSQLI_ASSOC);
 }
 
 $semestersByFacultyId = [];
 foreach ($semesters as $sem) {
-    $semestersByFacultyId[(int) $sem['faculty_id']][] = ['id' => (int) $sem['id'], 'name' => $sem['name']];
+    $semestersByFacultyId[(int) $sem['faculty_id']][] = [
+        'id' => (int) $sem['id'],
+        'name' => $sem['name'],
+        'academic_year_label' => $sem['academic_year_label'],
+        'status' => $sem['status'],
+    ];
 }
 
 $conditions = [];
@@ -709,7 +722,7 @@ $studentsStmt->close();
                         </form>
 
                         <!-- Filter bar: real SQL WHERE filters via GET -->
-                        <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="row g-2 mb-3">
+                        <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="row g-2 mb-3" id="studentsFilterForm">
                             <div class="col-sm-6 col-md-2">
                                 <select class="form-select form-select-sm" name="academic_year_id">
                                     <option value="0">All Academic Years</option>
@@ -758,7 +771,7 @@ $studentsStmt->close();
                             </div>
                             <div class="col-sm-6 col-md-2">
                                 <div class="input-group input-group-sm">
-                                    <input type="text" class="form-control" name="search" placeholder="Search name or student no"
+                                    <input type="text" class="form-control" name="search" placeholder="Search name or student no" data-live-search
                                            value="<?= htmlspecialchars($filterSearch) ?>">
                                     <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-search"></i></button>
                                 </div>
@@ -972,6 +985,8 @@ $studentsStmt->close();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allDepartmentsFlat = <?= json_encode(array_map(static fn ($d) => ['id' => (int) $d['id'], 'name' => $d['name']], $departments), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -1010,7 +1025,7 @@ $studentsStmt->close();
         }
 
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-        const allSemestersFlat = <?= json_encode(array_map(static fn ($s) => ['id' => (int) $s['id'], 'name' => $s['name']], $semesters), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const allSemestersFlat = <?= json_encode(array_map(static fn ($s) => ['id' => (int) $s['id'], 'name' => $s['name'], 'academic_year_label' => $s['academic_year_label'], 'status' => $s['status']], $semesters), JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
         function updateFilterSemesterOptions(facultyId, selectedSemesterId) {
             const select = document.getElementById('filterSemesterSelect');
@@ -1028,7 +1043,7 @@ $studentsStmt->close();
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name;
+                opt.textContent = admasSemesterLabel(sem);
                 select.appendChild(opt);
             });
 
@@ -1051,7 +1066,7 @@ $studentsStmt->close();
             semesters.forEach((sem) => {
                 const opt = document.createElement('option');
                 opt.value = String(sem.id);
-                opt.textContent = sem.name;
+                opt.textContent = admasSemesterLabel(sem);
                 select.appendChild(opt);
             });
 
@@ -1069,6 +1084,8 @@ $studentsStmt->close();
             const formFacultyId = document.getElementById('studentFacultySelect').value;
             updateFormDepartmentOptions(formFacultyId, <?= (int) $formValues['department_id'] ?>);
             updateFormSemesterOptions(formFacultyId, <?= (int) $formValues['semester_id'] ?>);
+
+            admasInitLiveFilter('#studentsFilterForm');
 
             admasInitBulkDelete({
                 checkboxSelector: '.row-check-student',
