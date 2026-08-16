@@ -550,26 +550,6 @@ if (!empty($courseIdsForOfferings)) {
     $offStmt->close();
 }
 
-// Enrolled-student count per course (from course_enrollments — the same
-// real, explicit roster "Enroll Students" manages), used below to mark an
-// offering "Complete" only once it has both a lecturer AND at least one
-// enrolled student. Not split by shift/semester — course_enrollments has no
-// shift column, so this is a per-course total, matching what
-// admin/course_enrollments.php itself manages.
-$enrolledCountByCourseId = [];
-if (!empty($courseIdsForOfferings)) {
-    $coursePlaceholders2 = implode(',', array_fill(0, count($courseIdsForOfferings), '?'));
-    $enrollCountStmt = $conn->prepare(
-        "SELECT course_id, COUNT(*) AS cnt FROM course_enrollments WHERE course_id IN ({$coursePlaceholders2}) GROUP BY course_id"
-    );
-    $enrollCountStmt->bind_param(str_repeat('i', count($courseIdsForOfferings)), ...$courseIdsForOfferings);
-    $enrollCountStmt->execute();
-    $enrollCountRes = $enrollCountStmt->get_result();
-    while ($row = $enrollCountRes->fetch_assoc()) {
-        $enrolledCountByCourseId[(int) $row['course_id']] = (int) $row['cnt'];
-    }
-    $enrollCountStmt->close();
-}
 
 $facultyIdByDepartmentId = [];
 foreach ($departments as $dept) {
@@ -816,7 +796,26 @@ foreach ($offeringLecturers as $lec) {
                                                                 <?php endif; ?>
                                                                 <?php foreach ($semOfferings as $off): ?>
                                                                     <?php
-                                                                    $offEnrolledCount = $enrolledCountByCourseId[(int) $c['id']] ?? 0;
+                                                                    // Real roster size for THIS specific offering —
+                                                                    // explicit course_enrollments first, falling back
+                                                                    // to the offering's own department (its
+                                                                    // roster_department_id, or the course's own
+                                                                    // department when that's unset), same resolution
+                                                                    // attendance.php/lecturer/courses.php already use
+                                                                    // to decide who actually shows up on the roster.
+                                                                    // Previously this only counted explicit
+                                                                    // course_enrollments rows, so a course/offering
+                                                                    // with a real, working department-fallback
+                                                                    // roster (and real attendance already being
+                                                                    // marked against it) still showed "0 enrolled /
+                                                                    // Incomplete" here — misleading, since the
+                                                                    // roster was never actually empty.
+                                                                    $offEnrolledCount = get_course_roster_count(
+                                                                        $conn,
+                                                                        (int) $c['id'],
+                                                                        (int) $off['semester_id'],
+                                                                        $off['shift'] !== 'any' ? $off['shift'] : null
+                                                                    );
                                                                     $offHasLecturer = $off['lecturer_name'] !== null;
                                                                     $offIsComplete = $offHasLecturer && $offEnrolledCount > 0;
                                                                     ?>

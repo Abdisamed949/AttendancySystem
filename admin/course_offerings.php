@@ -354,18 +354,6 @@ $offeringsStmt->execute();
 $offerings = $offeringsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $offeringsStmt->close();
 
-// Enrolled-student count for this course (course_enrollments — the same
-// real, explicit roster "Enroll Students" manages). Not split by
-// shift/semester, since course_enrollments has no shift column — every
-// offering row below shares this one course-wide number. Used to mark a
-// row "Complete" only once it has both a lecturer AND at least one
-// enrolled student (same definition as admin/courses.php's own
-// Current-Offering completeness badge).
-$enrolledCountStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_enrollments WHERE course_id = ?');
-$enrolledCountStmt->bind_param('i', $courseId);
-$enrolledCountStmt->execute();
-$enrolledCount = (int) ($enrolledCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
-$enrolledCountStmt->close();
 
 // (semester_id, shift) pairs already offered — used both by the "already
 // offered" JS annotation below and, indirectly, by uniqueness itself.
@@ -477,18 +465,36 @@ foreach ($offerings as $o) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
-                                                    <?php $offeringIsComplete = $o['lecturer_name'] !== null && $enrolledCount > 0; ?>
+                                                    <?php
+                                                    // Real roster size for THIS specific offering — same
+                                                    // get_course_roster_count() resolution (explicit
+                                                    // course_enrollments first, else the offering's own
+                                                    // roster_department_id/course's own department) as
+                                                    // admin/courses.php's own "Current Offering" column uses,
+                                                    // so the two pages can never disagree on the same course
+                                                    // again (previously this page only ever counted explicit
+                                                    // course_enrollments, one flat number shared by every row,
+                                                    // regardless of that row's own semester/shift/roster
+                                                    // department).
+                                                    $offEnrolledCount = get_course_roster_count(
+                                                        $conn,
+                                                        $courseId,
+                                                        (int) $o['semester_id'],
+                                                        $o['shift'] !== 'any' ? $o['shift'] : null
+                                                    );
+                                                    $offeringIsComplete = $o['lecturer_name'] !== null && $offEnrolledCount > 0;
+                                                    ?>
                                                     <div class="fw-semibold" style="color: var(--admas-text);">
-                                                        <i class="bi bi-people-fill text-muted"></i> <?= number_format($enrolledCount) ?>
+                                                        <i class="bi bi-people-fill text-muted"></i> <?= number_format($offEnrolledCount) ?>
                                                     </div>
                                                     <?php if ($offeringIsComplete): ?>
                                                         <span class="badge-pill badge-active"><i class="bi bi-check-circle-fill"></i> Complete</span>
                                                     <?php else: ?>
-                                                        <span class="badge-pill badge-warning" title="Missing: <?= htmlspecialchars(trim(($o['lecturer_name'] !== null ? '' : 'lecturer ') . ($enrolledCount > 0 ? '' : 'enrolled students'))) ?>">
+                                                        <span class="badge-pill badge-warning" title="Missing: <?= htmlspecialchars(trim(($o['lecturer_name'] !== null ? '' : 'lecturer ') . ($offEnrolledCount > 0 ? '' : 'enrolled students'))) ?>">
                                                             <i class="bi bi-exclamation-triangle-fill"></i> Incomplete
                                                         </span>
                                                     <?php endif; ?>
-                                                    <?php if ($enrolledCount === 0): ?>
+                                                    <?php if ($offEnrolledCount === 0): ?>
                                                         <div><a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" class="small">Enroll students &rarr;</a></div>
                                                     <?php endif; ?>
                                                 </td>

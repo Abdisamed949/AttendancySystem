@@ -7,11 +7,13 @@
  * an aggregate %. Linked from student/courses.php's "View Grid" action.
  *
  * Scoped the same way as student/courses.php: course_id must be one of
- * this student's own courses (course_enrollments, or department fallback)
- * and semester_id must be one this student actually has attendance history
- * in (or their own current semester) — never trusted from the querystring
- * alone, so a tampered URL can't reveal another course/semester's session
- * structure. Only ever this student's own row is queried — no roster.
+ * this student's own courses (course_enrollments, additive department
+ * fallback, or a guest-offering roster_department_id cross-listing — see
+ * the matching comment in student/courses.php) and semester_id must be one
+ * this student actually has attendance history in (or their own current
+ * semester) — never trusted from the querystring alone, so a tampered URL
+ * can't reveal another course/semester's session structure. Only ever this
+ * student's own row is queried — no roster.
  */
 declare(strict_types=1);
 
@@ -26,7 +28,7 @@ require_role(['student']);
 $conn = db();
 $currentUser = current_user();
 
-$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id, student_no, full_name FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id, academic_year_id, student_no, full_name FROM students WHERE user_id = ?');
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
@@ -49,7 +51,12 @@ if ($ownStudentId > 0) {
     }
     $enrollStmt->close();
 
-    if (empty($courseIds) && $ownDepartmentId > 0) {
+    // Additive, not gated on course_enrollments being empty — a student
+    // with even one explicit enrollment row was silently losing every
+    // other course their own department offers for free (the same real
+    // incident already fixed on student/courses.php/student/dashboard.php;
+    // this page had drifted out of sync with that fix).
+    if ($ownDepartmentId > 0) {
         $deptCourseStmt = $conn->prepare('SELECT id FROM courses WHERE department_id = ?');
         $deptCourseStmt->bind_param('i', $ownDepartmentId);
         $deptCourseStmt->execute();
@@ -58,6 +65,27 @@ if ($ownStudentId > 0) {
             $courseIds[] = (int) $row['id'];
         }
         $deptCourseStmt->close();
+        $courseIds = array_values(array_unique($courseIds));
+    }
+
+    // Additive third source: a cross-listed/guest-faculty offering whose
+    // roster_department_id explicitly names this student's own department
+    // (see the Multi-Faculty Course Offerings work) — the course's own
+    // catalog home may be a completely different department/faculty, so
+    // neither source above would ever surface it. This page was missing
+    // this source entirely, which is why "View Grid" failed for a
+    // guest-offering course even though student/courses.php's own score
+    // (which already had this source) displayed correctly.
+    if ($ownDepartmentId > 0) {
+        $guestCourseStmt = $conn->prepare('SELECT DISTINCT course_id FROM course_offerings WHERE roster_department_id = ?');
+        $guestCourseStmt->bind_param('i', $ownDepartmentId);
+        $guestCourseStmt->execute();
+        $guestCourseRes = $guestCourseStmt->get_result();
+        while ($row = $guestCourseRes->fetch_assoc()) {
+            $courseIds[] = (int) $row['course_id'];
+        }
+        $guestCourseStmt->close();
+        $courseIds = array_values(array_unique($courseIds));
     }
 }
 
@@ -80,7 +108,28 @@ if ($ownStudentId > 0) {
     }
     $stmt->close();
 }
-$ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
+// Resolved from THIS student's own academic-year cohort's current
+// semester first, not just "whichever current semester has the highest
+// id" for the whole faculty — see the matching fix/comment in
+// student/dashboard.php. Without this, a student with no attendance
+// history yet in a course (e.g. their very first click into a brand-new
+// course's Grid) could have the wrong semester silently offered here.
+$ownCurrentSemester = null;
+if ($ownRow) {
+    $ownFacultyIdForSemester = (int) $ownRow['faculty_id'];
+    $ownAcademicYearIdForSemester = (int) $ownRow['academic_year_id'];
+    $curSemStmt = $conn->prepare(
+        "SELECT id, name FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND status = 'current' ORDER BY id DESC LIMIT 1"
+    );
+    $curSemStmt->bind_param('ii', $ownFacultyIdForSemester, $ownAcademicYearIdForSemester);
+    $curSemStmt->execute();
+    $ownCurrentSemester = $curSemStmt->get_result()->fetch_assoc();
+    $curSemStmt->close();
+
+    if (!$ownCurrentSemester) {
+        $ownCurrentSemester = get_current_semester($conn, $ownFacultyIdForSemester);
+    }
+}
 if ($ownCurrentSemester !== null) {
     $semesterOptionIds[] = (int) $ownCurrentSemester['id'];
 }
@@ -116,11 +165,21 @@ if ($isValid) {
     $semesterRow = $semStmt->get_result()->fetch_assoc();
     $semStmt->close();
 
-    // A semester belongs to exactly one faculty — a course from a
-    // different faculty can never be validly paired with it, even if both
-    // ids individually belong to this student (e.g. via two different
-    // course_enrollments across faculties).
-    if ($courseRow && $semesterRow && (int) $courseRow['faculty_id'] !== (int) $semesterRow['faculty_id']) {
+    // A semester belongs to exactly one faculty — normally a course from a
+    // different faculty can never be validly paired with it, EXCEPT when
+    // the course is legitimately cross-listed into this semester via a
+    // guest `course_offerings` row (see the Multi-Faculty Course Offerings
+    // work) — its own catalog department's faculty stays whatever it was
+    // originally, only the offering itself lives under this semester's
+    // faculty. Without this exception, a real cross-listed course (e.g.
+    // Taxation, cataloged under Business but offered into Informatics via
+    // roster_department_id) would always fail this check even though the
+    // student legitimately takes it and student/courses.php's own score
+    // for it displays correctly.
+    if ($courseRow && $semesterRow
+        && (int) $courseRow['faculty_id'] !== (int) $semesterRow['faculty_id']
+        && !course_offering_exists($conn, $courseId, $semesterId)
+    ) {
         $courseRow = null;
     }
 

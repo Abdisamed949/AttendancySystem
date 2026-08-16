@@ -5849,3 +5849,206 @@ data/configuration task for the university admin, not further code work.
       correctly above a real 25-student roster with zero PHP
       warnings/notices/fatals.
 
+### admin/courses.php: "Current Offering" Enrolled Count Now Reflects the Real Roster, Not Just Explicit Enrollment
+- [x] Found via a live screenshot the user shared while exploring a demo
+      setup built earlier this session: a real course ("Inclusive", code
+      `IC`, Information Technology/Informatics) showed **"0 enrolled /
+      Incomplete"** on `admin/courses.php` despite having a real lecturer
+      assigned and a genuinely working roster — students could already see
+      it on their own dashboard and a lecturer could already mark real
+      attendance against it. Root cause: the "X enrolled" count and the
+      Complete/Incomplete badge were computed **only** from explicit
+      `course_enrollments` rows (`$enrolledCountByCourseId`, a course-wide
+      `COUNT(*) FROM course_enrollments`) — completely blind to the
+      department-fallback roster resolution (`course_enrollments` first,
+      else every active student in the offering's own department/
+      `roster_department_id`) that every other real roster-facing page in
+      this app already uses (`attendance.php`'s Grid View,
+      `lecturer/courses.php`, `admin/lecturer_view.php`,
+      `student/courses.php`). A course could be fully real and actively
+      in use — real students, real marked attendance — and still show as
+      "Incomplete" here for no reason other than nobody had separately run
+      the "Enroll Students" action, which this app has never required for
+      a course to actually function.
+      - Per the user's explicit request ("waa in automatic dropka lagu
+        diwaan geliyay ardayda ku jirta tiradooda ay qaadata" — it should
+        automatically take the count of whoever is really in it), replaced
+        the course-wide `$enrolledCountByCourseId` lookup with a direct,
+        per-offering call to the existing shared
+        `get_course_roster_count($conn, $courseId, $semesterId, $shift)`
+        helper (`includes/attendance_helpers.php`, already the single
+        source of truth this exact resolution logic elsewhere in the app
+        reuses) — one call per rendered offering row, using that specific
+        offering's own `semester_id` and `shift` (`'any'` normalized to
+        `null`), so a course with three offerings across three
+        semesters/shifts now shows each one's own real, independently
+        correct roster size rather than one shared course-wide number.
+      - Deleted the now-fully-dead `$enrolledCountByCourseId` query block
+        (its only reader was removed) rather than leaving it unused.
+      - **Verified end-to-end against real, live production data — not a
+        disposable fixture, since the bug report itself was about a real
+        course**: confirmed directly in the database that course `IC`
+        genuinely has zero `course_enrollments` rows; logged in as a
+        temporary Head of Academic Affairs account and confirmed
+        `admin/courses.php` now renders `IC`'s offering as **"25 enrolled"
+        / Complete** — the real Information Technology department
+        headcount — with zero PHP warnings/notices/fatals. Also
+        re-confirmed against the disposable multi-faculty demo course
+        built earlier this same session (see "University Rector UI
+        Polish"-adjacent demo work above) that enrolling students still
+        correctly raises the count further where real explicit enrollment
+        exists (`course_enrollments` is still checked *first* inside
+        `get_course_roster_count()` — this change only widens what counts
+        as "real," it doesn't stop counting explicit enrollment). No
+        schema change. Temporary verification account deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+      - **Follow-up, found by the user comparing the two pages side by
+        side**: `admin/course_offerings.php` ("Manage Offerings") had the
+        exact same course-wide, `course_enrollments`-only bug — a single
+        flat `$enrolledCount` shared by every offering row on the page,
+        completely blind to the department-fallback roster. This is what
+        caused the two pages to visibly disagree on the same real course
+        ("AC — Accounting": `admin/courses.php` correctly showed "15
+        enrolled / Complete" per the fix above, while "Manage Offerings"
+        for the identical course still showed "0 / Incomplete" on both its
+        rows). Applied the identical fix here: deleted the course-wide
+        `$enrolledCount` query, replaced the per-row completeness check
+        with a direct `get_course_roster_count($conn, $courseId, (int)
+        $o['semester_id'], $o['shift'] !== 'any' ? $o['shift'] : null)`
+        call per offering row — the same helper, same call shape, as
+        `admin/courses.php` now uses, so the two pages can no longer
+        drift apart on the same course. Verified live against the real
+        "AC — Accounting" course (id 22, both its Health-guest and
+        Business-Administration-home offerings) with a temporary Head of
+        Academic Affairs account: both rows now show "15 enrolled /
+        Complete", matching `admin/courses.php` exactly, zero PHP
+        warnings/notices/fatals. Temporary account deleted afterward.
+
+### admin/students.php: "Export Students" for Head of Academic Affairs (Select All / Individually)
+- [x] Head of Academic Affairs is read-only on Student Management (per
+      CLAUDE.md §4's "View Students information") — no Add/Edit/Delete/
+      Import UI. Added a sky-blue "Export Students" button for this role
+      specifically, with select-all/individual checkboxes (the same
+      `.row-check-student`/`#selectAllStudents` markup every write-capable
+      role already gets for bulk delete, now also shown for this
+      read-only role — export isn't destructive, so it's safe to expose
+      here even though CRUD stays hidden) — exporting either everyone
+      currently listed (nothing checked) or just the checked subset.
+      - New `assets/js/bulk_export.js` — `admasInitBulkExport()`, a
+        sibling to `bulk_delete.js`'s `admasInitBulkDelete()` but with no
+        confirm dialog (export isn't destructive) and a button label that
+        toggles between "Export All Students" and "Export Selected (N)"
+        instead of hiding at zero selected.
+      - `admin/export.php` (previously University-Rector-only, whole-list
+        Excel/PDF for Students/Lecturers/Semesters): widened
+        `require_role()` to include `head_academic`, but only for
+        `type=students` — a direct request for `type=lecturers` or
+        `type=semesters` from this role is rejected (403), matching that
+        this role's own Export button only exists on the Students page.
+        Accepts an optional POST `ids[]` (validated as plain positive
+        integers) that narrows the query to `WHERE s.id IN (...)` when
+        present; a plain GET with no `ids[]` (University Rector's existing
+        links, or this role's own button with nothing checked) still
+        exports every student, unfiltered, exactly as before. The
+        title/meta line on both the Excel sheet and the PDF header now
+        reads "N selected students" instead of "University-wide export"
+        whenever a subset was requested, so the file itself is unambiguous
+        about its own scope.
+      - **Verified end-to-end via real HTTP requests** with a temporary
+        Head of Academic Affairs account: confirmed the button and
+        checkboxes render (previously absent for this role, since they
+        were gated behind the same `!$isReadOnly` check as bulk delete —
+        introduced a separate `$showSelectCheckboxes` flag so this one
+        read-only role gets checkboxes without also getting delete);
+        exported with nothing selected and confirmed a real, valid
+        `.xlsx` re-opened with PhpSpreadsheet showing exactly 58 data rows
+        (the real total student count at the time) titled "University-wide
+        export"; exported with 2 specific students checked and confirmed
+        exactly 2 data rows, the correct 2 real students, titled "2
+        selected students". Temporary account deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Demo/QA Data Cleanup
+- [x] Deleted every remaining fixture from this session's earlier
+      cross-faculty/multi-shift demonstration work (built, then
+      deliberately left in place at the user's request so they could log
+      in and verify it themselves — see the "Save All Semesters"-adjacent
+      demo sessions above) once the user confirmed they were done: the
+      temporary "QA Demo Faculty D" faculty, its department, its semester
+      and 12 generated sessions, the "XIS101 — Xisaabta Guud" demo course
+      and all 6 of its `course_offerings` rows, the 2 real attendance marks
+      created while proving cross-semester write-isolation, the 3 demo
+      lecturer accounts (Alpha/Beta/Gamma, later renamed to Somali names),
+      the 3 demo student accounts, and the temporary Head of Academic
+      Affairs account used to create the offerings through the real UI.
+      Confirmed afterward via direct query: zero rows remain matching any
+      of these fixtures' names/codes, and the real "AC — Accounting" /
+      "IC — Inclusive" courses and the real student count (55) were
+      unaffected throughout.
+
+### Bug Fix: student/xiiso_grid.php's "View Grid" Showed "Not Available" for Real Courses
+- [x] Reported by the user with a specific, correct diagnostic pattern
+      ("the score shows fine, but View Grid shows nothing" — see the
+      "How to garner future bugs" discussion that immediately preceded
+      this fix): clicking "View Grid" from `student/courses.php` failed for
+      real courses (Calculus, Inclusive, Taxation) a real Informatics
+      Semester 9 student genuinely takes, even though that same page's own
+      attendance-score column for those exact courses displayed correctly.
+      Traced to `student/xiiso_grid.php` never having been updated when
+      three earlier fixes landed on `student/courses.php`/
+      `student/dashboard.php` — it had silently drifted out of sync with
+      the "same data, correct version" pages, exactly the failure pattern
+      just discussed with the user. Three separate, compounding bugs:
+      1. **Department-fallback course discovery was gated on
+         `course_enrollments` being empty**, not additive — a student with
+         even one explicit `course_enrollments` row (common: only one
+         course out of several actually has a row) lost every other
+         course their own department offers "for free" via the fallback.
+         Same real incident already fixed elsewhere; this file just never
+         got the fix.
+      2. **The "guest offering" cross-listed-course discovery source was
+         entirely missing** — a course cataloged under a different
+         faculty but offered into this student's department via
+         `course_offerings.roster_department_id` (e.g. Taxation, cataloged
+         under Business Administration, offered into Informatics) was
+         never even a candidate `course_id` here, though
+         `student/courses.php` already discovers it correctly.
+      3. **The semester-fallback used the generic, faculty-wide
+         `get_current_semester()`** (documented to return the
+         most-recently-created current semester when several are
+         concurrently current) instead of resolving to this specific
+         student's own `(faculty_id, academic_year_id)` cohort first —
+         same root cause as the earlier `student/dashboard.php` fix,
+         never applied here.
+      4. **Found while fixing #2**: the course/semester faculty-match
+         guard (`courseRow['faculty_id'] !== semesterRow['faculty_id']`)
+         unconditionally rejected a legitimate cross-listed course, since
+         its own catalog department's faculty never equals the semester's
+         faculty by design. Fixed by allowing the pairing through when a
+         real `course_offerings` row exists for that exact
+         `(course_id, semester_id)` — reusing the existing
+         `course_offering_exists()` helper rather than writing a new
+         check, so this can't drift from the definition used elsewhere.
+      - All three/four fixes make this file's course/semester resolution
+        logic match `student/courses.php`'s already-correct version
+        line-for-line in intent, closing the drift rather than patching
+        around it.
+      - **Verified end-to-end via real HTTP requests**, first reproducing
+        the exact reported failure with a temporary student mirroring the
+        real student's shape (Informatics/Information Technology,
+        Semester 9, one explicit `course_enrollments` row) — confirmed
+        Calculus/Inclusive/Taxation all failed with "not available" before
+        the fix, exactly as reported (and, unexpectedly, Discrete Math —
+        the one course this temp student WAS explicitly enrolled in —
+        also failed, which is what surfaced bug #3: a temp student with no
+        attendance history yet has nothing to anchor `semesterOptionIds`
+        to besides the buggy semester fallback). After all fixes: all four
+        courses render correctly with zero PHP warnings/notices/fatals.
+        Re-verified with a second, independent temporary student
+        mirroring the same real shape to rule out any state leakage
+        between test runs. All temporary accounts/enrollments deleted
+        afterward; real student/course counts unaffected.
+
+

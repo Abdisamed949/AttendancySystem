@@ -32,6 +32,11 @@ $role = current_role();
 // write UI below and by a single dispatch guard at the top of the POST
 // handler further down.
 $isReadOnly = in_array($role, ['university_rector', 'head_academic'], true);
+// Head of Academic Affairs is read-only for CRUD here but still gets
+// select-all/individual checkboxes for its own "Export Students" button
+// (a non-destructive action) — every write-capable role already shows
+// these same checkboxes via !$isReadOnly for bulk delete.
+$showSelectCheckboxes = !$isReadOnly || $role === 'head_academic';
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -734,6 +739,14 @@ $studentsStmt->close();
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Students</h6>
                             <div class="d-flex gap-2">
+                                <?php if ($role === 'head_academic'): ?>
+                                    <form id="exportStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=excel" class="d-inline">
+                                        <div id="exportStudentsIds"></div>
+                                        <button type="submit" id="exportStudentsBtn" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                            <i class="bi bi-cloud-arrow-down-fill"></i> <span id="exportStudentsBtnLabel">Export All Students</span>
+                                        </button>
+                                    </form>
+                                <?php endif; ?>
                                 <?php if (!$isReadOnly): ?>
                                     <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                     <?php if ($role !== 'dean'): ?>
@@ -821,7 +834,7 @@ $studentsStmt->close();
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
-                                        <?php if (!$isReadOnly): ?><th><input type="checkbox" id="selectAllStudents"></th><?php endif; ?>
+                                        <?php if ($showSelectCheckboxes): ?><th><input type="checkbox" id="selectAllStudents"></th><?php endif; ?>
                                         <th>Student No</th>
                                         <th>Full Name</th>
                                         <th>Academic Year</th>
@@ -841,7 +854,7 @@ $studentsStmt->close();
                                     <?php else: ?>
                                         <?php foreach ($students as $s): ?>
                                             <tr>
-                                                <?php if (!$isReadOnly): ?>
+                                                <?php if ($showSelectCheckboxes): ?>
                                                 <td>
                                                     <input type="checkbox" class="row-check-student" value="<?= (int) $s['id'] ?>"
                                                            data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
@@ -1029,6 +1042,7 @@ $studentsStmt->close();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_export.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
@@ -1144,6 +1158,19 @@ $studentsStmt->close();
                     hiddenInputName: 'student_ids[]',
                     entityLabel: 'student',
                     entityLabelPlural: 'students',
+                });
+            }
+
+            if (document.getElementById('exportStudentsBtn')) {
+                admasInitBulkExport({
+                    checkboxSelector: '.row-check-student',
+                    selectAllSelector: '#selectAllStudents',
+                    formSelector: '#exportStudentsForm',
+                    hiddenContainerSelector: '#exportStudentsIds',
+                    hiddenInputName: 'ids[]',
+                    labelSelector: '#exportStudentsBtnLabel',
+                    allLabel: 'Export All Students',
+                    selectedLabelPrefix: 'Export Selected',
                 });
             }
         });

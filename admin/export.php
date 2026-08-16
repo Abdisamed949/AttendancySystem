@@ -5,9 +5,17 @@
  * Students / Lecturers / Semesters lists as Excel or PDF, university-wide
  * (this role's own scope is already unrestricted "view everywhere" per
  * CLAUDE.md §4, so no faculty filter is applied here — same as every
- * other view this role reaches). university_rector only, matching where
- * this card is actually shown; a direct request from any other role is
- * rejected the same as every other university_rector-only page.
+ * other view this role reaches).
+ *
+ * Head of Academic Affairs also reaches this file for `type=students` only,
+ * from its own "Export Students" button on admin/students.php — that
+ * button additionally supports selecting specific students first (select
+ * all or individually, via checkboxes) and POSTs their ids here as
+ * `ids[]`; when present, the query below is narrowed to just those
+ * students instead of the whole university-wide list. GET requests with no
+ * `ids[]` (the University Rector's own plain links, and a Head of Academic
+ * Affairs export with nothing checked) still export everyone, unfiltered,
+ * exactly as before.
  */
 declare(strict_types=1);
 
@@ -16,7 +24,25 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/university_logo.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 
-require_role(['university_rector']);
+require_role(['university_rector', 'head_academic']);
+
+$currentRole = current_role();
+if ($currentRole === 'head_academic' && ($_GET['type'] ?? '') !== 'students') {
+    // Head of Academic Affairs' own export button only exists for
+    // Students — Lecturers/Semesters exports stay University-Rector-only,
+    // matching where those two export cards are actually shown.
+    http_response_code(403);
+    exit('Not permitted.');
+}
+
+// Selected student ids (Head of Academic Affairs' own checkbox selection)
+// — only meaningful for type=students; ignored entirely otherwise. Always
+// re-validated as plain positive integers, never trusted further than
+// that.
+$selectedIds = array_values(array_unique(array_filter(
+    array_map('intval', (array) ($_POST['ids'] ?? [])),
+    static fn ($id) => $id > 0
+)));
 
 use Dompdf\Dompdf;
 use Dompdf\Options as DompdfOptions;
@@ -52,17 +78,27 @@ if ($type === 'students') {
         ['key' => 'shift_label', 'label' => 'Shift'],
         ['key' => 'status', 'label' => 'Status'],
     ];
-    $res = $conn->query(
-        "SELECT s.student_no, s.full_name, ay.label AS academic_year_label, f.name AS faculty_name,
+    $studentsSql = "SELECT s.student_no, s.full_name, ay.label AS academic_year_label, f.name AS faculty_name,
                 d.name AS department_name, sem.name AS semester_name, s.shift, u.status
          FROM students s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          JOIN faculties f ON f.id = s.faculty_id
          JOIN departments d ON d.id = s.department_id
          JOIN users u ON u.id = s.user_id
-         LEFT JOIN semesters sem ON sem.id = s.semester_id
-         ORDER BY f.name, d.name, s.full_name"
-    );
+         LEFT JOIN semesters sem ON sem.id = s.semester_id";
+    if (!empty($selectedIds)) {
+        $studentsSql .= ' WHERE s.id IN (' . implode(',', array_fill(0, count($selectedIds), '?')) . ')';
+    }
+    $studentsSql .= ' ORDER BY f.name, d.name, s.full_name';
+
+    if (!empty($selectedIds)) {
+        $studentsStmt = $conn->prepare($studentsSql);
+        $studentsStmt->bind_param(str_repeat('i', count($selectedIds)), ...$selectedIds);
+        $studentsStmt->execute();
+        $res = $studentsStmt->get_result();
+    } else {
+        $res = $conn->query($studentsSql);
+    }
     $rows = [];
     while ($r = $res->fetch_assoc()) {
         $r['semester_name'] = $r['semester_name'] ?: 'Not set';
@@ -131,6 +167,7 @@ if ($settingsResult) {
 $universityName = $settings['university_name'] ?? 'ADMAS University';
 $campusLine = trim(($settings['campus'] ?? '') . ' — ' . ($settings['contact_email'] ?? '') . ' — ' . ($settings['contact_phone'] ?? ''), ' —');
 $filename = 'admas_' . $type . '_' . date('Ymd_His');
+$scopeLine = !empty($selectedIds) ? (count($rows) . ' selected student' . (count($rows) === 1 ? '' : 's')) : 'University-wide export';
 
 if ($format === 'excel') {
     $spreadsheet = new Spreadsheet();
@@ -138,7 +175,7 @@ if ($format === 'excel') {
     $sheet->setTitle($title);
 
     $sheet->setCellValue('A1', $universityName);
-    $sheet->setCellValue('A2', $title . ' — University-wide export');
+    $sheet->setCellValue('A2', $title . ' — ' . $scopeLine);
     $sheet->setCellValue('A3', 'Generated: ' . date('Y-m-d H:i'));
     $sheet->getStyle('A1')->getFont()->setBold(true)->setSize(14);
     $sheet->getStyle('A2')->getFont()->setBold(true)->setSize(11);
@@ -210,7 +247,7 @@ ob_start();
             <div class="uni-meta"><?= htmlspecialchars($campusLine) ?></div>
         </div>
     </div>
-    <h2><?= htmlspecialchars($title) ?> — University-wide export</h2>
+    <h2><?= htmlspecialchars($title) ?> — <?= htmlspecialchars($scopeLine) ?></h2>
     <div class="meta-line">Generated: <?= htmlspecialchars(date('Y-m-d H:i')) ?></div>
     <table>
         <thead>
