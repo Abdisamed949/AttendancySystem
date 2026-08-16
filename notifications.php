@@ -1,6 +1,6 @@
 <?php
 /**
- * Notifications / Alerts — shared by System Administrator, Head of Academic
+ * Notifications / Alerts — shared by University Rector, Head of Academic
  * Affairs, and Dean (each scoped to a different slice of faculties, same
  * pattern as attendance.php / reports.php). Lives at the app root because
  * it is reused by three roles rather than owned by one folder. Students get
@@ -14,7 +14,7 @@ require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 
-require_role(['system_admin', 'head_academic', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
@@ -56,7 +56,7 @@ if ($role === 'dean') {
 
 // Every faculty (id => its own current semester id, 0 if none set) — a
 // faculty's "current" is per-faculty, so alerts spanning every faculty
-// (system_admin/head_academic) are built per-faculty and merged, never off
+// (university_rector/head_academic) are built per-faculty and merged, never off
 // one shared global value. Keyed by semester, not academic_year_id — two of
 // a faculty's own semesters can share one academic year (e.g. a just-ended
 // semester and its successor), so filtering by year alone could mix an
@@ -153,7 +153,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) ($_POST['action'] ?? '') =
 
 // ---------------------------------------------------------------------
 // Live below-threshold list, scoped by role. Dean is a single faculty (one
-// query, its own current semester); system_admin/head_academic span every
+// query, its own current semester); university_rector/head_academic span every
 // faculty, each with its own current semester, so that's one query per
 // faculty merged together rather than one shared global value. Only
 // *regular* Xiiso sessions count toward the score (out of
@@ -235,7 +235,7 @@ if ($unreadTypes !== '') {
 }
 
 $scopeBanner = match ($role) {
-    'system_admin' => 'Access scope: Full system — all faculties, departments, and courses',
+    'university_rector' => 'Access scope: Full system — all faculties, departments, and courses',
     'head_academic' => 'Access scope: All faculties (cross-faculty alerts)',
     'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only',
     default => '',

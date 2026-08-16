@@ -173,6 +173,8 @@ foreach ($myCourses as $course) {
         if ($markedCount < $enrolledCount) {
             $pendingSessions[] = [
                 'course_id' => (int) $course['id'],
+                'semester_id' => (int) $course['semester_id'],
+                'offering_shift' => $course['offering_shift'],
                 'course_label' => $course['code'] . ' — ' . $course['name'],
                 'session_label' => $session['label'],
                 'session_date' => $session['date'],
@@ -298,8 +300,24 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                                                         <span class="text-muted fst-italic">Never</span>
                                                     <?php endif; ?>
                                                 </td>
+                                                <?php
+                                                // Deep-link straight to this row's own current offering's
+                                                // semester (+ shift, when set) — a bare course_id-only link
+                                                // would fall back to attendance.php's own "current semester
+                                                // for this faculty" resolution, which can land on the WRONG
+                                                // semester whenever a faculty has more than one concurrently-
+                                                // current semester (see the matching fix/comment in
+                                                // lecturer/courses.php's identical link).
+                                                $dashTakeAttendanceParams = ['course_id' => (int) $c['id']];
+                                                if ($c['semester_id'] !== null) {
+                                                    $dashTakeAttendanceParams['semester_id'] = (int) $c['semester_id'];
+                                                    if ($c['offering_shift'] !== null) {
+                                                        $dashTakeAttendanceParams['shift'] = $c['offering_shift'];
+                                                    }
+                                                }
+                                                ?>
                                                 <td>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                                    <a href="<?= htmlspecialchars(BASE_URL . '/attendance.php?' . http_build_query($dashTakeAttendanceParams)) ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                         <i class="bi bi-calendar2-check"></i> Take Attendance
                                                     </a>
                                                 </td>
@@ -339,8 +357,14 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                                         <td>
                                             <span class="badge-pill badge-warning"><?= $p['marked_count'] ?> / <?= $p['enrolled_count'] ?></span>
                                         </td>
+                                        <?php
+                                        $pendingUrlParams = ['course_id' => $p['course_id'], 'semester_id' => $p['semester_id']];
+                                        if ($p['offering_shift'] !== null) {
+                                            $pendingUrlParams['shift'] = $p['offering_shift'];
+                                        }
+                                        ?>
                                         <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/attendance.php?course_id=<?= $p['course_id'] ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                            <a href="<?= htmlspecialchars(BASE_URL . '/attendance.php?' . http_build_query($pendingUrlParams)) ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                                 <i class="bi bi-calendar2-check"></i> Mark Now
                                             </a>
                                         </td>

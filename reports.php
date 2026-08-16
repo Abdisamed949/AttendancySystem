@@ -1,6 +1,6 @@
 <?php
 /**
- * Reports screen — shared by System Administrator, Head of Academic Affairs,
+ * Reports screen — shared by University Rector, Head of Academic Affairs,
  * Dean, Registration Office, and Lecturer, each scoped to a different slice
  * of the data (same scoping pattern as attendance.php). Lives at the app
  * root because it is reused by five roles rather than owned by one folder.
@@ -14,7 +14,7 @@ require_once __DIR__ . '/includes/attendance_helpers.php';
 require_once __DIR__ . '/includes/university_logo.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
-require_role(['system_admin', 'head_academic', 'dean', 'registration', 'lecturer']);
+require_role(['university_rector', 'head_academic', 'dean', 'registration', 'lecturer']);
 
 use Dompdf\Dompdf;
 use Dompdf\Options as DompdfOptions;
@@ -31,11 +31,22 @@ const REPORT_TYPE_LABELS = [
 ];
 
 const REPORT_TYPES_BY_ROLE = [
-    'system_admin' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
+    'university_rector' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
     'head_academic' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
     'dean' => ['course_attendance', 'department_summary', 'xiiso_grid'],
     'registration' => ['department_summary', 'faculty_summary'],
     'lecturer' => ['course_attendance', 'xiiso_grid'],
+];
+
+// Same 3-value student-shift set already used by attendance.php/students.php
+// etc. — the Xiiso Attendance Grid report's own optional Shift filter, so a
+// course with more than one shift's roster (Multi-Shift Course Offerings)
+// can be viewed one shift at a time here too, matching attendance.php's own
+// Grid View.
+const SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
 ];
 
 // ---------------------------------------------------------------------
@@ -371,9 +382,9 @@ function build_faculty_summary_report(mysqli $conn, string $role, int $facultyId
  * auto-computed P (present count) / A (absent count) / % trailing columns.
  * Cell values: '1' present, '0' absent, '' unmarked.
  */
-function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId): array
+function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): array
 {
-    $gridData = get_xiiso_grid_data($conn, $courseId, $semesterId);
+    $gridData = get_xiiso_grid_data($conn, $courseId, $semesterId, $shift);
     $sessions = $gridData['sessions'];
     $students = $gridData['students'];
     $marksByStudentSession = $gridData['marks'];
@@ -688,10 +699,16 @@ foreach ($xiisoCourses as $c) {
 
 // Every semester across every faculty is listed here (not just one
 // faculty's) — the Xiiso grid report is a historical/reporting surface, so
-// a lecturer/dean/admin can pull a past semester's grid for a course they
-// no longer teach, not just the current one. faculty_id is still selected
-// so the mismatch guard below can catch a course+semester pair that don't
-// belong to the same faculty.
+// a lecturer/admin/head_academic can pull a past semester's grid for a
+// course they no longer teach, not just the current one. faculty_id is
+// still selected so the mismatch guard below can catch a course+semester
+// pair that don't belong to the same faculty. Dean is locked to their own
+// faculty's semesters only (same "own faculty only" boundary already
+// enforced on $reportSemesters above) — a dean cross-listing an outside
+// course into their own faculty still only ever holds an offering under
+// their own faculty's own semesters (write access never extends into
+// another faculty's semesters), so this restriction never hides a
+// legitimate dean-owned offering.
 $xiisoSemesters = in_array('xiiso_grid', $allowedReportTypes, true)
     ? $conn->query(
         "SELECT s.id, s.faculty_id, s.name, s.status, ay.label AS academic_year_label, f.name AS faculty_name
@@ -701,6 +718,9 @@ $xiisoSemesters = in_array('xiiso_grid', $allowedReportTypes, true)
          ORDER BY s.start_date DESC"
     )->fetch_all(MYSQLI_ASSOC)
     : [];
+if ($role === 'dean') {
+    $xiisoSemesters = array_values(array_filter($xiisoSemesters, static fn ($s) => (int) $s['faculty_id'] === $deanFacultyId));
+}
 $xiisoSemesterById = [];
 foreach ($xiisoSemesters as $s) {
     $xiisoSemesterById[(int) $s['id']] = $s;
@@ -754,6 +774,13 @@ if (
     $filterXiisoSemesterId = 0;
 }
 
+// Optional Shift filter, same "blank = all shifts" convention as
+// attendance.php's own Grid View.
+$filterXiisoShift = (string) ($_GET['xiiso_shift'] ?? '');
+if (!array_key_exists($filterXiisoShift, SHIFT_LABELS)) {
+    $filterXiisoShift = '';
+}
+
 // ---------------------------------------------------------------------
 // Faculty / Department lists for the filter dropdowns
 // ---------------------------------------------------------------------
@@ -794,7 +821,7 @@ $reportSemesterOptional = $role === 'registration';
         ? build_faculty_summary_report($conn, $role, $filterFacultyId, $filterReportSemesterId)
         : [[], []],
     'xiiso_grid' => (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
-        ? build_xiiso_grid_report($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
+        ? build_xiiso_grid_report($conn, $filterXiisoCourseId, $filterXiisoSemesterId, $filterXiisoShift !== '' ? $filterXiisoShift : null)
         : [[], []],
     default => [[], []],
 };
@@ -807,7 +834,7 @@ if ($filterReportType === 'xiiso_grid') {
     // so the exported file carries the same Faculty/Department/Academic
     // Year/Lecturer context as the screen, not just Course + Semester.
     $xiisoOfferings = (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
-        ? get_offering_summary($conn, $filterXiisoCourseId, $filterXiisoSemesterId)
+        ? get_offering_summary($conn, $filterXiisoCourseId, $filterXiisoSemesterId, $filterXiisoShift !== '' ? $filterXiisoShift : null)
         : [];
     $xiisoLecturerLine = empty($xiisoOfferings)
         ? 'Unassigned'
@@ -815,11 +842,40 @@ if ($filterReportType === 'xiiso_grid') {
             static fn ($o) => ($o['shift'] === 'any' ? '' : (OFFERING_SHIFT_LABELS[$o['shift']] ?? $o['shift']) . ': ') . ($o['lecturer_name'] ?: 'Unassigned'),
             $xiisoOfferings
         ));
+
+    // Department/Faculty shown here follow the SELECTED semester, not the
+    // course's static catalog home — a cross-faculty ("guest") offering
+    // means the semester's own faculty (and its Roster Department) can
+    // legitimately differ from the course's catalog department/faculty;
+    // showing the catalog values here was misleading whenever that
+    // happened (see attendance.php's identical fix/comment for the
+    // original incident this addresses).
+    $xiisoReportDepartmentName = $xiisoCourseById[$filterXiisoCourseId]['department_name'] ?? '';
+    $xiisoReportFacultyName = $xiisoCourseById[$filterXiisoCourseId]['faculty_name'] ?? '';
+    if (isset($xiisoSemesterById[$filterXiisoSemesterId]) && array_key_exists($filterXiisoCourseId, $xiisoCourseById)) {
+        $xiisoSemesterFacultyId = (int) $xiisoSemesterById[$filterXiisoSemesterId]['faculty_id'];
+        if ($xiisoSemesterFacultyId !== (int) $xiisoCourseById[$filterXiisoCourseId]['faculty_id']) {
+            $xiisoReportFacultyName = (string) $xiisoSemesterById[$filterXiisoSemesterId]['faculty_name'];
+            $xiisoRosterDeptId = resolve_roster_department_id($conn, $filterXiisoCourseId, $filterXiisoSemesterId, $filterXiisoShift !== '' ? $filterXiisoShift : null);
+            if ($xiisoRosterDeptId !== null) {
+                $xiisoRdStmt = $conn->prepare('SELECT name FROM departments WHERE id = ?');
+                $xiisoRdStmt->bind_param('i', $xiisoRosterDeptId);
+                $xiisoRdStmt->execute();
+                $xiisoRdRow = $xiisoRdStmt->get_result()->fetch_assoc();
+                $xiisoRdStmt->close();
+                if ($xiisoRdRow) {
+                    $xiisoReportDepartmentName = (string) $xiisoRdRow['name'];
+                }
+            }
+        }
+    }
+
     $reportMetaLine = 'Course: ' . ($xiisoCourseById[$filterXiisoCourseId]['code'] ?? '') . ' — ' . ($xiisoCourseById[$filterXiisoCourseId]['name'] ?? '')
-        . '   |   Department: ' . ($xiisoCourseById[$filterXiisoCourseId]['department_name'] ?? '')
-        . '   |   Faculty: ' . ($xiisoCourseById[$filterXiisoCourseId]['faculty_name'] ?? '')
+        . '   |   Department: ' . $xiisoReportDepartmentName
+        . '   |   Faculty: ' . $xiisoReportFacultyName
         . '   |   Semester: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? '')
         . '   |   Academic Year: ' . ($xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? '')
+        . ($filterXiisoShift !== '' ? '   |   Shift: ' . SHIFT_LABELS[$filterXiisoShift] : '')
         . '   |   Lecturer: ' . $xiisoLecturerLine;
 } elseif ($filterReportSemesterId > 0 && isset($reportSemesterById[$filterReportSemesterId])) {
     $rs = $reportSemesterById[$filterReportSemesterId];
@@ -837,6 +893,7 @@ $currentQuery = [
     'report_semester_id' => $filterReportSemesterId,
     'xiiso_course_id' => $filterXiisoCourseId,
     'xiiso_semester_id' => $filterXiisoSemesterId,
+    'xiiso_shift' => $filterXiisoShift,
 ];
 $exportExcelUrl = BASE_URL . '/reports.php?' . http_build_query($currentQuery + ['export' => 'excel']);
 $exportPdfUrl = BASE_URL . '/reports.php?' . http_build_query($currentQuery + ['export' => 'pdf']);
@@ -952,7 +1009,7 @@ if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
 }
 
 $scopeBanner = match ($role) {
-    'system_admin' => 'Access scope: Full system — all faculties, departments, and courses',
+    'university_rector' => 'Access scope: Full system — all faculties, departments, and courses',
     'head_academic' => 'Access scope: All faculties (cross-faculty reporting)',
     'registration' => 'Access scope: All faculties — enrollment-focused reports only',
     'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only',
@@ -1080,6 +1137,18 @@ $scopeBanner = match ($role) {
                         </select>
                     </div>
 
+                    <div class="col-sm-6 col-md-2" id="xiisoShiftWrap" style="<?= $filterReportType === 'xiiso_grid' ? '' : 'display:none;' ?>">
+                        <label class="form-label small mb-1">Shift <span class="text-muted fw-normal">(optional)</span></label>
+                        <select class="form-select form-select-sm" name="xiiso_shift">
+                            <option value="">All Shifts</option>
+                            <?php foreach (SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
+                                <option value="<?= htmlspecialchars($shiftValue) ?>" <?= $filterXiisoShift === $shiftValue ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars($shiftLabel) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
                     <div class="col-sm-6 col-md-2">
                         <button type="submit" class="btn btn-primary btn-sm w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                             <i class="bi bi-funnel"></i> Apply Filters
@@ -1092,8 +1161,8 @@ $scopeBanner = match ($role) {
                 <?php if ($filterReportType === 'xiiso_grid' && array_key_exists($filterXiisoCourseId, $xiisoCourseById)): ?>
                     <?= render_scope_breadcrumb([
                         $xiisoCourseById[$filterXiisoCourseId]['code'],
-                        $xiisoCourseById[$filterXiisoCourseId]['department_name'],
-                        $xiisoCourseById[$filterXiisoCourseId]['faculty_name'],
+                        $xiisoReportDepartmentName ?? $xiisoCourseById[$filterXiisoCourseId]['department_name'],
+                        $xiisoReportFacultyName ?? $xiisoCourseById[$filterXiisoCourseId]['faculty_name'],
                         $xiisoSemesterById[$filterXiisoSemesterId]['name'] ?? null,
                         $xiisoSemesterById[$filterXiisoSemesterId]['academic_year_label'] ?? null,
                     ]) ?>
@@ -1177,6 +1246,7 @@ $scopeBanner = match ($role) {
             setDisplay('reportSemesterWrap', !isXiiso);
             setDisplay('xiisoCourseWrap', isXiiso);
             setDisplay('xiisoSemesterWrap', isXiiso);
+            setDisplay('xiisoShiftWrap', isXiiso);
         }
     </script>
     <?php if (!in_array($role, ['dean', 'lecturer'], true)): ?>

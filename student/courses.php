@@ -43,7 +43,7 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // ---------------------------------------------------------------------
 // Own students.id + department_id + faculty_id (never trusted from input)
 // ---------------------------------------------------------------------
-$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id, shift FROM students WHERE user_id = ?');
+$ownStmt = $conn->prepare('SELECT id, department_id, faculty_id, shift, semester_id, academic_year_id FROM students WHERE user_id = ?');
 $ownStmt->bind_param('i', $currentUser['id']);
 $ownStmt->execute();
 $ownRow = $ownStmt->get_result()->fetch_assoc();
@@ -51,6 +51,8 @@ $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
 $ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
 $ownShift = (string) ($ownRow['shift'] ?? '');
+$ownSemesterId = (int) ($ownRow['semester_id'] ?? 0);
+$ownAcademicYearId = (int) ($ownRow['academic_year_id'] ?? 0);
 
 $ownFacultyId = (int) ($ownRow['faculty_id'] ?? 0);
 
@@ -73,23 +75,30 @@ if ($ownFacultyId > 0) {
     $facStmt->close();
 }
 
-// Real semester rows for this faculty, keyed by name. The DB allows two
-// rows to legitimately share one name across different academic years
-// (the unique key is (faculty, academic_year, name), not (faculty, name)
-// — e.g. a faculty re-using "Semester 6" for a later cohort/year after the
-// earlier one has ended) — every matching row is kept here, not just the
-// newest, so an older same-named semester's real historical data can never
-// be silently swallowed behind a newer one and become unreachable.
+// Real semester rows for THIS student's own academic year, keyed by name.
+// A faculty is allowed to run several concurrently-current semesters at
+// once that share a name across different academic years (e.g. "Semester
+// 6" for the 2024/2025 cohort running alongside "Semester 9" for the
+// 2023/2024 cohort) — that's a real, intentional multi-cohort setup, not a
+// data error. But a given STUDENT belongs to exactly one of those cohorts
+// (their own students.academic_year_id), so their own picker must only
+// ever offer the semesters that belong to their own academic year — a
+// same-named semester that only exists for a different cohort's academic
+// year has nothing to do with this student and must render as "not
+// created yet" (disabled) for them, not as a clickable box that would
+// show another cohort's data. This is what actually keeps concurrent
+// cohorts' boxes/data from ever being mixed, not just the "(current)"
+// label fix above.
 $semestersByName = [];
-if ($ownFacultyId > 0) {
+if ($ownFacultyId > 0 && $ownAcademicYearId > 0) {
     $semStmt = $conn->prepare(
         'SELECT s.id, s.name, s.status, ay.label AS academic_year_label
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
-         WHERE s.faculty_id = ? AND s.hidden_from_picker = 0
+         WHERE s.faculty_id = ? AND s.academic_year_id = ? AND s.hidden_from_picker = 0
          ORDER BY s.id ASC'
     );
-    $semStmt->bind_param('i', $ownFacultyId);
+    $semStmt->bind_param('ii', $ownFacultyId, $ownAcademicYearId);
     $semStmt->execute();
     $semRes = $semStmt->get_result();
     while ($row = $semRes->fetch_assoc()) {
@@ -127,10 +136,22 @@ $filterSemesterId = (int) ($_GET['semester_id'] ?? 0);
 $createdSemesterIds = array_filter(array_column($semesterBoxes, 'semester_id'));
 if (!in_array($filterSemesterId, $createdSemesterIds, true)) {
     $filterSemesterId = 0;
-    foreach ($semesterBoxes as $box) {
-        if ($box['semester_id'] > 0 && $box['status'] === 'current') {
-            $filterSemesterId = $box['semester_id'];
-            break;
+    // Prefer this student's own actual assigned semester first — a
+    // faculty can now legitimately have more than one semester marked
+    // "current" at once (independent tracks for different cohorts/years),
+    // so "whichever box happens to be current, in ascending Semester-
+    // number order" is not a reliable stand-in for "this student's own
+    // semester" and previously picked the wrong one whenever an
+    // earlier-numbered semester (e.g. Semester 3) was current alongside
+    // this student's real, later semester (e.g. Semester 9).
+    if ($ownSemesterId > 0 && in_array($ownSemesterId, $createdSemesterIds, true)) {
+        $filterSemesterId = $ownSemesterId;
+    } else {
+        foreach ($semesterBoxes as $box) {
+            if ($box['semester_id'] > 0 && $box['status'] === 'current') {
+                $filterSemesterId = $box['semester_id'];
+                break;
+            }
         }
     }
     if ($filterSemesterId === 0) {
@@ -144,6 +165,15 @@ if (!in_array($filterSemesterId, $createdSemesterIds, true)) {
         }
     }
 }
+
+// A faculty can legitimately have more than one semester marked "current"
+// at once (independent tracks for different cohorts/years) — fine for the
+// admin-facing semesters.php list, but showing "(current)" on two boxes
+// here at once is genuinely confusing for a student ("which one is really
+// mine?"). Only the ONE semester relevant to this specific student — their
+// own assigned semester if they have one, else whichever box is actually
+// selected — is ever labeled "(current)" on this page.
+$myCurrentSemesterId = $ownSemesterId > 0 ? $ownSemesterId : $filterSemesterId;
 
 // ---------------------------------------------------------------------
 // Course discovery: course_enrollments first, department fallback second.
@@ -160,13 +190,19 @@ if ($ownStudentId > 0) {
     }
     $enrollStmt->close();
 
-    if (!empty($courseIds)) {
-        $discoveryMethod = 'course_enrollments';
-    } elseif ($ownDepartmentId > 0) {
-        // Fallback: course_enrollments is still unpopulated for this student
-        // — assume every course in their own department is theirs, the same
-        // way attendance.php's roster falls back to department/year/shift
-        // matching when a course has no enrollment rows yet.
+    $discoveryMethod = !empty($courseIds) ? 'course_enrollments' : 'none';
+
+    // Department fallback — ADDITIVE, not "only when course_enrollments is
+    // completely empty". A real incident: a student with even one explicit
+    // course_enrollments row (e.g. one course an admin happened to enroll
+    // them in by hand) was silently losing every OTHER course their own
+    // department offers for free (e.g. a shared department-wide course like
+    // Calculus), because the old `elseif` here only ran when $courseIds
+    // started out empty. A student can legitimately be a genuine
+    // course_enrollments member of some courses AND a department-fallback
+    // member of others at the same time — mirrors the guest-offering
+    // (third) source below, which was already additive for the same reason.
+    if ($ownDepartmentId > 0) {
         $deptCourseStmt = $conn->prepare('SELECT id FROM courses WHERE department_id = ?');
         $deptCourseStmt->bind_param('i', $ownDepartmentId);
         $deptCourseStmt->execute();
@@ -175,7 +211,8 @@ if ($ownStudentId > 0) {
             $courseIds[] = (int) $row['id'];
         }
         $deptCourseStmt->close();
-        $discoveryMethod = 'department_fallback';
+        $courseIds = array_values(array_unique($courseIds));
+        $discoveryMethod = $discoveryMethod === 'course_enrollments' ? 'course_enrollments+department_fallback' : 'department_fallback';
     }
 
     // Additive third source: a cross-listed/guest-faculty offering whose
@@ -303,7 +340,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                                    <?= $box['semester_id'] === $filterSemesterId
                                         ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"'
                                         : 'style="border: 1px solid var(--admas-sky); color: var(--admas-sky);"' ?>>
-                                    <?= htmlspecialchars($box['name']) ?><?= $box['status'] === 'current' ? ' (current)' : '' ?>
+                                    <?= htmlspecialchars($box['name']) ?><?= ($box['status'] === 'current' && $box['semester_id'] === $myCurrentSemesterId) ? ' (current)' : '' ?>
                                 </a>
                             <?php else: ?>
                                 <span class="btn btn-sm btn-outline-secondary disabled" style="opacity: 0.4;" title="Not created yet">
@@ -315,7 +352,8 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                 </div>
             <?php endif; ?>
 
-            <div class="admas-card p-4" style="border: 2px solid var(--admas-sky);">
+            <!-- Desktop/tablet: table, unchanged. -->
+            <div class="admas-card p-4 d-none d-md-block" style="border: 2px solid var(--admas-sky);">
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
@@ -372,6 +410,46 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                         </tbody>
                     </table>
                 </div>
+            </div>
+
+            <!-- Mobile: one card per course instead of a cramped table row. -->
+            <div class="d-md-none">
+                <?php if (empty($courses)): ?>
+                    <div class="admas-card p-4 text-center text-muted">No courses recorded for this semester yet.</div>
+                <?php else: ?>
+                    <?php foreach ($courses as $c): ?>
+                        <?php
+                        $totalMarks = (int) $c['total_marks'];
+                        $pct = $totalMarks > 0 ? min(ATTENDANCE_MAX_SCORE, (int) $c['present_count']) : null;
+                        $gridUrl = BASE_URL . '/student/xiiso_grid.php?' . http_build_query([
+                            'course_id' => (int) $c['id'],
+                            'semester_id' => $filterSemesterId,
+                        ]);
+                        ?>
+                        <div class="admas-card p-3 mb-3" style="border: 2px solid var(--admas-sky);">
+                            <div class="d-flex justify-content-between align-items-start mb-2 gap-2">
+                                <span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span>
+                                <?php if ($pct === null): ?>
+                                    <span class="text-muted small">No records yet</span>
+                                <?php else: ?>
+                                    <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= $pct ?>%</span>
+                                <?php endif; ?>
+                            </div>
+                            <div class="fw-semibold mb-1" style="color: var(--admas-text);"><?= htmlspecialchars($c['name']) ?></div>
+                            <div class="text-muted small mb-3">
+                                <i class="bi bi-person"></i>
+                                <?php if ($c['lecturer_name']): ?>
+                                    <?= htmlspecialchars($c['lecturer_name']) ?>
+                                <?php else: ?>
+                                    <span class="fst-italic">Unassigned</span>
+                                <?php endif; ?>
+                            </div>
+                            <a href="<?= htmlspecialchars($gridUrl) ?>" class="btn btn-sm w-100 text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                <i class="bi bi-grid-3x3"></i> View Grid
+                            </a>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
             </div>
         </div>
     </div>

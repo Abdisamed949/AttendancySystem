@@ -63,7 +63,7 @@ $lecturerFormValues = ['staff_no' => '', 'full_name' => '', 'email' => '', 'depa
  * §4 previously granted only register/view here; this request adds delete,
  * scoped to the same university-wide read scope this page already has, not
  * limited to any one faculty). Same blocker rules as
- * admin/lecturers.php::delete_lecturer_row() for the system_admin (no
+ * admin/lecturers.php::delete_lecturer_row() for the university_rector (no
  * faculty restriction) case — kept as a separate function since this page
  * has no $role/$deanFacultyId concept to thread through.
  */

@@ -12,7 +12,10 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
 require_once __DIR__ . '/../vendor/autoload.php';
 
-require_role(['system_admin']);
+// university_rector converted from full-CRUD to view-only oversight; bulk
+// import has no meaningful "view" mode, so access is removed entirely
+// rather than degraded (no other role has ever had access to this page).
+require_role([]);
 
 use PhpOffice\PhpSpreadsheet\Reader\Csv;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;

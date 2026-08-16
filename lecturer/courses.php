@@ -369,18 +369,27 @@ foreach ($academicYears as $ay) {
                                     $nextPending = $c['next_pending_session'];
 
                                     // Deep-link straight into the ready-to-mark Grid View whenever
-                                    // the offering's shift is known, so the lecturer never has to
-                                    // manually pick the course/semester/shift on attendance.php —
-                                    // just click and mark. attendance.php's Grid View shows the
-                                    // whole semester at once (not one specific session), so this
-                                    // only needs course/semester/shift, not the pending session id.
+                                    // this course's own current offering's semester is known, so the
+                                    // lecturer never has to manually pick the course/semester/shift on
+                                    // attendance.php — just click and mark. attendance.php's Grid View
+                                    // shows the whole semester at once (not one specific session), so
+                                    // this only needs course/semester/shift, not the pending session
+                                    // id — deliberately NOT gated on $nextPending !== null (a course
+                                    // with zero pending sessions, i.e. fully caught up, still has a
+                                    // real semester and must still deep-link to it, not fall back to
+                                    // attendance.php's own bare-course_id resolution, which can land on
+                                    // the wrong semester whenever a faculty has more than one
+                                    // concurrently-current semester).
                                     $takeAttendanceUrl = BASE_URL . '/attendance.php?course_id=' . (int) $c['course_id'];
-                                    if ($nextPending !== null && $c['offering_shift'] !== null) {
-                                        $takeAttendanceUrl = BASE_URL . '/attendance.php?' . http_build_query([
+                                    if ($c['semester_id'] !== null) {
+                                        $queryParams = [
                                             'course_id' => (int) $c['course_id'],
                                             'semester_id' => (int) $c['semester_id'],
-                                            'shift' => $c['offering_shift'],
-                                        ]);
+                                        ];
+                                        if ($c['offering_shift'] !== null) {
+                                            $queryParams['shift'] = $c['offering_shift'];
+                                        }
+                                        $takeAttendanceUrl = BASE_URL . '/attendance.php?' . http_build_query($queryParams);
                                     }
                                     ?>
                                     <tr>

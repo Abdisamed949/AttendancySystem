@@ -1,6 +1,6 @@
 <?php
 /**
- * Semester + Session ("Xiiso") management — shared by System Administrator,
+ * Semester + Session ("Xiiso") management — shared by University Rector,
  * Head of Academic Affairs, and Dean (own faculty only, per CLAUDE.md §4).
  * Lives at the app root (not under /admin) because it is reused across
  * roles, same pattern as attendance.php and reports.php. Dean's
@@ -13,10 +13,12 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 
-require_role(['system_admin', 'head_academic', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
+$currentUser = current_user();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -168,7 +170,7 @@ function delete_session_row(mysqli $conn, int $sessionId, int $semesterId): arra
 }
 
 /**
- * Delete a semester — system_admin (any) or dean (own faculty only, via
+ * Delete a semester — university_rector (any) or dean (own faculty only, via
  * $deanFacultyId). Blocked if any course_offerings reference it, if any
  * attendance record is reachable through its sessions, or if any student
  * is still assigned to it. Sessions with no attendance yet, and the
@@ -247,6 +249,11 @@ function delete_semester_row(mysqli $conn, int $semesterId, string $role, int $d
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('semesters.php');
+    }
 
     if ($action === 'create_semester') {
         // A Dean's faculty is always the session's own faculty_id — never the
@@ -676,7 +683,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'delete_semester') {
-        if (!in_array($role, ['system_admin', 'dean'], true)) {
+        if (!in_array($role, ['university_rector', 'dean'], true)) {
             $_SESSION['flash_error'] = 'Not permitted.';
             redirect_to('semesters.php');
         }
@@ -774,10 +781,25 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                 <i class="bi bi-shield-check"></i>
                 <?php if ($role === 'dean'): ?>
                     Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                <?php elseif ($isReadOnly): ?>
+                    Access scope: All academic years and semesters — view only (oversight)
                 <?php else: ?>
                     Access scope: All academic years and semesters
                 <?php endif; ?>
             </div>
+
+            <?php if ($role === 'university_rector'): ?>
+                <div class="export-card">
+                    <div>
+                        <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export Semesters</p>
+                        <p class="export-card-sub">Download every faculty's Semesters/Xiiso list.</p>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=semesters&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=semesters&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
@@ -801,6 +823,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
 
             <div class="row g-4">
                 <div class="col-lg-5">
+                    <?php if (!$isReadOnly): ?>
                     <div class="admas-card p-4 mb-4">
                         <h6 class="small text-uppercase text-muted mb-2"><?= $editMode ? 'Edit Semester' : 'Create Semester' ?></h6>
                         <p class="text-muted small mb-2">
@@ -861,7 +884,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                     <?php endforeach; ?>
                                 </select>
                                 <?php if (empty($academicYears)): ?>
-                                    <div class="form-text text-danger">No academic years exist yet — ask a System Administrator or Head of Academic Affairs to add one before you can create a semester.</div>
+                                    <div class="form-text text-danger">No academic years exist yet — ask a University Rector or Head of Academic Affairs to add one before you can create a semester.</div>
                                 <?php endif; ?>
                             </div>
                             <div>
@@ -884,6 +907,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                             </div>
                         </form>
                     </div>
+                    <?php endif; ?>
 
                     <div class="admas-card p-4">
                         <h6 class="small text-uppercase text-muted mb-2">All Semesters</h6>
@@ -896,7 +920,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                         <th>Faculty</th>
                                         <th>Academic Year</th>
                                         <th>Current</th>
-                                        <?php if ($role === 'system_admin' || $role === 'dean'): ?>
+                                        <?php if (!$isReadOnly && $role === 'dean'): ?>
                                             <th></th>
                                         <?php endif; ?>
                                     </tr>
@@ -934,7 +958,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                                         <span class="badge-pill badge-neutral">Waiting</span>
                                                     <?php endif; ?>
                                                 </td>
-                                                <?php if ($role === 'system_admin' || $role === 'dean'): ?>
+                                                <?php if (!$isReadOnly && $role === 'dean'): ?>
                                                     <td class="text-end">
                                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= (int) $s['id'] ?>&edit=1"
                                                            class="btn-icon" title="Edit semester" aria-label="Edit semester"
@@ -995,6 +1019,7 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                         <?php endif; ?>
                                     </p>
                                 </div>
+                                <?php if (!$isReadOnly): ?>
                                 <div class="d-flex gap-2 flex-wrap">
                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" onsubmit="return confirm('Set this semester to Current?');">
                                         <input type="hidden" name="action" value="set_status">
@@ -1042,9 +1067,10 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                         </button>
                                     </form>
                                 </div>
+                                <?php endif; ?>
                             </div>
 
-                            <?php if ($selectedSemester['faculty_id'] === null): ?>
+                            <?php if (!$isReadOnly && $selectedSemester['faculty_id'] === null): ?>
                                 <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="d-flex align-items-end gap-2 mb-3 p-3" style="background: #fff8e6; border-radius: 10px;">
                                     <input type="hidden" name="action" value="assign_faculty">
                                     <input type="hidden" name="semester_id" value="<?= $selectedSemesterId ?>">
@@ -1063,6 +1089,29 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
 
                             <?php if (empty($selectedSemesterSessions)): ?>
                                 <p class="text-muted mb-0">No sessions yet — click "Generate Sessions" to create the 12 Xiiso rows (10 regular + Midterm + Final).</p>
+                            <?php elseif ($isReadOnly): ?>
+                                <div class="table-responsive mb-3">
+                                    <table class="table admas-table align-middle mb-0">
+                                        <thead>
+                                            <tr>
+                                                <th>#</th>
+                                                <th>Xiiso</th>
+                                                <th>Type</th>
+                                                <th>Date</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php foreach ($selectedSemesterSessions as $session): ?>
+                                                <tr>
+                                                    <td><?= (int) $session['session_number'] ?></td>
+                                                    <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($session['label']) ?></td>
+                                                    <td class="text-capitalize"><?= htmlspecialchars($session['type']) ?></td>
+                                                    <td><?= htmlspecialchars((string) ($session['date'] ?? '—')) ?></td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </tbody>
+                                    </table>
+                                </div>
                             <?php else: ?>
                                 <div class="d-flex justify-content-end mb-2">
                                     <button type="button" id="bulkDeleteSessionsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
@@ -1121,16 +1170,18 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
-            admasInitBulkDelete({
-                checkboxSelector: '.row-check-session',
-                selectAllSelector: '#selectAllSessions',
-                buttonSelector: '#bulkDeleteSessionsBtn',
-                formSelector: '#bulkDeleteSessionsForm',
-                hiddenContainerSelector: '#bulkDeleteSessionsIds',
-                hiddenInputName: 'session_ids[]',
-                entityLabel: 'Xiiso session',
-                entityLabelPlural: 'Xiiso sessions',
-            });
+            if (document.getElementById('bulkDeleteSessionsBtn')) {
+                admasInitBulkDelete({
+                    checkboxSelector: '.row-check-session',
+                    selectAllSelector: '#selectAllSessions',
+                    buttonSelector: '#bulkDeleteSessionsBtn',
+                    formSelector: '#bulkDeleteSessionsForm',
+                    hiddenContainerSelector: '#bulkDeleteSessionsIds',
+                    hiddenInputName: 'session_ids[]',
+                    entityLabel: 'Xiiso session',
+                    entityLabelPlural: 'Xiiso sessions',
+                });
+            }
         });
 
         // Semester dropdown options depend on the selected Faculty's own

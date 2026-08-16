@@ -183,6 +183,12 @@ while ($row = $fscRes->fetch_assoc()) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        .dash-chart-box {
+            position: relative;
+            height: 160px;
+        }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -243,21 +249,28 @@ while ($row = $fscRes->fetch_assoc()) {
                 </div>
             </div>
 
-            <!-- Charts -->
+            <!-- Charts — fixed-height boxes (see .dash-chart-box) paired
+                 with Chart.js's maintainAspectRatio: false, so charts stay
+                 compact and fit alongside everything else on one screen
+                 without scrolling, per explicit request. -->
             <div class="row g-3 mb-3">
                 <div class="col-xl-8">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Weekly Attendance (This Week)</h6>
-                        <canvas id="weeklyAttendanceChart" height="130"></canvas>
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Weekly Attendance</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="weeklyAttendanceChart"></canvas>
+                        </div>
                     </div>
                 </div>
                 <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Department</h6>
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Department</h6>
                         <?php if (empty($deptChartLabels)): ?>
                             <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
                         <?php else: ?>
-                            <canvas id="deptPieChart" height="220"></canvas>
+                            <div class="dash-chart-box">
+                                <canvas id="deptPieChart"></canvas>
+                            </div>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -354,6 +367,7 @@ while ($row = $fscRes->fetch_assoc()) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
                     x: { ticks: { color: chartTextMuted }, grid: { display: false } },
@@ -382,6 +396,7 @@ while ($row = $fscRes->fetch_assoc()) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
                     tooltip: { callbacks: { label: (item) => `${item.label}: ${item.formattedValue}%` } },

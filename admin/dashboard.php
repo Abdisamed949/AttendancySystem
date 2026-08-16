@@ -1,6 +1,6 @@
 <?php
 /**
- * System Administrator dashboard.
+ * University Rector dashboard.
  */
 declare(strict_types=1);
 
@@ -8,7 +8,7 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 
-require_role(['system_admin']);
+require_role(['university_rector']);
 
 $conn = db();
 $currentUser = current_user();
@@ -176,6 +176,105 @@ foreach ($departmentsForChart as $d) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Attendance by Faculty (bar chart) — university-wide oversight for the
+// Rector role: one score per faculty, each resolved against that
+// faculty's own current semester (never a single shared "current" value,
+// same per-faculty pattern used by the department chart above and by
+// head_academic/dashboard.php's own Attendance-by-Faculty section — reused
+// here rather than reinvented). Average of each (student, course) pair's
+// own capped out-of-10 score, only counting *regular* Xiiso sessions.
+// ---------------------------------------------------------------------
+$allFacultiesForChart = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
+$facultyChartLabels = [];
+$facultyChartData = [];
+foreach ($allFacultiesForChart as $f) {
+    $fid = (int) $f['id'];
+    $fSem = get_current_semester($conn, $fid);
+    $fSemesterId = (int) ($fSem['id'] ?? 0);
+    if ($fSemesterId <= 0) {
+        continue;
+    }
+    $fStmt = $conn->prepare(
+        "SELECT ROUND(AVG(t.present_score), 1) AS pct
+         FROM (
+             SELECT a.student_id, a.course_id,
+                    LEAST(10, SUM(a.status = 'present')) AS present_score
+             FROM attendance a
+             JOIN students s ON s.id = a.student_id
+             JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+             WHERE sess.semester_id = ? AND s.faculty_id = ?
+             GROUP BY a.student_id, a.course_id
+         ) t"
+    );
+    $fStmt->bind_param('ii', $fSemesterId, $fid);
+    $fStmt->execute();
+    $fRow = $fStmt->get_result()->fetch_assoc();
+    $fStmt->close();
+    if ($fRow && $fRow['pct'] !== null) {
+        $facultyChartLabels[] = $f['name'];
+        $facultyChartData[] = (float) $fRow['pct'];
+    }
+}
+
+// ---------------------------------------------------------------------
+// Students per Faculty (doughnut chart) — simple headcount, university-wide.
+// ---------------------------------------------------------------------
+$studentsPerFacultyResult = $conn->query(
+    "SELECT f.name, COUNT(s.id) AS c
+     FROM faculties f
+     LEFT JOIN students s ON s.faculty_id = f.id AND s.status = 'active'
+     GROUP BY f.id, f.name
+     ORDER BY f.name"
+)->fetch_all(MYSQLI_ASSOC);
+$studentsPerFacultyLabels = array_map(static fn ($r) => $r['name'], $studentsPerFacultyResult);
+$studentsPerFacultyData = array_map(static fn ($r) => (int) $r['c'], $studentsPerFacultyResult);
+
+// ---------------------------------------------------------------------
+// Lecturer workload (horizontal bar) — top 8 lecturers by number of
+// CURRENT course_offerings (any faculty's semester whose own status is
+// 'current'), so it reflects who is actually teaching the most right now,
+// not a lifetime historical count.
+// ---------------------------------------------------------------------
+$lecturerWorkload = $conn->query(
+    "SELECT l.full_name, COUNT(*) AS c
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id AND se.status = 'current'
+     JOIN lecturers l ON l.id = co.lecturer_id
+     GROUP BY l.id, l.full_name
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+)->fetch_all(MYSQLI_ASSOC);
+$lecturerWorkloadLabels = array_map(static fn ($r) => $r['full_name'], $lecturerWorkload);
+$lecturerWorkloadData = array_map(static fn ($r) => (int) $r['c'], $lecturerWorkload);
+
+// ---------------------------------------------------------------------
+// Student registration trend — students added per month, last 6 months
+// (students.created_at). Skipped if there is no meaningful spread of data
+// (e.g. every student was added in the same bulk import) — checked below
+// by simply rendering whatever the query returns; a flat single-month bar
+// is still a truthful (if unexciting) chart, not fabricated.
+// ---------------------------------------------------------------------
+$registrationTrendLabels = [];
+$registrationTrendData = [];
+$regByMonth = [];
+$regResult = $conn->query(
+    "SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS c
+     FROM students
+     WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+     GROUP BY ym"
+);
+if ($regResult) {
+    while ($row = $regResult->fetch_assoc()) {
+        $regByMonth[$row['ym']] = (int) $row['c'];
+    }
+}
+for ($i = 5; $i >= 0; $i--) {
+    $ym = date('Y-m', strtotime("-{$i} months"));
+    $registrationTrendLabels[] = date('M Y', strtotime($ym . '-01'));
+    $registrationTrendData[] = $regByMonth[$ym] ?? 0;
+}
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -186,6 +285,22 @@ foreach ($departmentsForChart as $d) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        /* Fixed-height chart boxes (paired with Chart.js's maintainAspectRatio:
+           false in the script below) so all 6 charts + the alerts panel stay
+           compact and fit on one screen together, per explicit request —
+           without this, each chart would grow to whatever height its own
+           aspect ratio implied and the page would need scrolling. */
+        .dash-chart-box {
+            position: relative;
+            height: 140px;
+        }
+
+        .dash-alerts-box {
+            max-height: 140px;
+            overflow-y: auto;
+        }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -246,43 +361,98 @@ foreach ($departmentsForChart as $d) {
                 </div>
             </div>
 
-            <!-- Charts + Alerts -->
+            <!-- Charts + Alerts — every chart below is a fixed-height box
+                 (see .dash-chart-box) with Chart.js's maintainAspectRatio
+                 set to false, and this whole section uses 4 narrow columns
+                 instead of 2 wide ones, specifically so all 6 charts + the
+                 alerts panel fit on one screen without scrolling on a
+                 normal desktop viewport, per explicit request. -->
             <div class="row g-3">
-                <div class="col-xl-5">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Weekly Attendance (This Week)</h6>
-                        <canvas id="weeklyAttendanceChart" height="150"></canvas>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Weekly Attendance</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="weeklyAttendanceChart"></canvas>
+                        </div>
                     </div>
                 </div>
-                <div class="col-xl-3">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Department</h6>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Department</h6>
                         <?php if (empty($deptChartLabels)): ?>
                             <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
                         <?php else: ?>
-                            <canvas id="deptPieChart" height="220"></canvas>
+                            <div class="dash-chart-box">
+                                <canvas id="deptPieChart"></canvas>
+                            </div>
                         <?php endif; ?>
                     </div>
                 </div>
-                <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Faculty</h6>
+                        <?php if (empty($facultyChartLabels)): ?>
+                            <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="facultyAttendanceChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Students per Faculty</h6>
+                        <?php if (empty($studentsPerFacultyLabels)): ?>
+                            <p class="text-muted small mb-0">No faculties exist yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="studentsPerFacultyChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Lecturer Workload</h6>
+                        <?php if (empty($lecturerWorkloadLabels)): ?>
+                            <p class="text-muted small mb-0">No lecturers currently have an assigned offering this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="lecturerWorkloadChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Registrations (6mo)</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="registrationTrendChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">
                             <i class="bi bi-exclamation-triangle-fill text-warning"></i>
                             Attendance Alerts
                         </h6>
-                        <?php if (empty($alerts)): ?>
-                            <p class="text-muted small mb-0">No students are currently below the <?= htmlspecialchars((string) $minAttendancePct) ?>% attendance threshold.</p>
-                        <?php else: ?>
-                            <?php foreach ($alerts as $alert): ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
-                                    <div>
-                                        <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
-                                        <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
-                                    </div>
-                                    <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
-                                </a>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
+                        <div class="dash-alerts-box">
+                            <?php if (empty($alerts)): ?>
+                                <p class="text-muted small mb-0">No students are currently below the <?= htmlspecialchars((string) $minAttendancePct) ?>% attendance threshold.</p>
+                            <?php else: ?>
+                                <?php foreach ($alerts as $alert): ?>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
+                                        <div>
+                                            <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
+                                            <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
+                                        </div>
+                                        <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
+                                    </a>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -321,6 +491,7 @@ foreach ($departmentsForChart as $d) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: {
                     legend: { display: false },
                 },
@@ -351,6 +522,7 @@ foreach ($departmentsForChart as $d) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: {
                     legend: {
                         position: 'bottom',
@@ -363,6 +535,108 @@ foreach ($departmentsForChart as $d) {
             },
         });
         <?php endif; ?>
+
+        <?php if (!empty($facultyChartLabels)): ?>
+        new Chart(document.getElementById('facultyAttendanceChart'), {
+            type: 'bar',
+            data: {
+                labels: <?= json_encode($facultyChartLabels) ?>,
+                datasets: [{
+                    label: 'Avg Score (out of 10)',
+                    data: <?= json_encode($facultyChartData) ?>,
+                    backgroundColor: chartSky,
+                    borderRadius: 6,
+                    maxBarThickness: 48,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: { min: 0, max: 10, ticks: { color: chartTextMuted }, grid: { color: chartGrid } },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        <?php if (!empty($studentsPerFacultyLabels)): ?>
+        new Chart(document.getElementById('studentsPerFacultyChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?= json_encode($studentsPerFacultyLabels) ?>,
+                datasets: [{
+                    label: 'Students',
+                    data: <?= json_encode($studentsPerFacultyData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } },
+                    },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        <?php if (!empty($lecturerWorkloadLabels)): ?>
+        new Chart(document.getElementById('lecturerWorkloadChart'), {
+            type: 'bar',
+            data: {
+                labels: <?= json_encode($lecturerWorkloadLabels) ?>,
+                datasets: [{
+                    label: 'Current Course Offerings',
+                    data: <?= json_encode($lecturerWorkloadData) ?>,
+                    backgroundColor: chartSky,
+                    borderRadius: 6,
+                    maxBarThickness: 28,
+                }],
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
+                    y: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        new Chart(document.getElementById('registrationTrendChart'), {
+            type: 'line',
+            data: {
+                labels: <?= json_encode($registrationTrendLabels) ?>,
+                datasets: [{
+                    label: 'Students Registered',
+                    data: <?= json_encode($registrationTrendData) ?>,
+                    borderColor: chartSky,
+                    backgroundColor: chartSky,
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: { min: 0, ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
+                },
+            },
+        });
     </script>
 </body>
 </html>

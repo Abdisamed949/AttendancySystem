@@ -1,6 +1,6 @@
 <?php
 /**
- * Attendance marking screen — shared by System Administrator, Dean, and
+ * Attendance marking screen — shared by University Rector, Dean, and
  * Lecturer (each scoped to a different slice of courses). Lives at the app
  * root (not under /admin) because the same file is reused by all three
  * roles; includes/sidebar.php links to it via the 'path' override in
@@ -22,7 +22,7 @@ require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean', 'lecturer']);
+require_role(['university_rector', 'dean', 'lecturer']);
 
 $conn = db();
 $currentUser = current_user();
@@ -78,7 +78,7 @@ if ($role === 'lecturer') {
 // for the current user, regardless of what a request tries to submit).
 // ---------------------------------------------------------------------
 $courses = [];
-if ($role === 'system_admin') {
+if ($role === 'university_rector') {
     $courses = $conn->query(
         "SELECT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
@@ -171,14 +171,14 @@ foreach ($courses as $c) {
     )));
 }
 
-$faculties = $role === 'system_admin'
+$faculties = $role === 'university_rector'
     ? $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC)
     : [];
 
 // Department filter options (UI convenience only, purely a client-side
 // narrowing of the Course dropdown below it; no new access check, since
 // $courses above is already the real, role-scoped security boundary).
-if ($role === 'system_admin') {
+if ($role === 'university_rector') {
     $departmentsForFilter = $conn->query(
         'SELECT d.id, d.name, f.name AS faculty_name
          FROM departments d
@@ -249,7 +249,7 @@ if (!empty($facultyIds)) {
 }
 
 // Course -> [faculty_id, ...] map for the JS Semester cascade (every role,
-// not just system_admin — dean/lecturer also need this to populate
+// not just university_rector — dean/lecturer also need this to populate
 // Semester options when Course changes, even though their own Course list
 // is server-flat). A course can now have real offerings in more than one
 // faculty at once, so this is plural, not a single scalar.
@@ -333,6 +333,48 @@ if (array_key_exists($filterCourseId, $courseById)) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Breadcrumb Department/Faculty — the course's own static catalog
+// department/faculty is only correct when the selected semester belongs
+// to that same faculty. For a cross-faculty ("guest") offering — the
+// whole point of this page's Faculty/Semester picker allowing a course to
+// be viewed under a DIFFERENT faculty's semester than its catalog home —
+// showing the catalog department/faculty here is actively misleading
+// (e.g. a Business Administration course's Informatics-faculty offering
+// was showing "Business and Finance / Business Administration" in the
+// breadcrumb even while the roster/grid itself correctly showed only
+// Informatics's own students). Resolve the semester's own faculty and the
+// offering's actual Roster Department instead, whenever they differ from
+// the course's catalog home.
+// ---------------------------------------------------------------------
+$breadcrumbDepartmentName = $courseById[$filterCourseId]['department_name'] ?? null;
+$breadcrumbFacultyName = $courseById[$filterCourseId]['faculty_name'] ?? null;
+if ($currentSemester !== null && array_key_exists($filterCourseId, $courseById)) {
+    $semesterFacultyId = (int) $currentSemester['faculty_id'];
+    if ($semesterFacultyId !== (int) $courseById[$filterCourseId]['faculty_id']) {
+        $fStmt = $conn->prepare('SELECT name FROM faculties WHERE id = ?');
+        $fStmt->bind_param('i', $semesterFacultyId);
+        $fStmt->execute();
+        $fRow = $fStmt->get_result()->fetch_assoc();
+        $fStmt->close();
+        if ($fRow) {
+            $breadcrumbFacultyName = (string) $fRow['name'];
+        }
+
+        $rosterDeptId = resolve_roster_department_id($conn, $filterCourseId, (int) $currentSemester['id'], $filterShift !== '' ? $filterShift : null);
+        if ($rosterDeptId !== null) {
+            $rdStmt = $conn->prepare('SELECT name FROM departments WHERE id = ?');
+            $rdStmt->bind_param('i', $rosterDeptId);
+            $rdStmt->execute();
+            $rdRow = $rdStmt->get_result()->fetch_assoc();
+            $rdStmt->close();
+            if ($rdRow) {
+                $breadcrumbDepartmentName = (string) $rdRow['name'];
+            }
+        }
+    }
+}
+
 // Write access for the resolved course+semester — reused as-is from the
 // AJAX endpoint's own check, so "can this cell be clicked" on screen never
 // disagrees with "will the server actually accept this save". A dean/
@@ -340,7 +382,13 @@ if (array_key_exists($filterCourseId, $courseById)) {
 // the grid (read-only), matching how reports.php already lets the same
 // roles view historical data they can't edit.
 $canWriteAttendance = false;
-if (array_key_exists($filterCourseId, $courseById) && $currentSemester !== null) {
+// University Rector is a supervisory/oversight role — full VIEW access to
+// every course/semester's grid, but never write access, regardless of what
+// user_can_write_course_attendance() would otherwise say. Forcing this to
+// false here (rather than special-casing every render site) reuses the
+// exact same disabled-grid/"Read-only" rendering already built for a
+// lecturer/dean viewing a semester outside their normal write scope.
+if ($role !== 'university_rector' && array_key_exists($filterCourseId, $courseById) && $currentSemester !== null) {
     $canWriteAttendance = user_can_write_course_attendance($conn, $role, $currentUser, $filterCourseId, (int) $currentSemester['id'], $filterShift !== '' ? $filterShift : null);
 }
 
@@ -399,7 +447,7 @@ foreach ($courses as $c) {
 }
 
 $scopeBanner = match ($role) {
-    'system_admin' => 'Access scope: Full system — all faculties, departments, and courses',
+    'university_rector' => 'Access scope: Full system — view only (oversight)',
     'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only',
     'lecturer' => 'Access scope: Your assigned courses only',
     default => '',
@@ -456,7 +504,7 @@ $scopeBanner = match ($role) {
                     <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/attendance.php" class="row g-2 align-items-end">
                         <div class="col-sm-6 col-md-3">
                             <label class="form-label small mb-1">Faculty</label>
-                            <?php if ($role === 'system_admin'): ?>
+                            <?php if ($role === 'university_rector'): ?>
                                 <select class="form-select form-select-sm" id="facultySelect" onchange="rebuildCourseSelect(this.value, ''); admasFilterCourseSelect(); admasUpdateSemesterOptionsForCourse('');">
                                     <option value="0">All Faculties</option>
                                     <?php foreach ($faculties as $f): ?>
@@ -478,7 +526,7 @@ $scopeBanner = match ($role) {
                                 <option value="">All Departments</option>
                                 <?php foreach ($departmentsForFilter as $d): ?>
                                     <option value="<?= (int) $d['id'] ?>">
-                                        <?= htmlspecialchars(($role === 'system_admin' ? $d['faculty_name'] . ' — ' : '') . $d['name']) ?>
+                                        <?= htmlspecialchars(($role === 'university_rector' ? $d['faculty_name'] . ' — ' : '') . $d['name']) ?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -500,7 +548,7 @@ $scopeBanner = match ($role) {
                                     <?php
                                     $groupedCourses = [];
                                     foreach ($courses as $c) {
-                                        $label = $role === 'system_admin'
+                                        $label = $role === 'university_rector'
                                             ? $c['faculty_name'] . ' — ' . $c['department_name']
                                             : $c['department_name'];
                                         $groupedCourses[$label][] = $c;
@@ -556,12 +604,12 @@ $scopeBanner = match ($role) {
                     <?php if (array_key_exists($filterCourseId, $courseById) && $currentSemester === null): ?>
                         <p class="text-muted small mb-0 mt-2">
                             No current semester is set for <?= htmlspecialchars((string) ($courseById[$filterCourseId]['faculty_name'] ?? '')) ?>.
-                            <?= in_array($role, ['system_admin'], true) ? 'Create one and mark it current on the Semesters page.' : 'Ask an administrator to set one on the Semesters page.' ?>
+                            <?= in_array($role, ['university_rector'], true) ? 'Create one and mark it current on the Semesters page.' : 'Ask an administrator to set one on the Semesters page.' ?>
                         </p>
                     <?php elseif (array_key_exists($filterCourseId, $courseById) && $currentSemester !== null && empty($currentSemesterSessions)): ?>
                         <p class="text-muted small mb-0 mt-2">
                             "<?= htmlspecialchars($currentSemester['name']) ?>" has no Xiiso sessions yet.
-                            <?= in_array($role, ['system_admin'], true) ? 'Generate them on the Semesters page.' : 'Ask an administrator to generate them on the Semesters page.' ?>
+                            <?= in_array($role, ['university_rector'], true) ? 'Generate them on the Semesters page.' : 'Ask an administrator to generate them on the Semesters page.' ?>
                         </p>
                     <?php endif; ?>
                 <?php endif; ?>
@@ -574,8 +622,8 @@ $scopeBanner = match ($role) {
                     <?php else: ?>
                         <?= render_scope_breadcrumb([
                             $courseById[$filterCourseId]['code'],
-                            $courseById[$filterCourseId]['department_name'],
-                            $courseById[$filterCourseId]['faculty_name'],
+                            $breadcrumbDepartmentName,
+                            $breadcrumbFacultyName,
                             $currentSemester['name'] ?? null,
                             $currentSemester['academic_year_label'] ?? null,
                         ]) ?>
@@ -601,6 +649,13 @@ $scopeBanner = match ($role) {
                                 You can view this grid but not edit it — you don't currently have write access to this course for this semester.
                             </div>
                         <?php endif; ?>
+
+                        <div class="mb-3" style="max-width: 360px;">
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text bg-transparent"><i class="bi bi-search"></i></span>
+                                <input type="text" id="rosterSearchInput" class="form-control" placeholder="Search by Student No or Name..." autocomplete="off">
+                            </div>
+                        </div>
 
                         <div class="table-responsive">
                             <table class="table admas-table align-middle" id="xiisoGridTable" data-course-id="<?= (int) $filterCourseId ?>" data-semester-id="<?= (int) $currentSemester['id'] ?>">
@@ -694,6 +749,7 @@ $scopeBanner = match ($role) {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/roster_search.js" defer></script>
     <script>
         window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
@@ -788,7 +844,7 @@ $scopeBanner = match ($role) {
         }
     </script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/attendance_grid.js" defer></script>
-    <?php if ($role === 'system_admin'): ?>
+    <?php if ($role === 'university_rector'): ?>
         <script>
             const courseDataByFaculty = <?= json_encode($courseJsByFaculty, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
             const preselectedCourseId = <?= (int) $filterCourseId ?>;

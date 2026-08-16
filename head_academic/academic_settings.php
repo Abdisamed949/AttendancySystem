@@ -5,7 +5,7 @@
  * per CLAUDE.md §4 "Set Academic Year & minimum attendance threshold".
  * Reads/writes the same `settings` rows as admin/settings.php's "Academic
  * Year Settings" card, but deliberately omits University Information and
- * the default Faculty/Department scope — those stay system_admin-only.
+ * the default Faculty/Department scope — those stay university_rector-only.
  */
 declare(strict_types=1);
 

@@ -1,6 +1,6 @@
 <?php
 /**
- * Settings (System Administrator only) — university info, Academic Year
+ * Settings (University Rector only) — university info, Academic Year
  * management, default Faculty/Department scope, and the minimum attendance
  * threshold the Notifications module already reads.
  */
@@ -11,7 +11,7 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/factory_reset.php';
 require_once __DIR__ . '/../includes/university_logo.php';
 
-require_role(['system_admin']);
+require_role(['university_rector']);
 
 $conn = db();
 $currentUser = current_user();
@@ -391,7 +391,7 @@ foreach ($departments as $d) {
                             (<?= number_format($factoryResetResult['backup_size'] / 1024, 1) ?> KB).
                         </p>
                         <p class="mb-2">
-                            Remaining System Administrator account(s):
+                            Remaining University Rector account(s):
                             <strong><?= htmlspecialchars(implode(', ', $factoryResetResult['remaining_admins'])) ?></strong>
                         </p>
                         <div class="table-responsive">

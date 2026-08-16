@@ -17,7 +17,7 @@ CREATE TABLE roles (
 ) ENGINE=InnoDB;
 
 INSERT INTO roles (name) VALUES
-  ('system_admin'),
+  ('university_rector'),
   ('head_academic'),
   ('registration'),
   ('dean'),
@@ -77,6 +77,79 @@ CREATE TABLE password_resets (
   CONSTRAINT fk_password_resets_user
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   INDEX idx_password_resets_user_code (user_id, code, used)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
+-- 3c. PAIRED DEVICES / QR LOGIN CHALLENGES
+-- ---------------------------------------------------------------------
+-- paired_devices: long-lived record of a phone "paired" to a user account
+-- (created once when the user scans the Profile & Password pairing QR and
+-- taps Confirm). device_token is stored HASHED (sha256) since it's a
+-- 90-day bearer credential functionally equivalent to a password.
+--
+-- qr_login_challenges: short-lived, single-use tokens for both the
+-- pairing flow and the later login-via-QR flow. Every state transition is
+-- an atomic UPDATE ... WHERE status = '<expected>' so a replayed/duplicate
+-- confirm can never succeed twice. challenge_token is stored PLAIN, same
+-- as password_resets.code, since it's already visible on-screen in the QR
+-- image and is single-use + short-lived (3 minutes).
+CREATE TABLE paired_devices (
+  id                  INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  user_id             INT UNSIGNED NOT NULL,
+  device_token_hash   CHAR(64) NOT NULL,
+  device_label        VARCHAR(150) NOT NULL DEFAULT '',
+  user_agent          VARCHAR(255) NULL,
+  paired_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at        DATETIME NULL,
+  revoked_at          DATETIME NULL,
+  CONSTRAINT fk_paired_devices_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_paired_devices_token_hash (device_token_hash),
+  INDEX idx_paired_devices_user_active (user_id, revoked_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE qr_login_challenges (
+  id                     INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  purpose                ENUM('pair','login') NOT NULL,
+  challenge_token        VARCHAR(64) NOT NULL,
+  user_id                INT UNSIGNED NULL,
+  device_id              INT UNSIGNED NULL,
+  status                 ENUM('pending','confirmed','completed','expired','cancelled') NOT NULL DEFAULT 'pending',
+  created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at             DATETIME NOT NULL,
+  confirmed_at           DATETIME NULL,
+  completed_at           DATETIME NULL,
+  requesting_ip          VARCHAR(45) NULL,
+  requesting_user_agent  VARCHAR(255) NULL,
+  confirming_ip          VARCHAR(45) NULL,
+  confirming_user_agent  VARCHAR(255) NULL,
+  CONSTRAINT fk_qr_challenges_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_qr_challenges_device
+    FOREIGN KEY (device_id) REFERENCES paired_devices(id) ON DELETE SET NULL,
+  UNIQUE KEY uq_qr_challenges_token (challenge_token),
+  INDEX idx_qr_challenges_status_expiry (status, expires_at)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
+-- 3d. STAFF MESSAGES (internal chat between staff roles)
+-- ---------------------------------------------------------------------
+-- Simple direct-message thread between two users, used by messages.php —
+-- a WhatsApp-style two-pane chat shared by University Rector / Head of
+-- Academic Affairs / Dean / Lecturer / Registration Office. Students are
+-- not part of this; enforced by messages.php's own require_role(), not
+-- by this table.
+CREATE TABLE messages (
+  id           INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  sender_id    INT UNSIGNED NOT NULL,
+  receiver_id  INT UNSIGNED NOT NULL,
+  body         VARCHAR(2000) NOT NULL,
+  is_read      TINYINT(1) NOT NULL DEFAULT 0,
+  created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_messages_sender FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_messages_receiver FOREIGN KEY (receiver_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_messages_conversation (sender_id, receiver_id, created_at),
+  INDEX idx_messages_receiver_unread (receiver_id, is_read)
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
@@ -216,6 +289,28 @@ CREATE TABLE course_offerings (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
+-- 7c. LECTURER_CHECKINS (Lecturer Check-In / Check-Out)
+-- ---------------------------------------------------------------------
+-- A lecturer's own arrival/departure log, recorded per (course, Xiiso
+-- session) they actually teach — NOT the same thing as `attendance` above
+-- (which records STUDENT presence). One row per session a lecturer checks
+-- into; check_out_at stays NULL until they check out.
+CREATE TABLE lecturer_checkins (
+  id             INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  lecturer_id    INT UNSIGNED NOT NULL,
+  course_id      INT UNSIGNED NOT NULL,
+  session_id     INT UNSIGNED NOT NULL,
+  check_in_at    DATETIME NOT NULL,
+  check_out_at   DATETIME NULL,
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_checkins_lecturer FOREIGN KEY (lecturer_id) REFERENCES lecturers(id) ON DELETE CASCADE,
+  CONSTRAINT fk_checkins_course FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_checkins_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_checkin_once_per_session (lecturer_id, course_id, session_id),
+  INDEX idx_checkins_lecturer_date (lecturer_id, check_in_at)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
 -- 8. STUDENTS
 -- ---------------------------------------------------------------------
 CREATE TABLE students (
@@ -333,7 +428,7 @@ CREATE TABLE role_assignments (
   user_id       INT UNSIGNED NOT NULL,
   role_id       TINYINT UNSIGNED NOT NULL,
   faculty_id    INT UNSIGNED NULL,          -- only used when role = 'dean'
-  assigned_by   INT UNSIGNED NOT NULL,      -- system_admin user who appointed
+  assigned_by   INT UNSIGNED NOT NULL,      -- university_rector user who appointed
   assigned_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_ra_user    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   CONSTRAINT fk_ra_role    FOREIGN KEY (role_id) REFERENCES roles(id),
@@ -347,12 +442,12 @@ CREATE TABLE role_assignments (
 
 INSERT INTO academic_years (label, is_current) VALUES ('2025/2026', 1);
 
--- Default System Administrator
+-- Default University Rector
 -- Password: Admin@2026  (hash generated with PHP password_hash(), PASSWORD_DEFAULT)
 INSERT INTO users (username, password_hash, full_name, email, role_id, status)
 VALUES ('admin01', '$2y$10$VsLCKQeu9sg46LtTjDsAHOdXTRMWWz3tI7pS/a531c5BA5Cbmo1qe', 'Sakariye S. Nuor',
         'admin@admas.edu.so',
-        (SELECT id FROM roles WHERE name = 'system_admin'), 'active');
+        (SELECT id FROM roles WHERE name = 'university_rector'), 'active');
 SET @admin_id = LAST_INSERT_ID();
 
 -- Sample Faculty + Department to start building against

@@ -7,7 +7,10 @@
  * deliberately no standalone sidebar item, since this page is meaningless
  * without a course already picked.
  *
- * System Administrator: any course, any faculty's semester. Dean: may
+ * University Rector and Head of Academic Affairs (per the CLAUDE.md §4
+ * revision granting this role cross-faculty Course Management): any
+ * course, any faculty's semester — head_academic falls through the same
+ * unrestricted branch as university_rector throughout this file. Dean: may
  * VIEW any course's offerings (read-only, schedule-metadata-only —
  * same precedent as lecturer_courses.php), but may only ADD/EDIT/DELETE
  * an offering whose semester belongs to their OWN faculty — never the
@@ -22,10 +25,12 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
+$currentUser = current_user();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -92,6 +97,11 @@ if (!empty($_SESSION['flash_error'])) {
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/course_offerings.php?course_id=' . $courseId);
+    }
 
     if ($action === 'save_offering') {
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
@@ -418,7 +428,7 @@ foreach ($offerings as $o) {
             <?php endif; ?>
 
             <div class="row g-4">
-                <div class="col-lg-7">
+                <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-7' ?>">
                     <div class="admas-card p-4">
                         <h6 class="small text-uppercase text-muted mb-2">Offerings</h6>
                         <div class="table-responsive">
@@ -497,7 +507,9 @@ foreach ($offerings as $o) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-end">
-                                                    <?php if ($role !== 'dean' || (int) $o['offering_faculty_id'] === $deanFacultyId): ?>
+                                                                    <?php if ($isReadOnly): ?>
+                                                        <span class="text-muted small fst-italic">View only</span>
+                                                    <?php elseif ($role !== 'dean' || (int) $o['offering_faculty_id'] === $deanFacultyId): ?>
                                                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>" style="display:inline;"
                                                               onsubmit="return confirm('Remove this offering?');">
                                                             <input type="hidden" name="action" value="delete_offering">
@@ -520,6 +532,7 @@ foreach ($offerings as $o) {
                     </div>
                 </div>
 
+                <?php if (!$isReadOnly): ?>
                 <div class="col-lg-5">
                     <div class="admas-card p-4">
                         <h6 class="small text-uppercase text-muted mb-2">Add / Update Offering</h6>
@@ -606,12 +619,14 @@ foreach ($offerings as $o) {
                         </form>
                     </div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/offering_dates.js"></script>
+    <?php if (!$isReadOnly): ?>
     <script>
         function admasUpdateAcademicYearDisplay() {
             const select = document.getElementById('offeringSemesterSelect');
@@ -683,5 +698,6 @@ foreach ($offerings as $o) {
             admasWireOfferingDateAutoFill('offeringStartDate', 'offeringEndDate');
         });
     </script>
+    <?php endif; ?>
 </body>
 </html>

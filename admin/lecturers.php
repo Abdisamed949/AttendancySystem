@@ -1,6 +1,6 @@
 <?php
 /**
- * Lecturer Management — System Administrator (all faculties) and Dean (own
+ * Lecturer Management — University Rector (all faculties) and Dean (own
  * faculty only, per CLAUDE.md §4). Dean's faculty_id is always read from
  * $_SESSION, never trusted from request input (same pattern used across
  * attendance.php/reports.php/admin/departments.php/admin/courses.php).
@@ -17,11 +17,12 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean']);
+require_role(['university_rector', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -162,6 +163,11 @@ function delete_lecturer_row(mysqli $conn, int $lecturerId, string $role, int $d
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/lecturers.php');
+    }
 
     if ($action === 'create' || $action === 'update') {
         $lecturerId = $action === 'update' ? (int) ($_POST['lecturer_id'] ?? 0) : 0;
@@ -564,10 +570,27 @@ foreach ($lecturerIds as $lid) {
         <div class="page-body">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                <?= $role === 'dean'
-                    ? 'Access scope: ' . htmlspecialchars($deanFacultyName) . ' Faculty only'
-                    : 'Access scope: Full system — all faculties, departments, and lecturers' ?>
+                <?php if ($role === 'dean'): ?>
+                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                <?php elseif ($isReadOnly): ?>
+                    Access scope: Full system — view only (oversight)
+                <?php else: ?>
+                    Access scope: Full system — all faculties, departments, and lecturers
+                <?php endif; ?>
             </div>
+
+            <?php if ($role === 'university_rector'): ?>
+                <div class="export-card">
+                    <div>
+                        <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export Lecturers</p>
+                        <p class="export-card-sub">Download the full, university-wide lecturer list.</p>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=lecturers&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=lecturers&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
@@ -590,33 +613,35 @@ foreach ($lecturerIds as $lid) {
             <?php endif; ?>
 
             <div class="row g-3">
-                <div class="col-lg-8">
+                <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-8' ?>">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Lecturers</h6>
                             <div class="d-flex gap-2">
-                                <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
-                                <?php if ($role === 'system_admin'): ?>
+                                <?php if (!$isReadOnly): ?>
+                                    <button type="button" id="bulkDeleteLecturersBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                        <i class="bi bi-plus-lg"></i> Add Lecturer
+                                    </a>
                                 <?php endif; ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                    <i class="bi bi-plus-lg"></i> Add Lecturer
-                                </a>
                             </div>
                         </div>
 
+                        <?php if (!$isReadOnly): ?>
                         <form id="bulkDeleteLecturersForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" class="d-none">
                             <input type="hidden" name="action" value="bulk_delete">
                             <div id="bulkDeleteLecturersIds"></div>
                         </form>
+                        <?php endif; ?>
 
                         <div class="table-responsive">
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
-                                        <th><input type="checkbox" id="selectAllLecturers"></th>
+                                        <?php if (!$isReadOnly): ?><th><input type="checkbox" id="selectAllLecturers"></th><?php endif; ?>
                                         <th>Staff No</th>
                                         <th>Full Name</th>
                                         <th>Department</th>
@@ -636,10 +661,12 @@ foreach ($lecturerIds as $lid) {
                                     <?php else: ?>
                                         <?php foreach ($lecturers as $l): ?>
                                             <tr>
+                                                <?php if (!$isReadOnly): ?>
                                                 <td>
                                                     <input type="checkbox" class="row-check-lecturer" value="<?= (int) $l['id'] ?>"
                                                            data-label="<?= htmlspecialchars($l['full_name'] . ' (' . $l['staff_no'] . ')') ?>">
                                                 </td>
+                                                <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
                                                 <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($l['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
@@ -661,6 +688,11 @@ foreach ($lecturerIds as $lid) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
+                                                    <?php if ($isReadOnly): ?>
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturer_view.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon-label text-sky" title="View Profile">
+                                                            <i class="bi bi-eye"></i> View Profile
+                                                        </a>
+                                                    <?php else: ?>
                                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon" title="Assign Courses">
                                                         <i class="bi bi-journal-plus"></i>
                                                     </a>
@@ -683,6 +715,7 @@ foreach ($lecturerIds as $lid) {
                                                             <i class="bi bi-trash"></i>
                                                         </button>
                                                     </form>
+                                                    <?php endif; ?>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -693,6 +726,7 @@ foreach ($lecturerIds as $lid) {
                     </div>
                 </div>
 
+                <?php if (!$isReadOnly): ?>
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
                         <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
@@ -757,6 +791,7 @@ foreach ($lecturerIds as $lid) {
                         </form>
                     </div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -765,16 +800,18 @@ foreach ($lecturerIds as $lid) {
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
-            admasInitBulkDelete({
-                checkboxSelector: '.row-check-lecturer',
-                selectAllSelector: '#selectAllLecturers',
-                buttonSelector: '#bulkDeleteLecturersBtn',
-                formSelector: '#bulkDeleteLecturersForm',
-                hiddenContainerSelector: '#bulkDeleteLecturersIds',
-                hiddenInputName: 'lecturer_ids[]',
-                entityLabel: 'lecturer',
-                entityLabelPlural: 'lecturers',
-            });
+            if (document.getElementById('bulkDeleteLecturersBtn')) {
+                admasInitBulkDelete({
+                    checkboxSelector: '.row-check-lecturer',
+                    selectAllSelector: '#selectAllLecturers',
+                    buttonSelector: '#bulkDeleteLecturersBtn',
+                    formSelector: '#bulkDeleteLecturersForm',
+                    hiddenContainerSelector: '#bulkDeleteLecturersIds',
+                    hiddenInputName: 'lecturer_ids[]',
+                    entityLabel: 'lecturer',
+                    entityLabelPlural: 'lecturers',
+                });
+            }
         });
     </script>
 </body>

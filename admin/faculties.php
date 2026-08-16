@@ -1,16 +1,22 @@
 <?php
 /**
- * Faculty Management (System Administrator only).
+ * Faculty Management — University Rector (view-only, supervisory) and Head
+ * of Academic Affairs (full CRUD, university-wide — the same create/edit/
+ * delete power University Rector had here before that role was converted to
+ * view-only).
  */
 declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 
-require_role(['system_admin']);
+require_role(['university_rector', 'head_academic']);
 
 $conn = db();
 $currentUser = current_user();
+// University Rector is a supervisory/oversight role (view-only) on this
+// page; Head of Academic Affairs gets full CRUD.
+$isReadOnly = (current_role() === 'university_rector');
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -60,6 +66,11 @@ $reopenTotalSemesters = 8;
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/faculties.php');
+    }
 
     if ($action === 'create' || $action === 'update') {
         $facultyId = $action === 'update' ? (int) ($_POST['faculty_id'] ?? 0) : 0;
@@ -253,7 +264,11 @@ $listStmt->close();
         <div class="page-body">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                Access scope: Full system — all faculties, departments, and courses
+                <?php if ($isReadOnly): ?>
+                    Access scope: Full system — view only (oversight)
+                <?php else: ?>
+                    Access scope: Full system — all faculties
+                <?php endif; ?>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -296,10 +311,12 @@ $listStmt->close();
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Faculties</h6>
+                    <?php if (!$isReadOnly): ?>
                     <button type="button" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"
                             onclick='openFacultyModal("create", 0, "", 0, 3, 8)'>
                         <i class="bi bi-plus-lg"></i> Add Faculty
                     </button>
+                    <?php endif; ?>
                 </div>
 
                 <div class="table-responsive">
@@ -336,6 +353,9 @@ $listStmt->close();
                                         <td><?= (int) $f['dept_count'] ?></td>
                                         <td><?= number_format((int) $f['student_count']) ?></td>
                                         <td>
+                                            <?php if ($isReadOnly): ?>
+                                                <span class="text-muted">&mdash;</span>
+                                            <?php else: ?>
                                             <button type="button" class="btn-icon" title="Edit"
                                                     onclick='openFacultyModal("edit", <?= (int) $f['id'] ?>, <?= json_encode($f['name'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= (int) ($f['dean_id'] ?? 0) ?>, <?= (int) $f['semesters_per_year'] ?>, <?= (int) $f['total_semesters'] ?>)'>
                                                 <i class="bi bi-pencil"></i>
@@ -348,6 +368,7 @@ $listStmt->close();
                                                     <i class="bi bi-trash"></i>
                                                 </button>
                                             </form>
+                                            <?php endif; ?>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -360,6 +381,7 @@ $listStmt->close();
     </div>
 
     <!-- Add / Edit Faculty modal (shared) -->
+    <?php if (!$isReadOnly): ?>
     <div class="modal fade" id="facultyModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content" style="border-radius: 14px;">
@@ -410,8 +432,10 @@ $listStmt->close();
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <?php if (!$isReadOnly): ?>
     <script>
         function openFacultyModal(mode, facultyId, name, deanId, semestersPerYear, totalSemesters) {
             document.getElementById('facultyModalLabel').textContent = mode === 'edit' ? 'Edit Faculty' : 'Add Faculty';
@@ -446,5 +470,6 @@ $listStmt->close();
         });
         <?php endif; ?>
     </script>
+    <?php endif; ?>
 </body>
 </html>

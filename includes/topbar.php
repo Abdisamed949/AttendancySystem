@@ -23,7 +23,7 @@ $roleLabel = role_label(current_role());
 
 // ---------------------------------------------------------------------
 // Unread notifications bell — scoped the same way as notifications.php:
-// system_admin/head_academic see the system-wide unread count, dean sees
+// university_rector/head_academic see the system-wide unread count, dean sees
 // only their own faculty's, and a student sees only their own alerts.
 // Other roles (registration, lecturer) have no notifications feature yet,
 // so the bell renders as a plain non-navigating icon for them.
@@ -33,7 +33,7 @@ $notifLinkUrl = null;
 $topbarRole = current_role();
 $topbarConn = db();
 
-if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
+if ($topbarRole === 'university_rector' || $topbarRole === 'head_academic') {
     $countResult = $topbarConn->query('SELECT COUNT(*) AS c FROM notifications WHERE is_read = 0');
     $notifBadgeCount = (int) (($countResult ? $countResult->fetch_assoc() : null)['c'] ?? 0);
     $notifLinkUrl = BASE_URL . '/notifications.php';
@@ -64,6 +64,7 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
     $notifLinkUrl = BASE_URL . '/student/notifications.php';
 }
 ?>
+<div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 <div class="header-sticky">
 <div class="top-strip">
     <div class="top-strip-left">
@@ -80,6 +81,9 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
     </div>
 </div>
 <div class="topbar">
+    <button type="button" id="sidebarToggleBtn" class="sidebar-toggle-btn" aria-label="Open menu" aria-controls="sidebarNav">
+        <i class="bi bi-list"></i>
+    </button>
     <div class="topbar-search">
         <i class="bi bi-search"></i>
         <input type="text" placeholder="Search...">
@@ -118,3 +122,4 @@ if ($topbarRole === 'system_admin' || $topbarRole === 'head_academic') {
 </div>
 </div>
 <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/theme_toggle.js"></script>
+<script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/sidebar_toggle.js"></script>

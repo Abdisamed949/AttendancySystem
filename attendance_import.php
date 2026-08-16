@@ -29,7 +29,10 @@ require_once __DIR__ . '/includes/attendance_helpers.php';
 require_once __DIR__ . '/includes/lecturer_accounts.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
-require_role(['system_admin', 'dean', 'lecturer']);
+// university_rector converted from full-CRUD to view-only oversight; bulk
+// attendance import has no meaningful "view" mode, so access is removed
+// for this role — dean/lecturer are unaffected.
+require_role(['dean', 'lecturer']);
 
 use PhpOffice\PhpSpreadsheet\Reader\Csv;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;
@@ -79,7 +82,7 @@ if ($settingsResult) {
 
 // ---------------------------------------------------------------------
 // Role scope + course list — identical query shapes to attendance.php for
-// system_admin/dean, so "which courses can this user import into" can
+// university_rector/dean, so "which courses can this user import into" can
 // never drift from "which courses can this user mark attendance for".
 // The lecturer branch deliberately differs from attendance.php: this page
 // is for historical backfill, so it lists every course the lecturer has
@@ -113,7 +116,7 @@ if ($role === 'lecturer') {
 }
 
 $courses = [];
-if ($role === 'system_admin') {
+if ($role === 'university_rector') {
     $courses = $conn->query(
         "SELECT c.id, c.code, c.name, c.department_id,
                 d.name AS department_name, d.faculty_id, f.name AS faculty_name
@@ -622,7 +625,7 @@ $previewCourse = $previewCourseId > 0 ? ($courseById[$previewCourseId] ?? null) 
                                     <?php
                                     $coursesByDept = [];
                                     foreach ($courses as $c) {
-                                        $deptLabel = $role === 'system_admin'
+                                        $deptLabel = $role === 'university_rector'
                                             ? $c['department_name'] . ' — ' . $c['faculty_name']
                                             : $c['department_name'];
                                         $coursesByDept[$deptLabel][] = $c;

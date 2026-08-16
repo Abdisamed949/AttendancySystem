@@ -225,6 +225,12 @@ if ($currentSemesterId > 0) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        .dash-chart-box {
+            position: relative;
+            height: 160px;
+        }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -349,25 +355,32 @@ if ($currentSemesterId > 0) {
                 </div>
             </div>
 
-            <!-- Charts -->
+            <!-- Charts — fixed-height boxes (see .dash-chart-box) paired
+                 with Chart.js's maintainAspectRatio: false, so both charts
+                 stay compact and fit alongside everything above without
+                 the page needing to scroll, per explicit request. -->
             <div class="row g-3 mt-0">
                 <div class="col-xl-8">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Semester</h6>
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Semester</h6>
                         <?php if (empty($semesterChartLabels)): ?>
                             <p class="text-muted small mb-0">No Xiiso attendance recorded yet for any semester in this faculty.</p>
                         <?php else: ?>
-                            <canvas id="semesterBarChart" height="130"></canvas>
+                            <div class="dash-chart-box">
+                                <canvas id="semesterBarChart"></canvas>
+                            </div>
                         <?php endif; ?>
                     </div>
                 </div>
                 <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Department</h6>
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Department</h6>
                         <?php if (empty($deptChartLabels)): ?>
                             <p class="text-muted small mb-0">No current-semester attendance data yet.</p>
                         <?php else: ?>
-                            <canvas id="deptPieChart" height="220"></canvas>
+                            <div class="dash-chart-box">
+                                <canvas id="deptPieChart"></canvas>
+                            </div>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -403,6 +416,7 @@ if ($currentSemesterId > 0) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
                     x: { ticks: { color: chartTextMuted }, grid: { display: false } },
@@ -432,6 +446,7 @@ if ($currentSemesterId > 0) {
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
                     tooltip: { callbacks: { label: (item) => `${item.label}: ${item.formattedValue}%` } },

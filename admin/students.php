@@ -1,6 +1,6 @@
 <?php
 /**
- * Student Management — System Administrator and Registration Office (both
+ * Student Management — University Rector and Registration Office (both
  * university-wide / "All faculties") and Dean (own faculty only, per
  * CLAUDE.md §4 "Full CRUD on ... Students within their faculty"). Dean's
  * faculty_id is always read from $_SESSION, never trusted from request
@@ -17,11 +17,21 @@ require_once __DIR__ . '/../includes/lecturer_accounts.php';
 // students" per CLAUDE.md §4 — its scope is already university-wide
 // ("All faculties"), matching this page's existing unscoped queries
 // exactly, so no additional query changes are needed for that role.
-require_role(['system_admin', 'registration', 'dean']);
+// Head of Academic Affairs gets the exact same read-only "View Students
+// information" access as University Rector (requested alongside the
+// University Rector UI polish work) — full university-wide VIEW, no
+// create/edit/delete.
+require_role(['university_rector', 'head_academic', 'registration', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
+// University Rector + Head of Academic Affairs: full VIEW access to this
+// page (all faculties/students), but no create/edit/delete/import/
+// bulk-delete — supervisory/oversight role only. Enforced both by hiding
+// write UI below and by a single dispatch guard at the top of the POST
+// handler further down.
+$isReadOnly = in_array($role, ['university_rector', 'head_academic'], true);
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -168,6 +178,11 @@ function delete_student_row(mysqli $conn, int $studentId, string $role, int $dea
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/students.php');
+    }
 
     if ($action === 'create' || $action === 'update') {
         $studentId = $action === 'update' ? (int) ($_POST['student_id'] ?? 0) : 0;
@@ -673,10 +688,25 @@ $studentsStmt->close();
                     Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
                 <?php elseif ($role === 'registration'): ?>
                     Access scope: All faculties — enrollment-focused
+                <?php elseif ($isReadOnly): ?>
+                    Access scope: Full system — view only (oversight)<?= $role === 'head_academic' ? ' — Head of Academic Affairs' : '' ?>
                 <?php else: ?>
                     Access scope: Full system — all faculties, departments, and students
                 <?php endif; ?>
             </div>
+
+            <?php if ($role === 'university_rector'): ?>
+                <div class="export-card">
+                    <div>
+                        <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export Students</p>
+                        <p class="export-card-sub">Download the full, university-wide student list.</p>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
@@ -699,27 +729,31 @@ $studentsStmt->close();
             <?php endif; ?>
 
             <div class="row g-3">
-                <div class="col-lg-8">
+                <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-8' ?>">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Students</h6>
                             <div class="d-flex gap-2">
-                                <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
-                                <?php if ($role !== 'dean'): ?>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                        <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
+                                <?php if (!$isReadOnly): ?>
+                                    <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
+                                    <?php if ($role !== 'dean'): ?>
+                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                            <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
+                                        </a>
+                                    <?php endif; ?>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                        <i class="bi bi-plus-lg"></i> Add Student
                                     </a>
                                 <?php endif; ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                    <i class="bi bi-plus-lg"></i> Add Student
-                                </a>
                             </div>
                         </div>
 
+                        <?php if (!$isReadOnly): ?>
                         <form id="bulkDeleteStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="d-none">
                             <input type="hidden" name="action" value="bulk_delete">
                             <div id="bulkDeleteStudentsIds"></div>
                         </form>
+                        <?php endif; ?>
 
                         <!-- Filter bar: real SQL WHERE filters via GET -->
                         <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="row g-2 mb-3" id="studentsFilterForm">
@@ -787,7 +821,7 @@ $studentsStmt->close();
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
-                                        <th><input type="checkbox" id="selectAllStudents"></th>
+                                        <?php if (!$isReadOnly): ?><th><input type="checkbox" id="selectAllStudents"></th><?php endif; ?>
                                         <th>Student No</th>
                                         <th>Full Name</th>
                                         <th>Academic Year</th>
@@ -807,10 +841,12 @@ $studentsStmt->close();
                                     <?php else: ?>
                                         <?php foreach ($students as $s): ?>
                                             <tr>
+                                                <?php if (!$isReadOnly): ?>
                                                 <td>
                                                     <input type="checkbox" class="row-check-student" value="<?= (int) $s['id'] ?>"
                                                            data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
                                                 </td>
+                                                <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
                                                 <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
                                                 <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
@@ -832,6 +868,11 @@ $studentsStmt->close();
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
+                                                    <?php if ($isReadOnly): ?>
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/student_view.php?student_id=<?= (int) $s['id'] ?>" class="btn-icon-label text-sky" title="View Profile">
+                                                            <i class="bi bi-eye"></i> View Profile
+                                                        </a>
+                                                    <?php else: ?>
                                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php?edit=<?= (int) $s['id'] ?>" class="btn-icon" title="Edit">
                                                         <i class="bi bi-pencil"></i>
                                                     </a>
@@ -851,6 +892,7 @@ $studentsStmt->close();
                                                             <i class="bi bi-trash"></i>
                                                         </button>
                                                     </form>
+                                                    <?php endif; ?>
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
@@ -861,6 +903,7 @@ $studentsStmt->close();
                     </div>
                 </div>
 
+                <?php if (!$isReadOnly): ?>
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
                         <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
@@ -979,6 +1022,7 @@ $studentsStmt->close();
                         </form>
                     </div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -1081,22 +1125,27 @@ $studentsStmt->close();
             updateFilterDepartmentOptions(filterFacultyId, <?= (int) $filterDepartmentId ?>);
             updateFilterSemesterOptions(filterFacultyId, <?= (int) $filterSemesterId ?>);
 
-            const formFacultyId = document.getElementById('studentFacultySelect').value;
-            updateFormDepartmentOptions(formFacultyId, <?= (int) $formValues['department_id'] ?>);
-            updateFormSemesterOptions(formFacultyId, <?= (int) $formValues['semester_id'] ?>);
+            const studentFacultySelectEl = document.getElementById('studentFacultySelect');
+            if (studentFacultySelectEl) {
+                const formFacultyId = studentFacultySelectEl.value;
+                updateFormDepartmentOptions(formFacultyId, <?= (int) $formValues['department_id'] ?>);
+                updateFormSemesterOptions(formFacultyId, <?= (int) $formValues['semester_id'] ?>);
+            }
 
             admasInitLiveFilter('#studentsFilterForm');
 
-            admasInitBulkDelete({
-                checkboxSelector: '.row-check-student',
-                selectAllSelector: '#selectAllStudents',
-                buttonSelector: '#bulkDeleteStudentsBtn',
-                formSelector: '#bulkDeleteStudentsForm',
-                hiddenContainerSelector: '#bulkDeleteStudentsIds',
-                hiddenInputName: 'student_ids[]',
-                entityLabel: 'student',
-                entityLabelPlural: 'students',
-            });
+            if (document.getElementById('bulkDeleteStudentsBtn')) {
+                admasInitBulkDelete({
+                    checkboxSelector: '.row-check-student',
+                    selectAllSelector: '#selectAllStudents',
+                    buttonSelector: '#bulkDeleteStudentsBtn',
+                    formSelector: '#bulkDeleteStudentsForm',
+                    hiddenContainerSelector: '#bulkDeleteStudentsIds',
+                    hiddenInputName: 'student_ids[]',
+                    entityLabel: 'student',
+                    entityLabelPlural: 'students',
+                });
+            }
         });
     </script>
 </body>

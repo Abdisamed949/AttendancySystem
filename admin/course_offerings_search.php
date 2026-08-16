@@ -20,10 +20,11 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -103,9 +104,13 @@ $coursesStmt->close();
                 <i class="bi bi-shield-check"></i>
                 <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="text-decoration-none">&larr; Back to Courses</a>
                 &nbsp;&middot;&nbsp;
-                <?= $role === 'dean'
-                    ? 'Browsing every faculty\'s catalog (read-only) — you may only create an offering inside ' . htmlspecialchars($deanFacultyName) . ' Faculty\'s own semester'
-                    : 'Browsing every faculty\'s catalog — you may create an offering inside any faculty\'s semester' ?>
+                <?php if ($role === 'dean'): ?>
+                    Browsing every faculty's catalog (read-only) — you may only create an offering inside <?= htmlspecialchars($deanFacultyName) ?> Faculty's own semester
+                <?php elseif ($isReadOnly): ?>
+                    Browsing every faculty's catalog — view only (oversight)
+                <?php else: ?>
+                    Browsing every faculty's catalog — you may create an offering inside any faculty's semester
+                <?php endif; ?>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -159,10 +164,10 @@ $coursesStmt->close();
                                         <td><?= (int) $c['credit_hours'] ?></td>
                                         <td class="text-end">
                                             <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-signpost-2"></i> Add Offering
+                                                <i class="bi bi-signpost-2"></i> <?= $isReadOnly ? 'View Offerings' : 'Add Offering' ?>
                                             </a>
                                             <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-person-check"></i> Enroll Students
+                                                <i class="bi bi-person-check"></i> <?= $isReadOnly ? 'View Enrollment' : 'Enroll Students' ?>
                                             </a>
                                         </td>
                                     </tr>

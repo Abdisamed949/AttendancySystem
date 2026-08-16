@@ -10,7 +10,7 @@
  * head_academic/lecturers.php — no standalone sidebar item, same pattern
  * as admin/course_offerings.php.
  *
- * Shared by System Administrator, Head of Academic Affairs (both: any
+ * Shared by University Rector, Head of Academic Affairs (both: any
  * lecturer, any faculty), and Dean (own faculty only for adding/removing
  * an assignment — a Dean CAN see a lecturer's full cross-faculty teaching
  * list read-only, since that's just schedule metadata, not another
@@ -23,7 +23,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean', 'head_academic']);
+require_role(['university_rector', 'dean', 'head_academic']);
 
 $conn = db();
 $role = current_role();
@@ -75,7 +75,7 @@ if (!$lecturer) {
 
 /**
  * True if $facultyId is one this role may create/delete an offering in —
- * system_admin and head_academic may touch any faculty; dean only their
+ * university_rector and head_academic may touch any faculty; dean only their
  * own. Used to gate both POST actions below.
  */
 function role_may_edit_faculty(string $role, int $deanFacultyId, int $facultyId): bool

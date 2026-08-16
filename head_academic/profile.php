@@ -9,12 +9,22 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/profile_photo.php';
+require_once __DIR__ . '/../includes/device_helpers.php';
 
 require_role(['head_academic']);
 
 $conn = db();
 $currentUser = current_user();
 $currentUserId = (int) $currentUser['id'];
+
+$linkedDevicesStmt = $conn->prepare(
+    'SELECT id, device_label, paired_at, last_used_at FROM paired_devices
+     WHERE user_id = ? AND revoked_at IS NULL ORDER BY paired_at DESC'
+);
+$linkedDevicesStmt->bind_param('i', $currentUserId);
+$linkedDevicesStmt->execute();
+$linkedDevices = $linkedDevicesStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$linkedDevicesStmt->close();
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -353,11 +363,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 </div>
             </div>
+
+            <!-- Link Your Phone (QR Login) -->
+            <div class="admas-card p-4 mt-3">
+                <h6 class="fw-bold mb-1" style="color: var(--admas-text);"><i class="bi bi-qr-code"></i> Link Your Phone (QR Login)</h6>
+                <p class="text-muted small mb-3">Scan this code with your phone to link it. Afterwards you can log in on any browser by scanning a QR code with your linked phone — no password needed.</p>
+                <div class="row g-4">
+                    <div class="col-md-5 text-center">
+                        <img id="qrPairImage" alt="Pairing QR code" style="width: 180px; height: 180px; display: none;" class="border rounded p-2 mb-2">
+                        <div id="qrPairLoading" class="text-muted small">&nbsp;</div>
+                        <div id="qrPairStatus" class="small fw-semibold"></div>
+                        <button type="button" id="qrPairRefreshBtn" class="btn btn-sm btn-outline-secondary mt-2 d-none">Generate New Code</button>
+                    </div>
+                    <div class="col-md-7">
+                        <h6 class="fw-bold mb-2" style="color: var(--admas-text);">Linked Devices</h6>
+                        <?php if (empty($linkedDevices)): ?>
+                            <p class="text-muted small">No phones linked yet.</p>
+                        <?php else: ?>
+                            <div class="table-responsive">
+                                <table class="table table-sm admas-table">
+                                    <thead>
+                                        <tr><th>Device</th><th>Linked</th><th>Last Used</th><th></th></tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($linkedDevices as $d): ?>
+                                            <tr>
+                                                <td><?= htmlspecialchars($d['device_label'] ?: 'Unknown device') ?></td>
+                                                <td><?= htmlspecialchars(date('M j, Y', strtotime((string) $d['paired_at']))) ?></td>
+                                                <td><?= $d['last_used_at'] ? htmlspecialchars(date('M j, Y', strtotime((string) $d['last_used_at']))) : 'Never' ?></td>
+                                                <td>
+                                                    <button type="button" class="btn btn-sm btn-outline-danger qr-revoke-btn" data-device-id="<?= (int) $d['id'] ?>">
+                                                        <i class="bi bi-x-circle"></i> Revoke
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;</script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/password-toggle.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/profile_photo.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/qr_pair.js"></script>
 </body>
 </html>

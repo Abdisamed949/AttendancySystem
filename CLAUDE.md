@@ -61,8 +61,8 @@ Six roles, ranked by scope (widest to narrowest):
 
 | Role | Scope | Can do | Cannot do |
 |---|---|---|---|
-| **System Administrator** | Whole system | Full technical control: all CRUD, User Management, role appointment, system Settings, Notification thresholds, backups (incl. Settings → Danger Zone factory reset for handover, with an automatic pre-wipe `mysqldump` backup) | — |
-| **Head of Academic Affairs** | All faculties | Set Academic Year & minimum attendance threshold; **set Semesters per Year per faculty**; view cross-faculty reports; **register new Lecturer accounts** | Cannot manage students, delete accounts, or edit system Settings |
+| **University Rector** | Whole system, supervisory/oversight | Full **read-only VIEW** access everywhere (Students, Lecturers, Courses/Offerings/Enrollments, Departments, Faculties, Attendance grids, Semesters/Xiiso, Academic Years — including per-student and per-lecturer detail drill-down pages); plus full **CRUD** on User Management and Settings only (role appointment, Notification thresholds, backups, incl. Settings → Danger Zone factory reset for handover, with an automatic pre-wipe `mysqldump` backup) | **Cannot create/edit/delete/import/bulk-act on** any day-to-day academic-data page (Students, Lecturers, Courses, Course Offerings, Course Enrollments, Departments, Faculties, Attendance marking, Semesters/Xiiso sessions, Academic Years) — enforced server-side on every write action, not just hidden buttons; retains full CRUD only on User Management and Settings |
+| **Head of Academic Affairs** | All faculties | Set Academic Year & minimum attendance threshold; **set Semesters per Year per faculty**; view cross-faculty reports; **register new Lecturer accounts**; **cross-faculty Course Management, full scope — Add/Edit/Delete Courses, Manage Offerings, cross-list via Course Search, Enroll/Remove Students on a course roster (`admin/course_enrollments.php`), all faculties, no bulk Excel import**; **User Management (reset password, activate/deactivate) over every Dean/Head of Academic Affairs/Registration Office/Lecturer/Student account, university-wide**; **Assign Role — appoint an existing Lecturer/Student (or create a new user) as Dean or Registration Office only**; **View Students information — the same read-only, university-wide student directory + per-student drill-down (`admin/student_view.php`) granted to University Rector, view-only, no create/edit/delete** | Cannot manage student **profile** records (`admin/students.php` — creating/editing a student's own record stays Registration Office/Dean only; course-roster enrollment is a distinct action, granted above), **cannot manage University Rector accounts** ("except top management" — enforced server-side on every action, not just hidden from the list), **cannot appoint University Rector or (more) Head of Academic Affairs accounts** — University Rector remains the project's one overall root authority and the only role that can appoint into Head of Academic Affairs itself, no bulk Course Excel import, delete accounts, or edit system Settings |
 | **Registration Office** | All faculties | Add/edit students, bulk Excel import of students, enrollment reports | No access to Attendance or Settings |
 | **Dean** | **Own faculty only** | Full CRUD on Departments, Courses, Lecturers, Students, Attendance *within their faculty*; faculty-scoped reports | Cannot view/edit other faculties, no system Settings, no User Management |
 | **Lecturer** | Own assigned courses only | Take attendance, view "My Courses" (filtered by Academic Year + Faculty + Department to disambiguate duplicate course codes across faculties), class reports | Cannot see other lecturers' courses or student management screens |
@@ -71,7 +71,7 @@ Six roles, ranked by scope (widest to narrowest):
 Every role also has a **"Profile & Password"** screen to edit their own details and
 change their password.
 
-The **System Administrator** appoints users into the Dean / Head of Academic Affairs /
+The **University Rector** appoints users into the Dean / Head of Academic Affairs /
 Registration Office roles from **User Management**; when appointing a Dean, the
 Admin must also select which single Faculty that Dean will oversee.
 
@@ -125,7 +125,7 @@ shift is stored or selected.
 
 ```
 users            (id, username, password_hash, full_name, email, role, status, last_login)
-roles            (id, name)  -- system_admin, head_academic, registration, dean, lecturer, student
+roles            (id, name)  -- university_rector, head_academic, registration, dean, lecturer, student
 faculties        (id, name, dean_user_id NULL)
 departments      (id, name, code, faculty_id)
 academic_years   (id, label, is_current)
@@ -4407,6 +4407,266 @@ data/configuration task for the university admin, not further code work.
         repository, and do not overwrite it with placeholder values again
         without the user's explicit request.
 
+### Bug Fix: Xiiso Attendance Grid Report Leaked Other Faculties' Semesters to Dean
+- [x] User reported (with a screenshot of `reports.php`'s Xiiso Attendance
+      Grid report as a real Dean scoped to Informatics) that the Semester
+      dropdown listed semesters belonging to other faculties too, not just
+      their own — despite the page's own "Access scope: Informatics Faculty
+      only" banner.
+      - **Root cause**: `$xiisoSemesters` (feeding that dropdown) was built
+        as a deliberately unscoped, every-faculty query — correct in intent
+        for `system_admin`/`head_academic`/`lecturer` (documented in its own
+        comment: the Xiiso grid is a historical reporting surface, so those
+        roles can pull a past semester's grid for any course), but the
+        `dean`-only filter that the *adjacent* `$reportSemesters` variable
+        (feeding the other 3 report types' Semester dropdown, just above
+        this one in the file) already had was never applied here — a plain
+        oversight, not an intentional cross-faculty allowance for Dean.
+      - **Fix**: added the same `if ($role === 'dean') { array_filter(...) }`
+        restriction already used on `$reportSemesters`, applied to
+        `$xiisoSemesters` too. Confirmed this can't hide a legitimate
+        cross-faculty-cross-listed course's own offering for a Dean: a
+        Dean's write access into a cross-listed course is always through an
+        offering under their *own* faculty's semester (per the Multi-Faculty
+        Course Offerings work), so a Dean's real offerings always belong to
+        a semester already inside this filtered list.
+      - **Verified live** with a temporary Dean account scoped to
+        Informatics (faculty id 3): confirmed the Semester dropdown on
+        `reports.php?report_type=xiiso_grid` now lists exactly Informatics's
+        5 semesters and nothing from any other faculty. Temporary account
+        deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### reports.php: Shift Filter Added to Xiiso Attendance Grid Report
+- [x] While reviewing the fix above, the user pointed out (with a screenshot
+      of a real multi-shift course, "CL — calculus", showing "Afternoon
+      Shift: Abdirahman Mohamed" in the breadcrumb) that the Xiiso Attendance
+      Grid report's filter bar had no Shift control at all — confirmed via
+      `git log`/`git show` this was never present in any prior commit either
+      (not something removed this session), but a real, genuine gap once the
+      Multi-Shift Course Offerings feature made it possible for one course to
+      have different rosters/lecturers per shift within the same semester.
+      `attendance.php`'s own Grid View already had this exact control; the
+      Xiiso Grid *report* on `reports.php` never got the equivalent, even
+      though `get_xiiso_grid_data()` (the shared helper both pages call) has
+      accepted an optional `?string $shift` parameter since that feature
+      shipped — `reports.php`'s own call site just never passed it.
+      - Added the same `SHIFT_LABELS` (morning/afternoon/weekend) local
+        constant and optional `xiiso_shift` GET param/dropdown already used
+        by `attendance.php`, wired through
+        `build_xiiso_grid_report($conn, $courseId, $semesterId, ?$shift)`
+        (new 4th param, passed straight to `get_xiiso_grid_data()`) and into
+        `get_offering_summary($conn, $courseId, $semesterId, ?$shift)` so the
+        breadcrumb's "Lecturer" line also resolves to the shift-specific
+        offering instead of always showing the "best match" summary line.
+        Added "Shift: {label}" to `$reportMetaLine` (on-screen title +
+        PDF/Excel exports) when a shift is selected, and `xiiso_shift` to
+        `$currentQuery` so it round-trips through Export Excel/PDF links.
+        JS `toggleReportFilters()` shows/hides the new dropdown the same way
+        as the existing Xiiso-only fields.
+      - **Verified live** with a temporary Dean account (Informatics): with
+        no shift selected, the real "CL — calculus" course (36 enrolled
+        students, all Afternoon shift) rendered all 36 rows and "Lecturer:
+        Afternoon Shift: Abdirahman Mohamed"; selecting **Afternoon**
+        rendered the identical 36 rows and same lecturer line; selecting
+        **Morning** correctly rendered zero rows ("No data for the selected
+        filters") and "Lecturer: Unassigned" (no Morning offering exists for
+        this course) — confirming the shift filter, roster query, and
+        offering-summary resolution all agree with each other. Temporary
+        account deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### QR Code Login / Device Pairing (all 6 roles)
+- [x] New WhatsApp-Web-style feature: from an already-logged-in Profile &
+      Password page, a QR code lets a user "pair" their phone (scan + tap
+      Confirm, no password re-entry — the fact that the phone can see a QR
+      shown on an already-authenticated screen is itself the proof).
+      Afterwards, from the Login page on any browser/device, a QR code is
+      shown; scanning it with the already-paired phone logs that browser
+      in automatically, with no username/password typed at all. Planned
+      via Plan Mode (2 parallel Explore agents covering auth/session
+      internals and profile-page/network config, then a Plan agent
+      validating the design against real conventions) plus
+      `AskUserQuestion` to confirm 4 design forks with the user before
+      building: real-phone testing (not just curl simulation), a "Linked
+      Devices" management/revoke UI, server-side PHP QR generation via a
+      new composer package, and no re-login required on the phone during
+      pairing (scan + tap is sufficient trust).
+      - **Schema** (`migrations/2026_08_qr_device_pairing.sql`, mirrored
+        into `admas_attendance_schema.sql` right after `password_resets`,
+        `mysqldump` backup taken first): two new tables. `paired_devices`
+        — long-lived record of a phone paired to a user account;
+        `device_token_hash` is a **sha256 hash** of the raw 256-bit
+        cookie secret (not plain — it's a 90-day bearer credential
+        functionally equivalent to a password; a fast hash is correct
+        here since the token itself is already unbrute-forceable, unlike
+        a password needing bcrypt's slowness), `revoked_at` soft-deletes
+        for audit. `qr_login_challenges` — short-lived (3-minute), single-
+        use tokens for both the pairing and login flows; `challenge_token`
+        stays **plain** (same convention as `password_resets.code`,
+        since it's already visible on-screen in the QR image and is
+        single-use); a 5-state `status` enum
+        (`pending`/`confirmed`/`completed`/`expired`/`cancelled`) — the
+        extra `completed` state beyond `confirmed` exists specifically so
+        the *login* flow's desktop-side session-establishment step can
+        never run twice on the same token (see replay-safety below).
+      - **QR generation**: added `chillerlan/php-qrcode` (v6, GD-based,
+        `ext-gd` already enabled from the PhpSpreadsheet work) as this
+        project's 4th composer dependency, installed via the machine's
+        newly-available global `composer` command (previous sessions had
+        used a local `composer.phar`, which no longer exists on this
+        machine — confirmed a real global `composer.exe` install exists
+        now instead, used that). New `includes/qr_helpers.php`:
+        `qr_render_png()` wraps the library's v6 API (`outputInterface =>
+        QRGdImagePNG::class`, `outputBase64 => false` for raw bytes — the
+        v6 API uses class-string output types, not the old v3-5 string
+        constants my own initial plan assumed; corrected against the
+        installed library's actual source once `composer require` landed
+        it, exactly as flagged as a risk in the plan). New root-level
+        `qr_image.php` streams the PNG for a `?token=...` — validated as
+        a live, unexpired challenge row first (404 + a 1x1 blank PNG
+        otherwise, no existence leaked); the QR *payload* is derived from
+        `qr_absolute_url()` (new helper — `BASE_URL` in `includes/auth.php`
+        is host-**relative**, useless inside a QR since the phone has no
+        "current host" of its own; the absolute URL is built from the
+        *current* request's own `$_SERVER['HTTP_HOST']`, so it always
+        matches whichever host the desktop browser is actually using).
+      - **Pairing flow**: new `ajax/qr_pair_start.php` (`require_login()`,
+        any role) creates a `purpose='pair'` challenge tied to the
+        current session's `user_id`; the Profile & Password page polls
+        new `ajax/qr_pair_status.php` (GET, scoped to `token AND
+        user_id = $_SESSION['user_id']` — prevents one logged-in user
+        from polling another's pairing challenge) every 2s via a new
+        `assets/js/qr_pair.js` (this app's **first** `setInterval` +
+        reusable `fetch()`-polling file — confirmed via the research
+        agents that no polling pattern existed anywhere in the codebase
+        before this). The phone scans and lands on new root-level
+        `qr_pair.php` (public, no session) — GET shows "Link this phone
+        to `<name>`'s account?"; POST creates the `paired_devices` row
+        (device label auto-summarized from the User-Agent via new
+        `device_label_from_user_agent()` in `includes/device_helpers.php`,
+        e.g. "iPhone · Safari"), issues a long-lived `admas_device_token`
+        cookie on the **phone's** browser (`includes/device_helpers.php`'s
+        `issue_device_token_cookie()` — 90 days, `httponly`, `samesite=Lax`,
+        **`secure=false`** deliberately, since this app is plain HTTP/LAN-
+        only and `secure=true` would silently break the cookie entirely,
+        same exposure this app's own PHP session cookie already has), and
+        atomically flips the challenge to `confirmed` inside a
+        transaction with `SELECT ... FOR UPDATE` locking the row first.
+      - **Login flow**: `login.php` gained a new "QR Code Scan" Bootstrap
+        tab (the existing password form stays untouched in its own tab
+        pane) — also needed adding the Bootstrap **JS** bundle to
+        `login.php` for the first time (it previously only loaded
+        Bootstrap's CSS; `data-bs-toggle="tab"` needs the JS bundle,
+        confirmed via grep this was genuinely never loaded there before).
+        New `ajax/qr_login_start.php` (**unauthenticated** — nobody is
+        logged in on this browser yet) creates a `purpose='login'`
+        challenge with `user_id=NULL`; `assets/js/qr_login.js` starts it
+        lazily on first tab activation (not page load, so an ordinary
+        password login never creates an unused row) and polls new
+        `ajax/qr_login_status.php`. The phone (carrying its paired-device
+        cookie) scans to new root-level `qr_login_confirm.php` (public) —
+        resolves the phone's own paired device via
+        `paired_device_from_cookie()` first (no cookie/unpaired ->
+        "pair this phone first from Profile & Password", no fallback
+        login form, exactly as specified); if paired, shows "Log in as
+        `<owner name>` on this device?"; POST only flips the challenge to
+        `confirmed` — **this page never touches `$_SESSION` itself**,
+        since it's running in the *phone's* browser, not the desktop's.
+      - **The actual session establishment is `ajax/qr_login_status.php`'s
+        job**, and only for the poll request that wins an atomic
+        `UPDATE ... SET status='completed' WHERE status='confirmed'` (an
+        `affected_rows === 1` check) — re-fetches the user+role row fresh
+        (same query shape `login.php` itself uses) and sets the exact
+        same 5 `$_SESSION[...]` keys `login.php` sets, mirroring its own
+        `$roleToDashboard`/`must_change_password` redirect logic exactly.
+        Every other poll (a second tab, a refresh, a re-poll of an
+        already-completed token) sees a non-`confirmed` status and gets
+        back a generic "expired" response — no session write, no user
+        data ever leaked before the `completed` transition specifically.
+      - **Real bug found and fixed during verification, not caught by
+        planning**: three files (`qr_image.php`,
+        `ajax/qr_pair_status.php`, `ajax/qr_login_status.php`, and — found
+        in a second pass after the first three were already fixed —
+        `qr_login_confirm.php`'s own GET branch) originally compared
+        expiry via PHP's `strtotime($row['expires_at']) < time()`. This
+        looked correct in isolation but broke immediately in practice:
+        this machine's PHP `date.timezone` is `Europe/Berlin` while
+        MySQL's `NOW()` resolves through `SYSTEM` timezone to the OS's
+        real Pacific time — so every freshly-created, genuinely-unexpired
+        challenge row was misread as already-expired the instant it was
+        created (confirmed live: `qr_image.php` 404'd immediately after a
+        successful `qr_pair_start.php` call). Fixed by moving the expiry
+        check into SQL itself (`(expires_at < NOW()) AS is_expired`, or a
+        WHERE-clause `expires_at > NOW()` matching the pattern already
+        used elsewhere in this file) everywhere a challenge's freshness is
+        checked — MySQL comparing its own column against its own `NOW()`
+        can never have a timezone mismatch, unlike a PHP-vs-MySQL
+        comparison. `qr_pair.php`'s POST path and both `*_confirm`/`*_pair`
+        pages' write paths were never affected, since their expiry checks
+        were already SQL-side (`... AND expires_at > NOW()` in the
+        `UPDATE`/`SELECT ... FOR UPDATE` itself) from the start — only the
+        four PHP-side comparison sites had the bug.
+      - **Verified end-to-end via real HTTP requests against the LAN IP**
+        (`http://192.168.0.101/AttendancySystem/...`, not `localhost` —
+        deliberately, to genuinely exercise `qr_absolute_url()`'s host
+        derivation) with two temporary student accounts and separate curl
+        cookie jars standing in for "desktop" vs "phone": full pairing
+        round-trip (QR image is a real PNG, confirm page shows the correct
+        account name, POST confirm creates the `paired_devices` row and
+        issues the cookie, the owning session's poll immediately reflects
+        `confirmed`); replay protection on both the pairing confirm POST
+        (second attempt correctly rejected, zero double-row) and the login
+        status poll (a second poll against an already-`completed` token
+        gets a generic "expired" response, confirmed via direct DB read
+        that no second session-establishing write occurred); cross-user
+        scoping (`qrtest_student2` cannot poll `qrtest_student1`'s pairing
+        token — "Invalid pairing code", not the real status); full login
+        round-trip (phone confirms -> desktop's poll returns
+        `status:"completed"` + the correct role redirect -> **directly
+        confirmed the desktop cookie jar could then load
+        `student/dashboard.php` with a 200 and the account's own name
+        rendered, not a bounce to `login.php`** — i.e. a real session was
+        genuinely established, not just a plausible-looking JSON
+        response); device revoke (a different user's revoke attempt on
+        someone else's device correctly rejected with zero DB change; the
+        real owner's revoke succeeds; a second revoke attempt on an
+        already-revoked device fails gracefully; and, the strongest
+        check, the just-revoked phone's cookie was immediately tried
+        against a brand-new login challenge and correctly rejected with
+        "Phone Not Linked" — revocation takes effect immediately, not just
+        cosmetically in the list); expiry (a force-expired challenge is
+        correctly rejected across `qr_image.php`, `qr_pair.php` GET/POST,
+        and the status-poll endpoint, all four checked individually after
+        the timezone fix). All temporary accounts and every
+        `paired_devices`/`qr_login_challenges` row created during testing
+        were deleted afterward; both tables confirmed empty post-cleanup.
+      - **Real-phone-on-WiFi verification — pending the user**, per their
+        own explicit request to test with an actual phone rather than
+        relying on curl simulation alone. Programmatic verification above
+        already covers the exact same request sequence a phone's browser
+        would make; the remaining check is purely "does the physical
+        camera-scan-and-tap experience work," which needs a real device.
+      - **Known operational note, not a bug**: the QR only encodes a URL
+        the phone can reach if the desktop is browsing via its **LAN IP**
+        (e.g. `192.168.0.101`), not `localhost` — `qr_absolute_url()`
+        derives the host from the current request, so `localhost` in the
+        browser produces a QR pointing at `localhost`, which the phone
+        obviously can't resolve to this machine. This is inherent to
+        running on a LAN-only dev server with no real domain, not
+        something fixable in code — documented directly in the plan file
+        and repeated here for future sessions.
+      - **Also unverified in this session, flagged for whoever revisits**:
+        whether Windows Firewall allows inbound TCP 80 from other devices
+        on the LAN (a prerequisite for a phone to reach this machine at
+        all) — the research phase confirmed Apache itself binds to all
+        interfaces (`Listen 80` unqualified), but firewall rules are a
+        separate, unverified layer.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
 ### Deferred Decisions
 - **Student ID as username/password scheme**: scoped but paused before
   implementation — the user's request assumed a "Student ID" field
@@ -4426,4 +4686,875 @@ data/configuration task for the university admin, not further code work.
   `profile.php` plus `reset_password.php` clears it on a successful
   password change) — so when this is revisited, that prerequisite is
   already satisfied and doesn't need to be rebuilt.
+
+### Head of Academic Affairs: Course Management + User Management (§4 revision)
+- [x] The user requested Course Management and User Management for Head of
+      Academic Affairs, describing this role as the university's "second
+      authority" managing everyone except top management. This directly
+      contradicted the role's §4 definition as it stood (no Course
+      Management at all — that was Dean/System Administrator only; no User
+      Management — System Administrator only) and many Progress
+      Log entries of this exact boundary being actively *protected* (e.g.
+      the `head_academic/lecturers.php` split above, which deliberately
+      kept this role to view+register only, not full CRUD). Flagged the
+      conflict and got explicit confirmation before writing any code:
+      Course Management = cross-faculty full CRUD (same view System
+      Administrator gets, not Dean's faculty-scoped view); User Management
+      = full, "like System Administrator." The user's own framing —
+      "except top management" — was a live tension against the second
+      answer (which literally listed admin accounts as in-scope when
+      asked); resolved by excluding System Administrator accounts
+      specifically rather than asking a third round of questions, since
+      that's the more conservative, security-sound reading and matches
+      what "except top management" was clearly gesturing at. Flagging this
+      interpretation here rather than presenting it as directly
+      user-confirmed.
+      - **Course Management**: added `head_academic` to `require_role()` on
+        `admin/courses.php`, `admin/course_offerings.php`, and
+        `admin/course_offerings_search.php`. No other code changes needed —
+        all three files already branch on `$role === 'dean'` for the
+        faculty-scoped case with everything else (previously just
+        `system_admin`) falling through to the unrestricted branch, so
+        `head_academic` inherits the exact same cross-faculty view/write
+        access as `system_admin` for free. Their scope-banners already use
+        the same ternary, so no banner text was hardcoded to "System
+        Administrator" anywhere in these three files (verified by grep
+        before relying on it, not assumed). Deliberately did **not** touch
+        `admin/courses_import.php` (bulk Excel import stays
+        `system_admin`-only, matching that Dean doesn't get it either
+        despite having full CRUD within their faculty — internal
+        consistency: neither faculty-scoped nor cross-faculty "full CRUD"
+        implies bulk import in this app) or `admin/course_enrollments.php`
+        (its own header comment confirms this page manages real student
+        enrollment records, not course/schedule metadata — extending it
+        would functionally violate §4's *still-standing* "Cannot manage
+        students" restriction, which the user's request never asked to
+        change). Verified live as a real `head_academic` test account
+        (`caaqil12345678`): `admin/courses.php` renders "Access scope: Full
+        system — all faculties, departments, and courses" (the
+        `system_admin`-equivalent banner, not Dean's faculty-scoped one);
+        `admin/course_offerings_search.php` returns 200;
+        `admin/course_enrollments.php` still redirects (302) — confirming
+        the student-enrollment boundary is intentionally untouched.
+      - **User Management**: new `head_academic/users.php` (disjoint-role,
+        same-filename resolution as the existing
+        `head_academic/lecturers.php` pattern — see `includes/nav_items.php`)
+        rather than sharing `admin/users.php` outright, because that page's
+        "System Users" table has no target-role restriction at all (any
+        `system_admin` can reset/deactivate *another* `system_admin`) and
+        its "Assign Role" panel appoints Dean/Head of Academic
+        Affairs/Registration Office — both are System Administrator-only
+        powers this role isn't granted. The new page: lists every
+        Dean/Head of Academic Affairs/Registration Office/Lecturer/Student
+        account university-wide (`WHERE r.name != 'system_admin'`) with
+        Reset Password + Activate/Deactivate actions (self-protection
+        intact, same as `admin/users.php`); no Assign Role panel at all.
+        **Defense in depth**: a new `load_manageable_user()` helper
+        re-checks every POST action's target server-side and rejects
+        `system_admin` targets outright — not just hidden from the
+        dropdown/list, since a user_id can always be forged in a raw
+        request. No new account-creation path here; Lecturer/Student
+        accounts are still created through their own respective modules,
+        keeping account-creation logic in one place per account type.
+        Verified live: `head_academic/users.php` renders "Access scope:
+        All faculties — every account except System Administrator" and the
+        rendered table contains zero System Administrator rows (confirmed
+        the one string match on the page was the banner's own text, not a
+        table row); a **direct POST with the real System Administrator's
+        `user_id`** (bypassing the UI entirely) was rejected with "System
+        Administrator accounts cannot be managed from here" and the
+        account's `password_hash` was confirmed unchanged in the database;
+        a legitimate `reset_password` and `toggle_status` against a real
+        lecturer account both worked end-to-end (hash changed; status
+        flipped inactive→active) and were reverted to their original
+        values afterward; unauthenticated access redirects (302).
+      - Updated §4 above and the in-app `ROLE_INFO` reference table on
+        `admin/users.php` (a second, user-facing mirror of the same role
+        descriptions, checked and found stale — would otherwise have kept
+        telling System Administrators the old, narrower scope) to match.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Forgot/Reset Password: Branding + Three-Field Reset Screen
+- [x] Two requests together: (1) confirm the Forgot Password flow actually
+      delivers to Gmail, and (2) simplify `reset_password.php` down to
+      exactly three fields (code, new password, confirm) with the
+      university logo/name at the top of both pages — previously neither
+      page had any branding, and `reset_password.php` asked for the
+      account email a second time (already typed once on
+      `forgot_password.php`).
+      - **Branding**: both pages now require `includes/university_logo.php`
+        (the same helper `login.php` already uses) and render a small
+        centered circular logo + `settings.university_name` above their
+        heading — a lighter-weight version of `login.php`'s brand panel,
+        sized for these pages' simple single-card layout rather than the
+        full split-screen login design.
+      - **Three-field reset screen**: `forgot_password.php` now stores the
+        submitted email in `$_SESSION['password_reset_email']` the moment
+        step 1 is submitted (regardless of whether it matched a real
+        account — same enumeration-safety reasoning as the identical
+        success message). `reset_password.php` reads that session value
+        instead of asking for the email again; the field is gone from the
+        form entirely (not just hidden — the server already has it via
+        session, so no hidden `<input>` was needed either). The original
+        code comment's reasoning for needing the email (`password_resets
+        .code` is only unique per-user, not globally, so the lookup needs
+        both to identify which request is being redeemed) still holds —
+        it's just no longer something the user types. Session value is
+        cleared on a successful reset; landing on `reset_password.php`
+        without ever going through step 1 (no session value) now shows
+        "Please request a reset code first" instead of a broken form.
+      - **Does it actually reach Gmail? Yes — with one honest caveat.**
+        `includes/mail_config.php` already had real-looking Gmail SMTP
+        credentials in place (not the placeholder text the file's own
+        comment describes), so this wasn't a from-scratch build — it was
+        verify-and-fix. First live test through the actual website
+        failed: Apache's error log showed `SMTP Error: Could not connect
+        to SMTP host.` A raw `fsockopen()` to `smtp.gmail.com` on both 587
+        and 465 succeeded immediately, ruling out a network/firewall block
+        at the OS level. A standalone PHPMailer script run via `php-cli`
+        with `SMTPDebug = 3` immediately after **fully succeeded** — the
+        complete SMTP transcript shows STARTTLS negotiated, AUTH LOGIN
+        accepted (`235 2.7.0 Accepted`), and the message accepted for
+        delivery (`250 2.0.0 OK`) — confirming the credentials and
+        SMTP_HOST/PORT config are genuinely correct. Retried through the
+        real website a second time immediately after: **succeeded**, no
+        error logged. Conclusion: the send is **intermittent, not broken**
+        — most likely an occasional connection hiccup between this
+        specific machine and Gmail's SMTP servers (could be Windows
+        Firewall treating `httpd.exe` differently from `php.exe` on a
+        given attempt, antivirus real-time scanning momentarily
+        intercepting the connection, or plain transient network flakiness)
+        rather than anything wrong in this app's code. This is the same
+        general class of "sometimes my local server acts up" the user
+        described earlier this session about their laptop. Not something
+        fixable from inside this codebase; worth watching for whether it
+        recurs, and if so checking Windows Firewall's outbound rule for
+        `httpd.exe` (Apache) specifically, or temporarily disabling
+        antivirus real-time protection to test.
+      - **Verified live end-to-end**, real Gmail address
+        (`abdisamedmadoobe@gmail.com`, the real email on file for the
+        `caaqil12345678` test account used throughout this session):
+        submitted `forgot_password.php`, confirmed a real row landed in
+        `password_resets`, completed `reset_password.php` with that code
+        and the same known test password (`testpass123`, so the account's
+        credentials stay exactly what they already were for this session's
+        other tests) — got "Your password has been reset successfully.",
+        then confirmed login with `testpass123` actually works afterward.
+        Also confirmed the no-session guard on `reset_password.php` and
+        that the rendered form has exactly the three requested fields (no
+        Account Email field left).
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Forgot Password: Merged Into One Page, Identified by Role + Username (not typed email)
+- [x] Immediate follow-up to the branding/three-field work above — the user
+      looked at the result and asked for two more changes: (1) one single
+      page instead of two, and (2) the email used to send the code should
+      come from looking up the selected **Role + Username/Email** (the same
+      identification pattern as `login.php`), not from the user typing
+      their exact registered email into a box.
+      - **Single page**: `forgot_password.php` now renders one of three
+        states itself — phase `identify` (Role + Username/Email, the
+        default), phase `code` (6-digit code + new password + confirm,
+        entered once `$_SESSION['password_reset_pending']` is set), or the
+        final success message — instead of being two separate files reached
+        by navigating between them. `reset_password.php` is not deleted
+        (a stale bookmark/browser-history hit shouldn't 404) but is now
+        just a one-line `redirect_to('forgot_password.php')` — confirmed
+        via `grep` that nothing else in the codebase links to it, so this
+        was safe.
+      - **Role + Username/Email instead of typed email**: phase `identify`
+        now has the exact same two fields as `login.php` (`role` dropdown,
+        identical 6 options/values/order; `username_or_email` text input,
+        matching `WHERE u.username = ? OR u.email = ?`) instead of an
+        "Account Email" box. On a match — role dropdown value equals the
+        account's actual role AND the account has a non-empty email on
+        file — that email is used automatically to send the code; the user
+        never sees or types it anywhere in this flow.
+      - **Enumeration-safety carried through the redesign, not just kept as
+        a comment**: previously this was easy (always show the same success
+        text regardless of match). A single page with a real phase
+        transition is a sharper test of this property, so it was verified
+        deliberately, not assumed: phase `identify` always advances to
+        phase `code` — real match, wrong role for a real username, or a
+        completely made-up username all take the exact same path and render
+        identically. Only `$_SESSION['password_reset_user_id']` secretly
+        distinguishes them (`null` for the two non-match cases), and phase
+        `code`'s lookup treats a `null` session user id as an automatic
+        "that code is invalid or has expired" — the *same* message a real
+        account with a wrong/expired code would get. **Verified live**: a
+        real account (`caaqil12345678` / `head_academic`) produced a real
+        row in `password_resets` and a working end-to-end reset; a
+        completely fake username and a real-username-wrong-role attempt
+        both rendered the identical phase-`code` screen, produced **zero**
+        new `password_resets` rows (confirmed by id — no gap), and both
+        failed any code entry with the identical generic message.
+      - Added a "Didn't get a code? Start over" link on phase `code`
+        (`?restart=1`, clears the two session keys and redirects back to
+        phase `identify`) — not explicitly requested, but a needed escape
+        hatch given the *previous* entry in this log documented that the
+        Gmail send is occasionally intermittent; without this, hitting that
+        intermittency mid-flow would have been a dead end with no way back
+        to phase `identify` short of clearing cookies.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Forgot Password Email: Embedded University Logo
+- [x] User asked for two things: change the reset-code email's sender
+      address, and put the university logo *inside the email itself* (not
+      just on the two web pages, which was already done). Implemented the
+      logo half now; the sender-address half is blocked on a real
+      credential only the user has — see the question left open at the end
+      of this entry.
+      - Moved the `$settings`/`$universityName`/`$logoRelativePath`
+        lookup that already existed (for the page's own branding) from
+        after the POST-handling block to the top of the file, since the
+        mail-sending code now needs it too and previously ran before that
+        block populated it.
+      - **Embedded, not a remote `<img src>`, and this isn't a style
+        preference — a remote URL genuinely could not have worked**: the
+        logo lives on this local XAMPP server, which Gmail's mail servers
+        cannot reach over the internet to fetch a remote image from at
+        all. `$mail->addEmbeddedImage($logoFilesystemPath, 'universitylogo')`
+        attaches the actual image bytes to the email (`cid:` reference in
+        the HTML body), which works regardless of where the recipient
+        opens the email. Wrapped in `is_file()` so a missing/not-yet
+        -uploaded logo degrades to no image rather than a PHPMailer
+        exception. Email subject and body also switched from a hardcoded
+        "ADMAS Attendance System" string to `$settings['university_name']`
+        (matching what the two web pages already display), so a renamed
+        institution stays consistent across the whole flow, not just the
+        pages.
+      - **Verified live, twice**: the real `forgot_password.php` flow
+        (role=head_academic, `caaqil12345678`) produced a fresh
+        `password_resets` row with no new Apache error logged (consistent
+        with this session's established SMTP intermittency — this attempt
+        landed on a "working" moment). To rule out the embedded image
+        itself being a new failure mode independent of that intermittency,
+        also ran a standalone `SMTPDebug`-enabled PHPMailer script with the
+        same embedded-image code — full transcript shows the base64
+        image data actually transmitted in the MIME body and a clean
+        `250 2.0.0 OK` from Gmail.
+      - **Left open, cannot proceed without the user's input**: changing
+        the sender to `abdisamedmadoobe@gmail.com` needs that Gmail
+        account's own **App Password** (Google Account → Security →
+        2-Step Verification → App Passwords) — Gmail's SMTP rejects
+        authenticating as one address using a different address's app
+        password, so `SMTP_USERNAME` can't just be swapped in
+        `includes/mail_config.php` without also swapping `SMTP_PASSWORD`
+        to a real, matching one, or the currently-working send would
+        break. Asked the user for it rather than guessing/fabricating a
+        credential.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Head of Academic Affairs: Course Enrollments Added (full course-action scope)
+- [x] Follow-up, same session: the user explicitly asked for the Courses
+      section to be *full* CRUD — naming Offerings and Enrolled Students by
+      name, "waa inuu dhammaan awoodo dhaqdhaqaaqa courses-ka" (must have
+      every course-action capability in the project). This reopens the one
+      piece deliberately left out of the original Course Management grant
+      above: `admin/course_enrollments.php` was excluded at the time
+      because its own header comment frames it as managing real student
+      data, which reads as being in tension with §4's "Cannot manage
+      students." Now explicitly requested by name, so implemented — but
+      still reconciled against, not just overridden past, that restriction:
+      **course-roster enrollment** (does student X appear on course Y's
+      list) is a distinct action from **student profile management**
+      (creating/editing a student's own record on `admin/students.php`,
+      which stays untouched — this role still has no access there). §4
+      updated to phrase the "cannot" line around student *profile* records
+      specifically, not course actions generally.
+      - Added `head_academic` to `admin/course_enrollments.php`'s
+        `require_role()`. Same pattern as the three Course Management files
+        already extended: the file branches on `$role === 'dean'` for the
+        faculty-scoped read/write case, everything else (previously just
+        `system_admin`) falls through unrestricted — `head_academic`
+        inherits that for free, and its scope-banner's Dean-only caveat
+        text is similarly ternary-gated, so no hardcoded "System
+        Administrator" text needed changing. Confirmed the "Enroll
+        Students" entry points on `admin/courses.php` (row icon-link) and
+        `admin/course_offerings.php` (header button + inline link) are
+        *not* role-gated in their own markup — both already render for any
+        role that can reach the page at all, so no changes needed there
+        either.
+      - **Verified live** as `caaqil12345678`: `admin/course_enrollments.php
+        ?course_id=23` (the real "CL — calculus" course from earlier in
+        this log) returns 200 and renders normally; confirmed 19 "Enroll
+        Students" links render on `admin/courses.php`'s course list. Did a
+        full round-trip write test rather than just checking access: picked
+        a real student not already on the calculus roster (id 194),
+        `bulk_enroll`'d them (roster count 36 → 37, confirmed via a direct
+        `course_enrollments` row check), then `remove_enrollment`'d them
+        straight back out (37 → 36) — restoring the exact original roster,
+        same "leave real data as found" discipline as the Assign Role test
+        above.
+      - Updated §4 above accordingly (see the reworded "cannot" clause).
+        `admin/users.php`'s `ROLE_INFO` panel already says "cross-faculty
+        Course Management (full CRUD...)" generically enough that it didn't
+        need a further edit for this specific follow-up.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Head of Academic Affairs: Assign Role (Dean + Registration Office only)
+- [x] Follow-up to the Course Management/User Management grant above — the
+      user asked for Head of Academic Affairs to also be able to **appoint
+      (magacaabid)** Registration Office and Dean, while explicitly
+      reaffirming System Administrator as the project's one overall root
+      authority ("Main-ka guud ee projectigeena, waa cida ugu awooda
+      badan"). Read as: extend Assign Role to this role, but scoped to
+      exactly those two target roles — not System Administrator, and not
+      (more) Head of Academic Affairs accounts, since neither was named and
+      the user's own framing keeps System Administrator singular at the
+      top.
+      - Added a new `HEAD_ACADEMIC_APPOINTABLE_ROLES = ['dean',
+        'registration']` constant and a full `assign_role` POST handler to
+        `head_academic/users.php`, copied from `admin/users.php`'s
+        `assign_role` action and adapted: same validation order, same
+        transaction (release any existing Dean on the target faculty →
+        insert-or-update the user → sync `faculties.dean_user_id` →
+        `role_assignments` audit row insert with `assigned_by` = the
+        acting Head of Academic Affairs user), same "+ Create New User"
+        path via `generate_admin_username()`/`generate_temp_password()`
+        (both already available via the `lecturer_accounts.php` require
+        this file already had). The existing System Administrator
+        exclusion (`load_manageable_user()`, `$systemAdminRoleId` check)
+        now also guards the "Select User" re-appoint path in
+        `assign_role`, not just `reset_password`/`toggle_status` — a
+        System Administrator account can't be re-appointed away from this
+        page either.
+      - Deliberately did **not** just widen `admin/users.php`'s own
+        `APPOINTABLE_ROLES` constant and share that page: it appoints from
+        a dropdown of *all* non-elevated users but its "Select User" and
+        "System Users" table both have no target-role restriction at all,
+        so sharing the door would have handed this role the same
+        System-Administrator-reach that the whole point of this change was
+        to keep excluded. Kept the two-forms-one-page layout ("Assign
+        Role" card above "System Users" card) matching `admin/users.php`'s
+        own layout, rather than the col-lg-8/col-lg-4 split used on
+        `head_academic/lecturers.php` — this page is a closer structural
+        match to `admin/users.php` than to the Lecturers page.
+      - **Verified live** as the real `head_academic` test account
+        (`caaqil12345678`): before touching anything, checked
+        `faculties.dean_user_id` for every faculty and found Informatics
+        already had a real Dean (`madoobe jama abduulaahi`) — used
+        **Business Administration** (no Dean assigned) for the live test
+        instead, to avoid displacing real data. Appointed an existing
+        lecturer (`eng maax`, id 211) as Dean of Business Administration —
+        confirmed `role_id`/`faculty_id` updated and
+        `faculties.dean_user_id` synced; created a brand-new Registration
+        Office account via "+ Create New User" — confirmed the generated
+        username/temp-password flash message and the new row in `users`.
+        **Bypass attempts**: POSTing `appoint_as=head_academic` and
+        `appoint_as=system_admin` directly (bypassing the dropdown, which
+        only ever renders Dean/Registration Office options) were both
+        rejected with "Please choose a valid role to appoint." and
+        confirmed no account was created for either. **Cleanup**: reverted
+        `eng maax` back to `role_id` = lecturer with `faculty_id` = NULL,
+        cleared `faculties.dean_user_id` for Business Administration back
+        to NULL, and deleted the test Registration Office user row plus
+        both `role_assignments` rows created during this test — same
+        "temporary account deleted afterward" convention already
+        established earlier in this log, so the real dataset (197
+        students, existing real Dean assignments) was left exactly as
+        found.
+      - Updated §4 above and `admin/users.php`'s `ROLE_INFO` reference
+        table again to match.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### Role Rename: System Administrator → University Rector, + University-Wide Dashboard Oversight Charts
+- [x] **Full rename of the `system_admin` role to `university_rector`** — both
+      the underlying DB/code identifier and every user-facing "System
+      Administrator" label, requested so the role reads as "Madaxweynaha
+      Jaamacadda" (University Rector) throughout the app. This was a full
+      rename, not a display-label overlay: `roles.name` itself changed, and
+      every `require_role([...])`/`$role === 'system_admin'` comparison in
+      code changed with it, since `current_role()`/`$_SESSION['role']` is a
+      plain string pulled straight from `roles.name` — a partial rename
+      would have locked the role out immediately.
+      - **DB migration**: `mysqldump` safety backup taken first (to
+        `C:\xampp1\backups\admas_attendance\`, same convention as every
+        prior schema/data change in this log). Then a single statement:
+        `UPDATE roles SET name = 'university_rector' WHERE name =
+        'system_admin';` — confirmed exactly 1 row affected, confirmed via
+        `SELECT * FROM roles` that all 6 rows are intact with no
+        duplicate name. `users.role_id`/`role_assignments.role_id` are
+        plain numeric FKs into this lookup table (not an ENUM), so no
+        further data migration was needed anywhere else — only the PHP
+        code doing string comparisons against the role's *name* needed
+        updating.
+      - **Files changed** (literal `system_admin` → `university_rector` in
+        every functional context — `require_role()` arrays, `===`/`!==`
+        comparisons, array keys, `<option value="...">`, JS role strings —
+        plus "System Administrator" → "University Rector" in every
+        user-facing string and doc-comment): `login.php`,
+        `includes/topbar.php`, `includes/nav_items.php` (both the
+        `nav_items()` role arrays and the `role_folder()`/`role_label()`
+        mapping tables — the folder mapping's *value* stayed `'admin'`,
+        only the *key* changed, so the physical `admin/` directory was
+        never touched), `includes/factory_reset.php`, `includes/auth.php`,
+        `includes/attendance_helpers.php`, `includes/university_logo.php`,
+        `head_academic/users.php`, `head_academic/lecturers.php`,
+        `head_academic/academic_settings.php`, `ajax/save_attendance_cell.php`,
+        `ajax/qr_login_status.php`, `admin/users.php` (including the
+        `ROLE_INFO` reference panel's own role/description text),
+        `admin/students_import.php`, `admin/students.php`,
+        `admin/settings.php`, `admin/profile.php`,
+        `admin/lecturers_import.php`, `admin/lecturers.php`,
+        `admin/faculties.php`, `admin/departments_import.php`,
+        `admin/departments.php`, `admin/dashboard.php`,
+        `admin/course_offerings_search.php`, `admin/course_offerings.php`,
+        `admin/course_enrollments.php`, `admin/courses_import.php`,
+        `admin/courses.php`, `admin/academic_years.php`, `semesters.php`,
+        `reports.php`, `notifications.php`, `lecturer_courses.php`,
+        `forgot_password.php`, `attendance_import.php`, `attendance.php`,
+        `student/notifications.php`, `admas_attendance_schema.sql` (the
+        role seed row, the default-admin seed `INSERT`'s subselect, and
+        two SQL comments). Grepped `migrations/*.sql` and every
+        `assets/js/*.js` file (including `qr_pair.js`/`qr_login.js`) —
+        neither contained the literal string, so neither needed changes.
+      - **CLAUDE.md itself**: updated §4's live RBAC table (first row's
+        role name + every "System Administrator" reference inside the
+        Head of Academic Affairs row's "cannot do" column + the paragraph
+        right below the table describing who appoints Dean/Head of
+        Academic Affairs/Registration Office) and §6's schema sketch
+        comment listing the six role names — both are current-state
+        specification text, not historical narrative. Every entry inside
+        this Progress Log (§10) describing *past* sessions was
+        deliberately left exactly as written, including every
+        "system_admin"/"System Administrator" occurrence in that
+        historical text — those are a dated record of what was true at
+        the time each session ran, not a living reference.
+      - **Verified via repo-wide grep after all edits**: zero `.php`/`.sql`
+        files anywhere in the project (this Progress Log's own historical
+        text in CLAUDE.md excepted) still contain the literal string
+        `system_admin` or the phrase "System Administrator".
+      - **Verified end-to-end via real HTTP requests** against the live
+        app: created one temporary `university_rector`-role test account
+        directly via SQL (`temp_rector_qa`, password hashed with PHP's own
+        `password_hash()`); confirmed `login.php`'s Role dropdown now
+        renders `<option value="university_rector">University Rector</option>`;
+        logged in via curl with that role selected and confirmed a `302`
+        redirect straight to `admin/dashboard.php` (first attempt with a
+        hand-typed bcrypt hash actually failed — PowerShell's `-e "..."`
+        argument was silently mangling the hash's own `$`-prefixed
+        segments as shell variable interpolation; fixed by writing the
+        `UPDATE` as a `.sql` file and piping it into `mysql` instead of
+        passing the hash inline on the command line); confirmed
+        `admin/dashboard.php` returns `200` with zero PHP
+        warnings/notices/fatals in the raw HTML, and that "University
+        Rector" (not "System Administrator") renders in the topbar role
+        display; regression-checked `admin/students.php`,
+        `admin/settings.php`, `reports.php`, `admin/faculties.php`, and
+        `admin/users.php` all still return `200` for this account (not a
+        bounce to `unauthorized.php`); confirmed a University Rector is
+        still correctly blocked from a Dean-only page
+        (`dean/dashboard.php` → `302` to `unauthorized.php`, unchanged
+        behavior, not a regression from the rename). Deleted the
+        temporary account afterward and confirmed `users` back to its
+        exact pre-test baseline (64) and `roles` still showing exactly 6
+        rows with `university_rector` in place of the old
+        `system_admin` row.
+- [x] **University-wide oversight charts added to `admin/dashboard.php`**,
+      per the Rector's own description of the role as "kormeeye"
+      (overseer/supervisor) wanting a comprehensive visual picture of the
+      whole university, not new CRUD pages (this role already has full
+      read/write access to every faculty's data via the existing pages —
+      this was specifically about enriching the dashboard's own visual
+      overview). Reused the page's existing Chart.js include and
+      `.admas-card` styling rather than introducing any new visual
+      language, and read chart colors from the same CSS custom properties
+      (`--admas-sky`, `--admas-text-muted`, `--admas-border`,
+      `--admas-surface`) the page's two pre-existing charts (Weekly
+      Attendance, Attendance by Department) already used, so all 6 charts
+      stay theme-aware in both light and dark mode with no new
+      light-mode-only hex values introduced.
+      - **Attendance by Faculty** (bar, 0–10 scale) — one score per
+        faculty, each resolved against that faculty's own current
+        semester via the existing `get_current_semester()` helper (never
+        a single shared "current" value) — same per-faculty loop-and-merge
+        pattern already used by this same file's pre-existing Attendance
+        by Department chart and by `head_academic/dashboard.php`'s own
+        Attendance-by-Faculty section, reused rather than reinvented.
+        Average of each (student, course) pair's own capped out-of-10
+        score, counting only *regular* Xiiso sessions (Midterm/Final
+        excluded), matching the exact scoring semantics established
+        earlier in this log under "Attendance Scoring Overhaul."
+      - **Students per Faculty** (doughnut) — a plain `COUNT` of active
+        students grouped by faculty via a `LEFT JOIN` (so a faculty with
+        zero students still renders as a real 0 slice rather than being
+        silently dropped).
+      - **Lecturer Workload (Current Semester)** (horizontal bar, top 8) —
+        `COUNT(*)` of `course_offerings` per lecturer, joined to
+        `semesters` filtered to `status = 'current'` only, so it reflects
+        who is actually teaching the most *right now*, not a lifetime
+        historical count.
+      - **Student Registrations (Last 6 Months)** (line) — `COUNT(*)` of
+        `students` grouped by `DATE_FORMAT(created_at, '%Y-%m')`, the last
+        6 calendar months always rendered (including zero-count months)
+        so the trend line's shape is honest rather than only showing
+        months that happen to have data.
+      - Confirmed no new DB schema/migration was needed — all four charts
+        query only existing tables/columns.
+      - **Verified end-to-end via the same live HTTP session used for the
+        role-rename verification above**: confirmed all 6 `<canvas>`
+        elements (2 pre-existing + 4 new) render in the fetched HTML with
+        zero PHP warnings/notices/fatals; confirmed each new chart's
+        PHP-computed `labels`/`data` JS arrays were genuinely non-empty
+        against this dev DB's real data (e.g. Attendance by Faculty showed
+        3 real faculties with real scores, Lecturer Workload showed 2 real
+        lecturers with real current-offering counts, the registration
+        trend showed 6 real month labels from `Mar 2026` through
+        `Aug 2026` with real counts) rather than only checking that the
+        markup was present. The temporary test account used for this
+        verification was the same one created and cleaned up for the
+        role-rename task above — no separate account was needed.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### University Rector: Full CRUD Converted to View-Only (Supervisory/Oversight Role)
+- [x] Following the earlier `system_admin` -> `university_rector` rename,
+      the user decided this role should become supervisory/oversight only:
+      full VIEW access everywhere, but no create/edit/delete/import/bulk
+      actions on day-to-day academic-data pages — **except** User Management
+      (`admin/users.php`) and Settings (`admin/settings.php`), which stay
+      full CRUD, since University Rector remains the project's top
+      account/system-administration authority, just not for editing
+      academic data itself. `reports.php`, `notifications.php`, and
+      `admin/dashboard.php` were also explicitly left untouched (already
+      read-only/reporting surfaces for this role, nothing to convert).
+      - **Pattern applied per page**: a `$isReadOnly = ($role ===
+        'university_rector');` flag (or, on the two rector-only pages —
+        `admin/faculties.php`/`admin/academic_years.php` — the equivalent
+        `current_role() === 'university_rector'` check, since no other role
+        reaches those files at all) gates every write-UI element (Add/
+        Edit/Delete/Reset Password buttons, bulk-select checkboxes +
+        "Delete Selected" bars, Import from Excel links, the whole
+        Add/Edit side-panel form) without touching the underlying data
+        list/table — the list/table itself, and any other role's own
+        branch (`dean`, `head_academic`, `registration`), were read but
+        never edited beyond this one flag's insertion. Server-side, a
+        single guard was added at the very top of each file's POST
+        dispatch (`if ($isReadOnly) { flash error; redirect_to(...); }`,
+        before the `switch`/`if-elseif` chain reads `$action`) rather than
+        repeating the check in every branch — a raw crafted POST is
+        rejected identically to a UI-hidden one. Scope banners changed to
+        "Access scope: Full system — view only (oversight)" (or, on
+        `admin/students.php`/`admin/course_enrollments.php`, an
+        `elseif ($isReadOnly)` branch alongside the pre-existing
+        `dean`/`registration` branches) for this role only.
+      - **`admin/students.php`** (+ `admin/students_import.php`): Add
+        Student panel, Import from Excel, bulk-delete bar/checkboxes, and
+        per-row Edit/Reset Password/Delete all hidden; a new "View"
+        eye-icon link (`admin/student_view.php?student_id=X`) replaces
+        them on this role's rows only — other roles' rows unchanged.
+        `admin/students_import.php`'s `require_role()` dropped
+        `university_rector` entirely (was `['university_rector',
+        'registration']`, now `['registration']` — a pure bulk-write page
+        has no meaningful view mode).
+      - **`admin/lecturers.php`** (+ `admin/lecturers_import.php`): Add
+        Lecturer panel, Import from Excel, bulk-delete, and per-row
+        Assign Courses/Edit/Reset Password/Delete all hidden; a "View"
+        eye-icon link (`admin/lecturer_view.php?lecturer_id=X`) added for
+        this role's rows. `admin/lecturers_import.php`'s `require_role()`
+        changed from `['university_rector']` to `[]` (this page never had
+        any other role granted access — removing the only allowed role
+        denies everyone, which is the intended "no import access at all
+        anymore for this role, and no one else ever had it" outcome;
+        `require_role([])` cleanly 403s/redirects via the existing
+        `in_array($currentRole, $allowedRoles, true)` check with no special
+        casing needed).
+      - **`admin/courses.php`** (+ `admin/courses_import.php`,
+        `admin/course_offerings.php`, `admin/course_offerings_search.php`,
+        `admin/course_enrollments.php`): Add Course panel, Import from
+        Excel, "Add Existing Course" (cross-listing entry point), bulk-
+        delete, and per-row Edit/Delete hidden on `admin/courses.php`;
+        "Manage Offerings"/"Enroll" row links kept but relabeled ("View
+        Offerings"/"Enrolled") since their target pages are now
+        themselves read-only for this role, not full write pages anymore.
+        `admin/course_offerings.php`: the whole "Add / Update Offering"
+        form and every row's Remove button hidden (replaced with "View
+        only"); the Offerings list itself, unaffected. `admin/
+        course_offerings_search.php` (already read-only/search-only, no
+        POST handler at all) just relabels its "Add Offering"/"Enroll
+        Students" row buttons to "View Offerings"/"View Enrollment" for
+        this role — no access-boundary change was needed here since its
+        two target pages already enforce the real boundary.
+        `admin/course_enrollments.php`: bulk-enroll button/checkboxes and
+        every row's Remove button hidden (checkboxes render `disabled`
+        with a "View only" tooltip instead of vanishing outright, so the
+        table shape stays consistent); `render_enroll_candidate_rows()`
+        gained an `$isReadOnly` parameter, threaded through both its
+        full-page and AJAX-partial call sites so the live-filtered partial
+        can never drift from the full page load.
+        `admin/courses_import.php`'s `require_role()` changed the same way
+        as the lecturer/department importers (`['university_rector']` ->
+        `[]`).
+      - **`admin/departments.php`** (+ `admin/departments_import.php`):
+        Add Department panel, Import from Excel, and per-row Edit/Delete
+        hidden for this role (the bulk-delete feature on this specific
+        page was already `university_rector`-only per an earlier session,
+        so it's now simply gone for everyone — no other role ever had it,
+        matching the same "sole permitted role removed" pattern as the
+        three importers above). `admin/departments_import.php`'s
+        `require_role()` changed from `['university_rector']` to `[]`.
+      - **`admin/faculties.php`** (rector-only page — no other role has
+        ever reached it): Add Faculty button, the entire Add/Edit modal,
+        and per-row Edit/Delete all hidden; the "All Faculties" table and
+        the per-faculty summary cards render exactly as before.
+      - **`admin/academic_years.php`** (also rector-only): same treatment
+        — Add Academic Year button, the Add/Edit modal, and per-row
+        Edit/Delete all hidden; the table of existing academic years is
+        unaffected.
+      - **`semesters.php`** (shared by `university_rector`/`head_academic`/
+        `dean`): the "Create Semester"/"Edit Semester" card, the
+        Start/End/Waiting/Generate Sessions/Edit/Hide-from-Students button
+        row, the "Assign Faculty" prompt, and the Save Dates form (with its
+        own bulk-delete-sessions bar) are all hidden for this role — a new
+        plain read-only sessions table (Xiiso #/label/type/date, no
+        checkboxes or date inputs) renders in their place when a semester
+        is selected. The "All Semesters" list's Edit/Delete icon column,
+        previously shown for `$role === 'university_rector' || $role ===
+        'dean'`, is now `!$isReadOnly && $role === 'dean'` (two call sites,
+        `replace_all`) — `head_academic` was already excluded from this
+        column before this change and still is; only `university_rector`'s
+        own access changed.
+      - **`attendance.php`** (Xiiso Grid attendance-marking page) — no new
+        UI built, per the task's explicit instruction: reused the page's
+        own pre-existing `$canWriteAttendance` mechanism (already used to
+        render a disabled grid + "Read-only" badge/banner for a
+        lecturer/dean viewing a semester outside their normal write scope).
+        Added `$role !== 'university_rector' &&` to the condition that
+        computes `$canWriteAttendance`, forcing it permanently false for
+        this role regardless of course/semester/offering — the existing
+        disabled-cell/badge/banner rendering then applies automatically.
+        The scope banner's `match ($role)` arm for `university_rector`
+        changed to the "view only (oversight)" wording.
+      - **`ajax/save_attendance_cell.php` + the shared
+        `user_can_write_course_attendance()` helper** (`includes/
+        attendance_helpers.php`) — this was the real enforcement point,
+        not `attendance.php` itself (which only controls what renders
+        clickable): `user_can_write_course_attendance()` previously had
+        `if ($role === 'university_rector') { return true; }` as its very
+        first check, meaning this role always passed authorization
+        regardless of the `attendance.php`-side flag — changed to `return
+        false;` with an explanatory comment. Every other caller of this
+        shared function (`attendance.php`'s own `$canWriteAttendance`,
+        `reports.php`, though that file's role logic itself was left
+        untouched per the task) automatically inherited the new
+        deny-by-default behavior for this one role with no further
+        per-call-site changes needed. The AJAX endpoint's existing
+        `http_response_code(403)` + generic denial-message path (already
+        built for the "lecturer with no current offering" case) fires
+        exactly the same way for this role now — no new response shape.
+      - **`includes/nav_items.php`**: two direct sidebar entries would
+        otherwise have 404'd/unauthorized'd for this role after removing
+        it from their target files' `require_role()` — "Import Attendance"
+        (`roles: ['university_rector', 'dean', 'lecturer']` ->
+        `['dean', 'lecturer']`) and "Import Students" (`roles:
+        ['university_rector', 'registration']` -> `['registration']`).
+        The other three import pages
+        (`lecturers_import.php`/`departments_import.php`/
+        `courses_import.php`) have no standalone sidebar entries at all —
+        they're reachable only via the "Import from Excel" button on
+        their parent page, already hidden for this role in step one above
+        — so no further `nav_items.php` change was needed for those three.
+      - **Two new read-only pages**, both `require_role(['university_rector'])`
+        only (no other role granted access — every other role already has
+        its own scoped way to see this data):
+        - `admin/student_view.php?student_id=X` — profile fields (Student
+          No/Full Name/Email/Status/Academic Year/Faculty/Department/
+          Semester/Shift) plus the same Semester-box-picker +
+          course-discovery-and-scoring logic as `student/courses.php`
+          (three-source discovery: `course_enrollments` first, department
+          fallback second, guest-offering `roster_department_id` third,
+          the `co.id IS NOT NULL OR a.id IS NOT NULL` "real evidence"
+          filter, and the capped out-of-10 `LEAST(10, SUM(status=
+          'present'))` scoring) — adapted to take `student_id` directly
+          from the querystring instead of resolving it from
+          `current_user()`, since this page looks at someone else's
+          record. A new "View" eye-icon link on `admin/students.php`'s
+          Actions column (this role only) opens it.
+        - `admin/lecturer_view.php?lecturer_id=X` — profile fields (Staff
+          No/Full Name/Email/Status/Home Department/Home Faculty) plus the
+          same full-teaching-history query shape as `lecturer/courses.php`
+          (one row per (course, offering) pair, current + waiting + ended
+          semesters alike, roster size and marked-session stats via
+          `get_course_roster_count()`/per-session `attendance` counts) —
+          adapted to take `lecturer_id` directly rather than resolving the
+          viewer's own lecturer record. No "Take Attendance" link (a write
+          action, correctly out of scope for a view-only page). A new
+          "View" eye-icon link on `admin/lecturers.php`'s Actions column
+          (this role only) opens it.
+        Both pages reuse `.admas-card`/`admas-table` styling and the
+        shared `attendance_badge_class()` helper for score coloring —
+        no hardcoded colors, dark-mode-aware via the existing CSS
+        variables like every other page in the app.
+      - Updated CLAUDE.md §4's University Rector row to describe the new
+        view-only-except-User-Management-and-Settings scope, and the
+        `ROLE_INFO` mirror table on `admin/users.php` to match (text only,
+        no logic change on that file, per the task's explicit
+        "do not touch" instruction).
+      - **Known gap, flagged rather than silently left**: `lecturer_courses.php`
+        ("Assign Courses", reached from `admin/lecturers.php`'s own
+        per-row link — itself now hidden for this role — but still
+        directly URL-reachable) was **not** in the task's list of 8
+        pages/page-groups to convert and was deliberately left untouched;
+        its own `require_role(['university_rector', 'dean',
+        'head_academic'])` still grants this role full write access to
+        `course_offerings` via that specific page if navigated to
+        directly. Casual discovery is blocked (the link that used to
+        surface it is gone), but this is a real remaining write path for
+        `university_rector`, not yet closed — worth revisiting in a future
+        session if full defense-in-depth for this role is wanted.
+      - **Verified end-to-end via real HTTP requests** against the live
+        app (not just `php -l`, though all 22 touched/created files were
+        also lint-checked clean) with two temporary accounts created via
+        direct SQL insert (`temp_rector_qa` / `university_rector`,
+        `temp_dean_qa` / `dean`, scoped to a real faculty — Informatics):
+        logged in as both via curl with separate cookie jars; confirmed
+        all 8 target pages (plus the 3 courses.php sub-pages) return `200`
+        for the rector account with the full data list/table still
+        rendering (111 student-row-related elements found on
+        `admin/students.php` alone) and every "Add"/"Import"/bulk-delete
+        UI element absent from the rendered HTML (confirmed by exact
+        string search for the literal button/link text, not just `$role`
+        branches — a few initial false-positive greps against JS
+        code/comments containing the same substrings, e.g.
+        `bulkDeleteStudentsBtn` inside a `document.getElementById()` null
+        -guard, were individually re-checked and confirmed not to be
+        real rendered buttons); confirmed `attendance.php`'s Xiiso Grid for
+        a real course+semester with a real offering rendered every cell
+        `disabled` with the "Read-only — you do not have write access..."
+        tooltip and a "Read-only" badge; sent 9 crafted direct POSTs
+        (students/lecturers/courses/departments/faculties/academic_years
+        create, semesters create_semester, course_offerings save_offering,
+        course_enrollments bulk_enroll) as the rector account and
+        confirmed every one of `users`/`students`/`lecturers`/`courses`/
+        `departments`/`faculties`/`semesters`/`course_offerings`/
+        `course_enrollments`/`academic_years` row counts were byte-
+        identical before and after all nine attempts, with the exact
+        expected flash message ("Access scope: View only — this role
+        cannot modify records.") rendered back; confirmed a direct AJAX
+        POST to `ajax/save_attendance_cell.php` for a real course/
+        semester/session/student combination returned HTTP `403` with
+        `{"ok":false,"message":"You do not have permission to edit
+        attendance for this course."}` and confirmed via direct DB read
+        that the targeted attendance row's `recorded_by_user_id` stayed
+        the original value (not the rector's own user id) — the request
+        never reached the write; confirmed all 5 pages meant to deny this
+        role outright (`admin/students_import.php`,
+        `admin/lecturers_import.php`, `admin/departments_import.php`,
+        `admin/courses_import.php`, `attendance_import.php`) redirect
+        (`302`) to `unauthorized.php`; confirmed both new
+        `admin/student_view.php`/`admin/lecturer_view.php` return `200`
+        with real profile/course/attendance data for a real existing
+        student (id 2) and lecturer (id 2); confirmed both eye-icon "View"
+        links render with the correct `student_id`/`lecturer_id` on the
+        rector's own rendering of `admin/students.php`/
+        `admin/lecturers.php`. Confirmed `admin/users.php` and
+        `admin/settings.php` still render their full write UI ("Assign
+        Role", "Danger Zone") for this role and did one small reversible
+        write — toggled the temporary dean account's active/inactive
+        status twice via a real POST, confirming both the flip and the
+        revert in the database. Confirmed the temporary dean account's
+        own access was completely unaffected on 3 of the 8 converted
+        pages: `admin/students.php` and `admin/departments.php` both
+        still rendered their real "Add Student"/"Add Department" buttons
+        and per-row Delete icons, and a real `admin/departments.php`
+        create (a temporary "QA Test Dept" department under the dean's
+        own Informatics faculty) succeeded and was confirmed in the
+        database; `semesters.php` still rendered its "Create Semester"
+        card for the dean. All temporary accounts and the temporary
+        department were deleted afterward; every table's row count
+        confirmed back to the exact pre-session baseline (`users` 64,
+        `students` 55, `lecturers` 2, `courses` 4, `departments` 3,
+        `faculties` 3, `semesters` 3, `course_offerings` 5,
+        `course_enrollments` 80, `academic_years` 2, `sessions` 36).
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
+### admin/courses.php: Add Course's First Offering Is Now Required, With Cross-Faculty Support
+- [x] The user asked that when Head of Academic Affairs or Dean create a
+      course, the first-offering section (previously opt-in — a course
+      could be saved catalog-only, with "Manage Offerings" used later) must
+      be **required**, and that the course should be able to belong both to
+      the faculty its own department is registered under AND, separately,
+      to a different faculty as an offering (cross-listing at creation
+      time, not only via the separate "Manage Offerings"/"Add Existing
+      Course" flow built in an earlier session's Multi-Faculty Course
+      Offerings work).
+      - **Semester (and therefore Shift) is now mandatory on create** for
+        both roles — `admin/courses.php`'s create handler now rejects
+        `offering_semester_id <= 0` with "Please select a semester for this
+        course's first offering." (previously this whole block only ran
+        when a semester was actually chosen; a course could be saved with
+        zero `course_offerings` rows). The "(optional)" labels on Academic
+        Year/Semester were removed and `required` added to both selects
+        (Shift already had server-side validation and now also has the
+        HTML attribute — safe to require even though it lives inside the
+        `offeringDetailsBlock` `d-none` wrapper, since a `display:none`
+        required field is exempt from HTML5 constraint validation, the
+        same reasoning already documented for this exact pattern in an
+        earlier session's "attendance.php: Removed Single-Session Form"
+        entry).
+      - **Cross-faculty offering at creation, Head of Academic Affairs
+        only** — Dean stays exactly as strictly own-faculty-only as every
+        other write path in this app (their Semester query is still
+        `WHERE id = ? AND faculty_id = ?` bound to `$deanFacultyId`, so
+        `$isGuestOffering` can never be true for a Dean by construction,
+        same reasoning `admin/course_offerings.php` already established for
+        its own dean-vs-not branch). For Head of Academic Affairs (the only
+        other role that ever reaches this form — `university_rector` is
+        view-only on this page per the prior session's work), a new
+        **"Offering Faculty"** dropdown (all faculties, defaults to the
+        picked Department's own faculty via a new
+        `admasOnCourseDepartmentChange()` wrapper on the Department
+        `<select>`'s `onchange`, kept deliberately separate from
+        `admasUpdateOfferingFieldsForDepartment()` itself because that
+        function is also called on page-load re-render after a failed
+        cross-faculty submission and must NOT reset the faculty back to
+        the department's own in that case) drives the Semester cascade
+        instead of always the Department's faculty. When the chosen
+        semester's faculty differs from the course's own department's
+        faculty, a **Roster Department** field (department options from
+        the *offering* faculty, via a new `$departmentsByFacultyId` id-keyed
+        map alongside the existing name-keyed `$departmentsByFaculty`)
+        appears and is required — server-side validated the same way
+        `admin/course_offerings.php`'s existing guest-offering rule already
+        works: "Roster Department must belong to the selected semester's
+        own faculty." if given but wrong, "This course's department is in
+        a different faculty than the selected semester — please select a
+        Roster Department..." if a guest offering is being created with
+        none given. `course_offerings.roster_department_id` (already in
+        the schema since the earlier Multi-Faculty Course Offerings
+        session — no migration needed here) is now written by this form's
+        INSERT for the first time.
+      - No changes to `admin/course_offerings.php`, `admin/courses_import.php`,
+        or edit-mode course saves (edit mode has no offering section at
+        all, unchanged) — this session touched only the create-mode
+        first-offering section of `admin/courses.php`.
+      - **Verified end-to-end via real HTTP requests** against the live app
+        with temporary `head_academic` and `dean` (Health faculty) test
+        accounts: confirmed a create POST with no semester is rejected for
+        both roles with zero `courses` row created; confirmed Head of
+        Academic Affairs creating a course under Informatics'
+        Information Technology department, with Offering Faculty/Semester
+        switched to Health's own current semester and no Roster Department,
+        is rejected; confirmed the same request WITH a valid Health-faculty
+        Roster Department (Nursing) succeeds and the resulting
+        `course_offerings` row has the course's own `department_id` still
+        Information Technology while `semester_id`/`roster_department_id`
+        correctly point at Health/Nursing; confirmed Dean creating a course
+        with no semester is rejected, a crafted foreign-faculty
+        `offering_semester_id` is rejected with "Please select a valid
+        semester from your own faculty." and zero DB change, and a real
+        own-faculty semester succeeds with `roster_department_id` correctly
+        `NULL` (Dean never sees or can submit that field). All temporary
+        test courses/offerings and both temporary accounts were deleted
+        afterward; `courses`/`users` row counts confirmed back to baseline.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
 

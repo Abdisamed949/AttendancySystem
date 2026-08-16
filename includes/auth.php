@@ -100,7 +100,7 @@ function can_access_faculty(int $facultyId): bool
     require_login();
 
     $currentRole = $_SESSION['role'] ?? '';
-    if ($currentRole === 'system_admin' || $currentRole === 'head_academic' || $currentRole === 'registration') {
+    if ($currentRole === 'university_rector' || $currentRole === 'head_academic' || $currentRole === 'registration') {
         return true;
     }
 

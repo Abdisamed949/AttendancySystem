@@ -14,7 +14,7 @@ require_once __DIR__ . '/../vendor/autoload.php';
 
 // Registration Office also has bulk Excel import per CLAUDE.md §4 — see
 // admin/students.php for the same reasoning.
-require_role(['system_admin', 'registration']);
+require_role(['registration']);
 
 use PhpOffice\PhpSpreadsheet\Reader\Csv;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;

@@ -1,9 +1,14 @@
 <?php
 /**
- * Course Management — System Administrator (all faculties) and Dean (own
- * faculty only, per CLAUDE.md §4). Dean's faculty_id is always read from
- * $_SESSION, never trusted from request input (same pattern used across
- * attendance.php/reports.php/admin/departments.php).
+ * Course Management — University Rector (all faculties), Head of
+ * Academic Affairs (all faculties, per the CLAUDE.md §4 revision granting
+ * this role cross-faculty Course Management), and Dean (own faculty only).
+ * Dean's faculty_id is always read from $_SESSION, never trusted from
+ * request input (same pattern used across
+ * attendance.php/reports.php/admin/departments.php). head_academic falls
+ * through the same `else` branch as university_rector everywhere in this file
+ * (the branching is on `$role === 'dean'`, not an allowlist of the
+ * unrestricted roles), so it sees/edits every faculty with no extra code.
  */
 declare(strict_types=1);
 
@@ -11,11 +16,12 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -67,11 +73,13 @@ $formValues = [
     'name' => '',
     'department_id' => 0,
     'credit_hours' => 3,
-    // Optional "first offering" fields — only meaningful on create; see the
-    // offering_semester_id > 0 branch in the create handler below.
+    // First-offering fields — only meaningful/submitted on create. Semester
+    // is required on create (see the create handler below) — a course can
+    // no longer be saved as catalog-only from this form.
     'offering_semester_id' => 0,
     'offering_shift' => '',
     'offering_lecturer_id' => 0,
+    'roster_department_id' => 0,
 ];
 
 /**
@@ -135,6 +143,11 @@ function delete_course_row(mysqli $conn, int $courseId, string $role, int $deanF
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
 
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/courses.php');
+    }
+
     if ($action === 'create' || $action === 'update') {
         $courseId = $action === 'update' ? (int) ($_POST['course_id'] ?? 0) : 0;
         $name = trim((string) ($_POST['name'] ?? ''));
@@ -142,12 +155,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $departmentId = (int) ($_POST['department_id'] ?? 0);
         $creditHours = (int) ($_POST['credit_hours'] ?? 3);
 
-        // Optional "first offering" fields — create-only, and the whole
-        // section is opt-in: left blank, the course is created exactly as
-        // before with no course_offerings row.
+        // First-offering fields — create-only. Semester is now REQUIRED on
+        // create: a course must be given its first offering (Semester +
+        // Shift) immediately rather than left catalog-only for a later
+        // "Manage Offerings" trip.
         $offeringSemesterId = $action === 'create' ? (int) ($_POST['offering_semester_id'] ?? 0) : 0;
         $offeringShift = $action === 'create' ? (string) ($_POST['offering_shift'] ?? '') : '';
         $offeringLecturerId = $action === 'create' ? (int) ($_POST['offering_lecturer_id'] ?? 0) : 0;
+        $rosterDepartmentIdRaw = $action === 'create' ? (int) ($_POST['roster_department_id'] ?? 0) : 0;
 
         $formMode = $action === 'update' ? 'edit' : 'create';
         $formValues = [
@@ -159,6 +174,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'offering_semester_id' => $offeringSemesterId,
             'offering_shift' => $offeringShift,
             'offering_lecturer_id' => $offeringLecturerId,
+            'roster_department_id' => $rosterDepartmentIdRaw,
         ];
 
         $validationError = '';
@@ -222,36 +238,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $dupStmt->close();
         }
 
-        // Only validated at all if a Semester was actually chosen — this
-        // whole section is opt-in (Semester left blank = no offering,
-        // course created exactly as before).
+        // Semester is required on create (Head of Academic Affairs / Dean
+        // must give the course a real first offering immediately). Dean is
+        // still locked to their own faculty's semesters (mirrors
+        // admin/course_offerings.php's own dean-vs-not branch exactly);
+        // Head of Academic Affairs may target ANY faculty's semester —
+        // when that semester's faculty differs from the course's own
+        // department's faculty, this is a cross-faculty "guest" offering
+        // and a Roster Department (from the semester's own faculty) is
+        // required, same rule/reasoning as admin/course_offerings.php.
         $offeringSemesterRow = null;
-        if ($validationError === '' && $offeringSemesterId > 0) {
-            $offeringSemStmt = $conn->prepare('SELECT id, name FROM semesters WHERE id = ? AND faculty_id = ?');
-            $offeringSemStmt->bind_param('ii', $offeringSemesterId, $departmentFacultyId);
-            $offeringSemStmt->execute();
-            $offeringSemesterRow = $offeringSemStmt->get_result()->fetch_assoc();
-            $offeringSemStmt->close();
-
-            if (!$offeringSemesterRow) {
-                $validationError = 'Please select a valid semester for the selected department\'s faculty.';
-            } elseif (!array_key_exists($offeringShift, OFFERING_SHIFT_LABELS)) {
-                $validationError = 'Please select a shift for the new offering.';
-            } elseif ($offeringLecturerId > 0) {
-                // Any active lecturer system-wide may be assigned, not just
-                // ones in this course's own department — universities share
-                // "common" courses across faculties via one lecturer, and a
-                // Dean assigning an outside lecturer here only ever touches
-                // a course_offerings row inside their own faculty (the
-                // course + semester still belong to them), so this doesn't
-                // widen what a Dean can see or edit elsewhere.
-                $offeringLecStmt = $conn->prepare("SELECT id FROM lecturers WHERE id = ? AND status = 'active'");
-                $offeringLecStmt->bind_param('i', $offeringLecturerId);
-                $offeringLecStmt->execute();
-                if (!$offeringLecStmt->get_result()->fetch_assoc()) {
-                    $validationError = 'Selected lecturer is not a valid active lecturer.';
+        $rosterDepartmentId = null;
+        if ($validationError === '' && $action === 'create') {
+            if ($offeringSemesterId <= 0) {
+                $validationError = 'Please select a semester for this course\'s first offering.';
+            } else {
+                if ($role === 'dean') {
+                    $offeringSemStmt = $conn->prepare('SELECT id, name, faculty_id FROM semesters WHERE id = ? AND faculty_id = ?');
+                    $offeringSemStmt->bind_param('ii', $offeringSemesterId, $deanFacultyId);
+                } else {
+                    $offeringSemStmt = $conn->prepare('SELECT id, name, faculty_id FROM semesters WHERE id = ?');
+                    $offeringSemStmt->bind_param('i', $offeringSemesterId);
                 }
-                $offeringLecStmt->close();
+                $offeringSemStmt->execute();
+                $offeringSemesterRow = $offeringSemStmt->get_result()->fetch_assoc();
+                $offeringSemStmt->close();
+
+                if (!$offeringSemesterRow) {
+                    $validationError = $role === 'dean'
+                        ? 'Please select a valid semester from your own faculty.'
+                        : 'Please select a valid semester.';
+                } elseif (!array_key_exists($offeringShift, OFFERING_SHIFT_LABELS)) {
+                    $validationError = 'Please select a shift for the new offering.';
+                } else {
+                    $isGuestOffering = (int) $offeringSemesterRow['faculty_id'] !== $departmentFacultyId;
+                    if ($rosterDepartmentIdRaw > 0) {
+                        $rdStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
+                        $rdStmt->bind_param('ii', $rosterDepartmentIdRaw, $offeringSemesterRow['faculty_id']);
+                        $rdStmt->execute();
+                        $rdRow = $rdStmt->get_result()->fetch_assoc();
+                        $rdStmt->close();
+                        if (!$rdRow) {
+                            $validationError = 'Roster Department must belong to the selected semester\'s own faculty.';
+                        } else {
+                            $rosterDepartmentId = $rosterDepartmentIdRaw;
+                        }
+                    } elseif ($isGuestOffering) {
+                        $validationError = 'This course\'s department is in a different faculty than the selected semester — please select a Roster Department so the correct students are used for this offering.';
+                    }
+
+                    if ($validationError === '' && $offeringLecturerId > 0) {
+                        // Any active lecturer system-wide may be assigned, not
+                        // just ones in this course's own department —
+                        // universities share "common" courses across
+                        // faculties via one lecturer.
+                        $offeringLecStmt = $conn->prepare("SELECT id FROM lecturers WHERE id = ? AND status = 'active'");
+                        $offeringLecStmt->bind_param('i', $offeringLecturerId);
+                        $offeringLecStmt->execute();
+                        if (!$offeringLecStmt->get_result()->fetch_assoc()) {
+                            $validationError = 'Selected lecturer is not a valid active lecturer.';
+                        }
+                        $offeringLecStmt->close();
+                    }
+                }
             }
         }
 
@@ -269,9 +318,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($offeringSemesterId > 0) {
                         $offeringLecturerParam = $offeringLecturerId > 0 ? $offeringLecturerId : null;
                         $offerStmt = $conn->prepare(
-                            'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift) VALUES (?, ?, ?, ?)'
+                            'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift) VALUES (?, ?, ?, ?, ?)'
                         );
-                        $offerStmt->bind_param('iiis', $newCourseId, $offeringSemesterId, $offeringLecturerParam, $offeringShift);
+                        $offerStmt->bind_param('iiiis', $newCourseId, $offeringSemesterId, $offeringLecturerParam, $rosterDepartmentId, $offeringShift);
                         $offerStmt->execute();
                         $offerStmt->close();
                         $offeringCreated = true;
@@ -527,7 +576,26 @@ foreach ($departments as $dept) {
     $facultyIdByDepartmentId[(int) $dept['id']] = (int) $dept['faculty_id'];
 }
 
-// Semester options for the Add Course form's optional "first offering"
+// Departments grouped by faculty id (not name) — feeds the Roster
+// Department cascade below, same shape as admin/course_offerings.php's own
+// $departmentsByFacultyId. Faculty list for the "Offering Faculty" picker
+// (Head of Academic Affairs only — Dean never sees this control, their
+// offering is always inside their own single faculty) is derived from the
+// same distinct faculty ids/names already present in $departments.
+$departmentsByFacultyId = [];
+$offeringFacultiesForForm = [];
+$seenOfferingFacultyIds = [];
+foreach ($departments as $dept) {
+    $deptFacultyId = (int) $dept['faculty_id'];
+    $departmentsByFacultyId[$deptFacultyId][] = ['id' => (int) $dept['id'], 'name' => $dept['name']];
+    if (!isset($seenOfferingFacultyIds[$deptFacultyId])) {
+        $seenOfferingFacultyIds[$deptFacultyId] = true;
+        $offeringFacultiesForForm[] = ['id' => $deptFacultyId, 'name' => $dept['faculty_name']];
+    }
+}
+usort($offeringFacultiesForForm, static fn ($a, $b) => strcmp($a['name'], $b['name']));
+
+// Semester options for the Add Course form's "first offering"
 // section — grouped by faculty THEN by academic year for the
 // Department -> Academic Year -> Semester cascade (Academic Year is a
 // real, freely-selectable dropdown listing every academic year in the
@@ -565,6 +633,7 @@ $allAcademicYears = $conn->query('SELECT id, label FROM academic_years ORDER BY 
 
 $semestersByFacultyId = [];
 $offeringSemesterAcademicYearById = [];
+$offeringSemesterFacultyById = [];
 foreach ($offeringSemesters as $sem) {
     $semestersByFacultyId[(int) $sem['faculty_id']][(int) $sem['academic_year_id']][] = [
         'id' => (int) $sem['id'],
@@ -573,6 +642,7 @@ foreach ($offeringSemesters as $sem) {
         'status' => $sem['status'],
     ];
     $offeringSemesterAcademicYearById[(int) $sem['id']] = (int) $sem['academic_year_id'];
+    $offeringSemesterFacultyById[(int) $sem['id']] = (int) $sem['faculty_id'];
 }
 
 // Lecturer options for the Department -> Lecturer cascade. Every active
@@ -624,9 +694,13 @@ foreach ($offeringLecturers as $lec) {
         <div class="page-body">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                <?= $role === 'dean'
-                    ? 'Access scope: ' . htmlspecialchars($deanFacultyName) . ' Faculty only'
-                    : 'Access scope: Full system — all faculties, departments, and courses' ?>
+                <?php if ($role === 'dean'): ?>
+                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                <?php elseif ($isReadOnly): ?>
+                    Access scope: Full system — view only (oversight)
+                <?php else: ?>
+                    Access scope: Full system — all faculties, departments, and courses
+                <?php endif; ?>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -650,30 +724,32 @@ foreach ($offeringLecturers as $lec) {
             <?php endif; ?>
 
             <div class="row g-3">
-                <div class="col-lg-8">
+                <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-8' ?>">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Courses</h6>
                             <div class="d-flex gap-2">
-                                <button type="button" id="bulkDeleteCoursesBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
-                                <?php if ($role === 'system_admin'): ?>
+                                <?php if (!$isReadOnly): ?>
+                                    <button type="button" id="bulkDeleteCoursesBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                         <i class="bi bi-file-earmark-arrow-up"></i> Import from Excel
                                     </a>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings_search.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" title="Cross-list a course whose catalog home is a different faculty into <?= $role === 'dean' ? 'your own faculty' : 'any faculty' ?>'s semester">
+                                        <i class="bi bi-signpost-2"></i> Add Existing Course
+                                    </a>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                        <i class="bi bi-plus-lg"></i> Add Course
+                                    </a>
                                 <?php endif; ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings_search.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" title="Cross-list a course whose catalog home is a different faculty into <?= $role === 'dean' ? 'your own faculty' : 'any faculty' ?>'s semester">
-                                    <i class="bi bi-signpost-2"></i> Add Existing Course
-                                </a>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                    <i class="bi bi-plus-lg"></i> Add Course
-                                </a>
                             </div>
                         </div>
 
+                        <?php if (!$isReadOnly): ?>
         <form id="bulkDeleteCoursesForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="d-none">
                             <input type="hidden" name="action" value="bulk_delete">
                             <div id="bulkDeleteCoursesIds"></div>
                         </form>
+                        <?php endif; ?>
 
                         <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" id="coursesFilterForm" class="mb-3">
                             <div class="input-group input-group-sm" style="max-width: 340px;">
@@ -690,7 +766,7 @@ foreach ($offeringLecturers as $lec) {
                             <table class="table admas-table align-middle">
                                 <thead>
                                     <tr>
-                                        <th><input type="checkbox" id="selectAllCourses"></th>
+                                        <?php if (!$isReadOnly): ?><th><input type="checkbox" id="selectAllCourses"></th><?php endif; ?>
                                         <th>Code</th>
                                         <th>Course Name</th>
                                         <th>Department</th>
@@ -708,10 +784,12 @@ foreach ($offeringLecturers as $lec) {
                                     <?php else: ?>
                                         <?php foreach ($courses as $c): ?>
                                             <tr>
+                                                <?php if (!$isReadOnly): ?>
                                                 <td>
                                                     <input type="checkbox" class="row-check-course" value="<?= (int) $c['id'] ?>"
                                                            data-label="<?= htmlspecialchars($c['name'] . ' (' . $c['code'] . ')') ?>">
                                                 </td>
+                                                <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span></td>
                                                 <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['name']) ?></td>
                                                 <td><?= htmlspecialchars($c['department_name']) ?></td>
@@ -773,12 +851,13 @@ foreach ($offeringLecturers as $lec) {
                                                 <td><?= (int) $c['credit_hours'] ?></td>
                                                 <td>
                                                     <div class="d-flex flex-column align-items-start gap-1">
-                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="Manage Offerings">
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="<?= $isReadOnly ? 'View Offerings' : 'Manage Offerings' ?>">
                                                             <i class="bi bi-calendar2-week"></i> Offerings
                                                         </a>
-                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="Enroll Students">
-                                                            <i class="bi bi-person-check"></i> Enroll
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="<?= $isReadOnly ? 'View Enrolled Students' : 'Enroll Students' ?>">
+                                                            <i class="bi bi-person-check"></i> <?= $isReadOnly ? 'Enrolled' : 'Enroll' ?>
                                                         </a>
+                                                        <?php if (!$isReadOnly): ?>
                                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php?edit=<?= (int) $c['id'] ?>" class="btn-icon-label" title="Edit">
                                                             <i class="bi bi-pencil"></i> Edit
                                                         </a>
@@ -790,6 +869,7 @@ foreach ($offeringLecturers as $lec) {
                                                                 <i class="bi bi-trash"></i> Delete
                                                             </button>
                                                         </form>
+                                                        <?php endif; ?>
                                                     </div>
                                                 </td>
                                             </tr>
@@ -801,6 +881,7 @@ foreach ($offeringLecturers as $lec) {
                     </div>
                 </div>
 
+                <?php if (!$isReadOnly): ?>
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
                         <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
@@ -827,7 +908,7 @@ foreach ($offeringLecturers as $lec) {
 
                             <div class="mb-3">
                                 <label for="courseDepartmentSelect" class="form-label">Department</label>
-                                <select class="form-select" id="courseDepartmentSelect" name="department_id" required onchange="admasUpdateOfferingFieldsForDepartment(this.value)">
+                                <select class="form-select" id="courseDepartmentSelect" name="department_id" required onchange="admasOnCourseDepartmentChange(this.value)">
                                     <option value="">Select department</option>
                                     <?php foreach ($departmentsByFaculty as $facultyName => $deptList): ?>
                                         <optgroup label="<?= htmlspecialchars($facultyName) ?>">
@@ -858,11 +939,24 @@ foreach ($offeringLecturers as $lec) {
                                 </div>
                             <?php else: ?>
                                 <hr class="my-3">
-                                <p class="small text-muted mb-2">Optionally create this course's first offering now, instead of using "Manage Offerings" afterward.</p>
+                                <p class="small text-muted mb-2">This course's first offering (Semester + Shift) is required now — it can no longer be left catalog-only.</p>
+
+                                <?php if ($role !== 'dean'): ?>
+                                <div class="mb-3">
+                                    <label for="offeringFacultySelect" class="form-label">Offering Faculty</label>
+                                    <select class="form-select" id="offeringFacultySelect" onchange="admasRebuildOfferingSemesterOptions(); admasUpdateRosterDepartmentVisibility();">
+                                        <option value="">Select faculty</option>
+                                        <?php foreach ($offeringFacultiesForForm as $fac): ?>
+                                            <option value="<?= (int) $fac['id'] ?>"><?= htmlspecialchars($fac['name']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <div class="form-text">Defaults to the selected department's own faculty. Change it to offer this course into a different faculty's semester instead (cross-listing).</div>
+                                </div>
+                                <?php endif; ?>
 
                                 <div class="mb-3">
-                                    <label for="offeringAcademicYearSelect" class="form-label">Academic Year <span class="text-muted fw-normal">(optional)</span></label>
-                                    <select class="form-select" id="offeringAcademicYearSelect" onchange="admasRebuildOfferingSemesterOptions()">
+                                    <label for="offeringAcademicYearSelect" class="form-label">Academic Year</label>
+                                    <select class="form-select" id="offeringAcademicYearSelect" onchange="admasRebuildOfferingSemesterOptions()" required>
                                         <option value="">Select academic year</option>
                                         <?php foreach ($allAcademicYears as $ay): ?>
                                             <option value="<?= (int) $ay['id'] ?>"><?= htmlspecialchars($ay['label']) ?></option>
@@ -871,8 +965,8 @@ foreach ($offeringLecturers as $lec) {
                                 </div>
 
                                 <div class="mb-3">
-                                    <label for="offeringSemesterSelect" class="form-label">Semester <span class="text-muted fw-normal">(optional)</span></label>
-                                    <select class="form-select" id="offeringSemesterSelect" name="offering_semester_id" onchange="admasUpdateOfferingSemesterChange()">
+                                    <label for="offeringSemesterSelect" class="form-label">Semester</label>
+                                    <select class="form-select" id="offeringSemesterSelect" name="offering_semester_id" onchange="admasUpdateOfferingSemesterChange()" required>
                                         <option value="">Select a department and academic year first</option>
                                     </select>
                                 </div>
@@ -880,7 +974,7 @@ foreach ($offeringLecturers as $lec) {
                                 <div id="offeringDetailsBlock" class="d-none">
                                     <div class="mb-3">
                                         <label for="offeringShiftSelect" class="form-label">Shift</label>
-                                        <select class="form-select" id="offeringShiftSelect" name="offering_shift">
+                                        <select class="form-select" id="offeringShiftSelect" name="offering_shift" required>
                                             <option value="">Select shift</option>
                                             <?php foreach (OFFERING_SHIFT_LABELS as $shiftValue => $shiftLabel): ?>
                                                 <option value="<?= htmlspecialchars($shiftValue) ?>" <?= $formValues['offering_shift'] === $shiftValue ? 'selected' : '' ?>>
@@ -889,6 +983,16 @@ foreach ($offeringLecturers as $lec) {
                                             <?php endforeach; ?>
                                         </select>
                                     </div>
+
+                                    <?php if ($role !== 'dean'): ?>
+                                    <div class="mb-3 d-none" id="offeringRosterDepartmentBlock">
+                                        <label for="offeringRosterDepartmentSelect" class="form-label">Roster Department</label>
+                                        <select class="form-select" id="offeringRosterDepartmentSelect" name="roster_department_id">
+                                            <option value="">Select roster department</option>
+                                        </select>
+                                        <div class="form-text">Required for a cross-faculty offering — decides which department's students form this offering's roster.</div>
+                                    </div>
+                                    <?php endif; ?>
 
                                     <div class="mb-3">
                                         <label for="offeringLecturerSelect" class="form-label">Lecturer</label>
@@ -906,6 +1010,7 @@ foreach ($offeringLecturers as $lec) {
                         </form>
                     </div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -916,31 +1021,80 @@ foreach ($offeringLecturers as $lec) {
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
-            admasInitBulkDelete({
-                checkboxSelector: '.row-check-course',
-                selectAllSelector: '#selectAllCourses',
-                buttonSelector: '#bulkDeleteCoursesBtn',
-                formSelector: '#bulkDeleteCoursesForm',
-                hiddenContainerSelector: '#bulkDeleteCoursesIds',
-                hiddenInputName: 'course_ids[]',
-                entityLabel: 'course',
-                entityLabelPlural: 'courses',
-            });
+            if (document.getElementById('bulkDeleteCoursesBtn')) {
+                admasInitBulkDelete({
+                    checkboxSelector: '.row-check-course',
+                    selectAllSelector: '#selectAllCourses',
+                    buttonSelector: '#bulkDeleteCoursesBtn',
+                    formSelector: '#bulkDeleteCoursesForm',
+                    hiddenContainerSelector: '#bulkDeleteCoursesIds',
+                    hiddenInputName: 'course_ids[]',
+                    entityLabel: 'course',
+                    entityLabelPlural: 'courses',
+                });
+            }
             admasInitLiveFilter('#coursesFilterForm');
         });
 
-        // Add Course form's optional "first offering" section (create mode
-        // only — these elements don't exist at all in edit mode, so every
+        // Add Course form's "first offering" section (create mode only —
+        // these elements don't exist at all in edit mode, so every
         // function here is a no-op if it can't find them).
         const facultyIdByDepartmentId = <?= json_encode($facultyIdByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         // Nested by faculty THEN academic year — Semester is cascaded from
-        // BOTH (Department's faculty, chosen Academic Year), never from
-        // Semester alone, since the same semester name can legitimately
-        // repeat across different academic years for one faculty.
+        // BOTH (the Offering Faculty — Head of Academic Affairs only, else
+        // the Department's own faculty — and the chosen Academic Year),
+        // never from Semester alone, since the same semester name can
+        // legitimately repeat across different academic years for one
+        // faculty.
         const semestersByFacultyId = <?= json_encode($semestersByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const offeringSemesterAcademicYearById = <?= json_encode($offeringSemesterAcademicYearById, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const offeringSemesterFacultyById = <?= json_encode($offeringSemesterFacultyById, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+        const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const lecturersByDepartmentId = <?= json_encode($lecturersByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allActiveLecturers = <?= json_encode($allActiveLecturers, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        function admasCurrentOfferingFacultyId() {
+            const facultySelect = document.getElementById('offeringFacultySelect');
+            const departmentSelect = document.getElementById('courseDepartmentSelect');
+            if (facultySelect) {
+                return facultySelect.value;
+            }
+            return departmentSelect ? String(facultyIdByDepartmentId[departmentSelect.value] ?? '') : '';
+        }
+
+        function admasUpdateRosterDepartmentVisibility() {
+            const rosterBlock = document.getElementById('offeringRosterDepartmentBlock');
+            const rosterSelect = document.getElementById('offeringRosterDepartmentSelect');
+            const departmentSelect = document.getElementById('courseDepartmentSelect');
+            if (!rosterBlock || !rosterSelect || !departmentSelect) {
+                return;
+            }
+
+            const homeFacultyId = String(facultyIdByDepartmentId[departmentSelect.value] ?? '');
+            const offeringFacultyId = admasCurrentOfferingFacultyId();
+            const isGuest = offeringFacultyId !== '' && offeringFacultyId !== homeFacultyId;
+
+            if (isGuest) {
+                rosterBlock.classList.remove('d-none');
+                const depts = departmentsByFacultyId[offeringFacultyId] || [];
+                const priorValue = rosterSelect.value;
+                rosterSelect.innerHTML = '';
+                const blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = depts.length ? 'Select roster department' : 'No departments in this faculty yet';
+                rosterSelect.appendChild(blank);
+                depts.forEach((d) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(d.id);
+                    opt.textContent = d.name;
+                    rosterSelect.appendChild(opt);
+                });
+                rosterSelect.value = priorValue;
+            } else {
+                rosterBlock.classList.add('d-none');
+                rosterSelect.value = '';
+            }
+        }
 
         function admasRebuildOfferingSemesterOptions(selectedSemesterId) {
             const semesterSelect = document.getElementById('offeringSemesterSelect');
@@ -952,8 +1106,8 @@ foreach ($offeringLecturers as $lec) {
 
             const departmentId = departmentSelect.value;
             const academicYearId = academicYearSelect.value;
-            const facultyId = facultyIdByDepartmentId[departmentId];
-            const semesters = (facultyId !== undefined && academicYearId && semestersByFacultyId[facultyId])
+            const facultyId = admasCurrentOfferingFacultyId();
+            const semesters = (facultyId !== '' && academicYearId && semestersByFacultyId[facultyId])
                 ? (semestersByFacultyId[facultyId][academicYearId] || [])
                 : [];
 
@@ -980,6 +1134,21 @@ foreach ($offeringLecturers as $lec) {
                 semesterSelect.value = '';
             }
             admasUpdateOfferingSemesterChange();
+        }
+
+        // Fired directly by the Department <select>'s onchange — resets the
+        // Offering Faculty picker back to the newly-picked department's own
+        // faculty (the user can still change it afterward to cross-list
+        // into a different faculty's semester). Kept separate from
+        // admasUpdateOfferingFieldsForDepartment() itself, which is also
+        // called on page load to RESTORE a prior cross-faculty submission
+        // and must NOT reset the faculty back to the department's own.
+        function admasOnCourseDepartmentChange(departmentId) {
+            const facultySelect = document.getElementById('offeringFacultySelect');
+            if (facultySelect) {
+                facultySelect.value = String(facultyIdByDepartmentId[departmentId] ?? '');
+            }
+            admasUpdateOfferingFieldsForDepartment(departmentId);
         }
 
         function admasUpdateOfferingFieldsForDepartment(departmentId, selectedSemesterId) {
@@ -1020,6 +1189,7 @@ foreach ($offeringLecturers as $lec) {
             }
 
             admasRebuildOfferingSemesterOptions(selectedSemesterId);
+            admasUpdateRosterDepartmentVisibility();
         }
 
         function admasUpdateOfferingSemesterChange() {
@@ -1034,14 +1204,18 @@ foreach ($offeringLecturers as $lec) {
             } else {
                 detailsBlock.classList.add('d-none');
             }
+            admasUpdateRosterDepartmentVisibility();
         }
 
         window.addEventListener('DOMContentLoaded', () => {
             const departmentSelect = document.getElementById('courseDepartmentSelect');
             const academicYearSelect = document.getElementById('offeringAcademicYearSelect');
             const offeringLecturerSelect = document.getElementById('offeringLecturerSelect');
+            const facultySelect = document.getElementById('offeringFacultySelect');
+            const rosterSelect = document.getElementById('offeringRosterDepartmentSelect');
             if (departmentSelect && document.getElementById('offeringSemesterSelect')) {
                 const priorSemesterId = <?= (int) $formValues['offering_semester_id'] ?>;
+                const priorRosterDepartmentId = <?= (int) $formValues['roster_department_id'] ?>;
                 // Re-select whichever Academic Year that prior Semester
                 // belonged to (failed-submit re-render only — Academic Year
                 // itself isn't a submitted field, since course_offerings
@@ -1049,9 +1223,18 @@ foreach ($offeringLecturers as $lec) {
                 if (academicYearSelect && priorSemesterId && offeringSemesterAcademicYearById[priorSemesterId]) {
                     academicYearSelect.value = String(offeringSemesterAcademicYearById[priorSemesterId]);
                 }
+                // Re-select whichever faculty that prior Semester actually
+                // belonged to (may differ from the department's own faculty
+                // on a failed cross-faculty submit) before rebuilding.
+                if (facultySelect && priorSemesterId && offeringSemesterFacultyById[priorSemesterId] !== undefined) {
+                    facultySelect.value = String(offeringSemesterFacultyById[priorSemesterId]);
+                }
                 admasUpdateOfferingFieldsForDepartment(departmentSelect.value, priorSemesterId);
                 if (offeringLecturerSelect) {
                     offeringLecturerSelect.value = <?= json_encode((string) $formValues['offering_lecturer_id']) ?>;
+                }
+                if (rosterSelect && priorRosterDepartmentId) {
+                    rosterSelect.value = String(priorRosterDepartmentId);
                 }
             }
         });

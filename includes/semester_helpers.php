@@ -36,9 +36,19 @@ function session_label(array $session): string
  * invalid). "Current" is set by hand via semesters.php's Start/End/Waiting
  * buttons, not derived from calendar dates. If more than one of that
  * faculty's semesters is concurrently current (multiple active batches),
- * the most recently created one is returned — callers that need a single
- * "your current semester" for display, not every caller needing to know
- * about every concurrently-running one.
+ * the one belonging to the most recent Academic Year is returned — tied by
+ * comparing `academic_years.label` (e.g. "2025/2026" > "2023/2024"), NOT
+ * `academic_years.id` or `semesters.id`, since neither is guaranteed to
+ * have been created in chronological order (a real incident: Informatics
+ * had Semester 9/academic year "2023/2024" and Semester 3/academic year
+ * "2025/2026" both marked current at once, and ordering by id alone picked
+ * the wrong one — "Take Attendance" links kept landing on a semester the
+ * clicked course had no real offering in). Labels are a reliable sort key
+ * here because they're always the consistent "YYYY/YYYY" shape, so a plain
+ * string DESC comparison already sorts chronologically. `semesters.id DESC`
+ * is still the final tie-break for two semesters sharing one academic year.
+ * Callers that need a single "your current semester" for display, not
+ * every caller needing to know about every concurrently-running one.
  */
 function get_current_semester(mysqli $conn, int $facultyId): ?array
 {
@@ -52,7 +62,7 @@ function get_current_semester(mysqli $conn, int $facultyId): ?array
          FROM semesters s
          JOIN academic_years ay ON ay.id = s.academic_year_id
          WHERE s.status = 'current' AND s.faculty_id = ?
-         ORDER BY s.id DESC
+         ORDER BY ay.label DESC, s.id DESC
          LIMIT 1"
     );
     $stmt->bind_param('i', $facultyId);

@@ -1,6 +1,6 @@
 <?php
 /**
- * Academic Year Management (System Administrator only).
+ * Academic Year Management (University Rector only).
  *
  * Moved out of admin/settings.php into its own CRUD page — previously an
  * admin had to go into Settings just to add a new academic year label
@@ -19,9 +19,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 
-require_role(['system_admin']);
+require_role(['university_rector']);
 
 $conn = db();
+$isReadOnly = (current_role() === 'university_rector');
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -59,6 +60,11 @@ $reopenLabel = '';
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/academic_years.php');
+    }
 
     if ($action === 'create' || $action === 'update') {
         $academicYearId = $action === 'update' ? (int) ($_POST['academic_year_id'] ?? 0) : 0;
@@ -169,7 +175,7 @@ $academicYears = $conn->query(
         <div class="page-body">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                Access scope: Full system — all faculties, departments, and courses
+                Access scope: Full system — view only (oversight)
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -195,10 +201,12 @@ $academicYears = $conn->query(
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Academic Years</h6>
+                    <?php if (!$isReadOnly): ?>
                     <button type="button" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"
                             onclick='openAcademicYearModal("create", 0, "")'>
                         <i class="bi bi-plus-lg"></i> Add Academic Year
                     </button>
+                    <?php endif; ?>
                 </div>
 
                 <div class="table-responsive">
@@ -223,6 +231,9 @@ $academicYears = $conn->query(
                                         <td><?= number_format((int) $ay['semester_count']) ?></td>
                                         <td><?= number_format((int) $ay['student_count']) ?></td>
                                         <td>
+                                            <?php if ($isReadOnly): ?>
+                                                <span class="text-muted">&mdash;</span>
+                                            <?php else: ?>
                                             <button type="button" class="btn-icon text-sky" title="Edit"
                                                     onclick='openAcademicYearModal("edit", <?= (int) $ay['id'] ?>, <?= json_encode($ay['label'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>
                                                 <i class="bi bi-pencil"></i>
@@ -235,6 +246,7 @@ $academicYears = $conn->query(
                                                     <i class="bi bi-trash"></i>
                                                 </button>
                                             </form>
+                                            <?php endif; ?>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -247,6 +259,7 @@ $academicYears = $conn->query(
     </div>
 
     <!-- Add / Edit Academic Year modal (shared) -->
+    <?php if (!$isReadOnly): ?>
     <div class="modal fade" id="academicYearModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
             <div class="modal-content" style="border-radius: 14px;">
@@ -272,8 +285,10 @@ $academicYears = $conn->query(
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <?php if (!$isReadOnly): ?>
     <script>
         function openAcademicYearModal(mode, academicYearId, label) {
             document.getElementById('academicYearModalLabel').textContent = mode === 'edit' ? 'Edit Academic Year' : 'Add Academic Year';
@@ -294,5 +309,6 @@ $academicYears = $conn->query(
         });
         <?php endif; ?>
     </script>
+    <?php endif; ?>
 </body>
 </html>

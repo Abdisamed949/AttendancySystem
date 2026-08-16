@@ -101,6 +101,36 @@ body {
     flex-direction: column;
     overflow: hidden;
     z-index: 1030;
+    transition: transform 0.28s ease;
+}
+
+/* Mobile sidebar open/close controls — the button and backdrop only ever
+   render visible on mobile (see the max-width: 991.98px block below),
+   since the sidebar is always visible in place on desktop. */
+.sidebar-toggle-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    font-size: 1.4rem;
+    line-height: 1;
+    color: var(--admas-text);
+    padding: 0.25rem 0.5rem;
+    margin-right: 0.5rem;
+    cursor: pointer;
+}
+
+.sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 1029;
+}
+
+body.sidebar-open .sidebar-backdrop {
+    display: block;
 }
 
 /* Pinned at the top of the sidebar — never scrolls away, same "keep it
@@ -410,19 +440,27 @@ a.kpi-card {
     cursor: pointer;
 }
 
-a.kpi-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 16px 30px var(--admas-shadow), 0 4px 10px var(--admas-shadow);
-    border-color: var(--admas-sky);
-}
+/* Scoped to devices with a real mouse/hover (desktop) — without this,
+   touch browsers apply :hover on tap and hold it, making the card visibly
+   lift/jump on every tap on a phone (reported as the dashboard cards
+   "moving" on mobile). Touch users still get the normal :active tap
+   feedback the browser provides on its own; they just don't get this
+   lift effect, which only ever made sense for a real mouse hover. */
+@media (hover: hover) and (pointer: fine) {
+    a.kpi-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 16px 30px var(--admas-shadow), 0 4px 10px var(--admas-shadow);
+        border-color: var(--admas-sky);
+    }
 
-a.kpi-card:hover .kpi-icon {
-    transform: scale(1.08) rotate(-4deg);
-}
+    a.kpi-card:hover .kpi-icon {
+        transform: scale(1.08) rotate(-4deg);
+    }
 
-a.kpi-card:hover .kpi-arrow {
-    opacity: 1;
-    transform: translateX(0);
+    a.kpi-card:hover .kpi-arrow {
+        opacity: 1;
+        transform: translateX(0);
+    }
 }
 
 .kpi-icon {
@@ -663,6 +701,49 @@ td.col-exam {
     color: var(--admas-text-muted);
 }
 
+/* Xiiso grid tables on a phone-width screen (attendance.php's Grid View,
+   reports.php's Xiiso Attendance Grid, student/xiiso_grid.php) — the
+   table already scrolls horizontally via .table-responsive, but at full
+   desktop sizing the scroll distance across 12 sessions + P/A/% is long.
+   Tightening padding/font here shortens that scroll without touching
+   desktop sizing at all. Scoped to the Xiiso-specific classes only, so
+   this never affects an ordinary list table elsewhere in the app. */
+@media (max-width: 767.98px) {
+    table.admas-table th.grid-month-band,
+    table.admas-table th.col-exam,
+    table.admas-table td.col-exam,
+    table.admas-table th.col-summary,
+    table.admas-table td.col-summary {
+        padding: 0.35rem 0.4rem;
+        font-size: 0.7rem;
+    }
+
+    table.admas-table .badge-pill {
+        padding: 0.15rem 0.45rem;
+        font-size: 0.68rem;
+    }
+
+    .grid-cell {
+        width: 1.9rem;
+        height: 1.9rem;
+        font-size: 0.68rem;
+    }
+
+    /* Student's own single-row Xiiso grid (student/xiiso_grid.php) — keeps
+       Full Name/Student No visible while scrolling right through the 12
+       session columns, so the row never scrolls out from under its own
+       label. This exact class combination (.col-summary.text-start) only
+       ever marks that one identity column on that one page. */
+    table.admas-table th.col-summary.text-start,
+    table.admas-table td.col-summary.text-start {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        box-shadow: 2px 0 4px var(--admas-shadow);
+        max-width: 130px;
+    }
+}
+
 /* Shared small icon-button (edit/delete row actions) — previously
    copy-pasted into a local <style> block on 8 different pages. */
 .btn-icon {
@@ -730,7 +811,447 @@ td.col-exam {
         transform: translateX(-100%);
     }
 
+    body.sidebar-open .sidebar {
+        transform: translateX(0);
+    }
+
     .main-content {
         margin-left: 0;
+    }
+
+    .sidebar-toggle-btn {
+        display: inline-flex;
+    }
+
+    /* The search box competes for space with the new hamburger button on a
+       narrow topbar — shrink it instead of letting it push the bell/avatar
+       off-screen. */
+    .topbar-search {
+        width: auto;
+        max-width: 34vw;
+    }
+}
+
+@media (max-width: 575.98px) {
+    /* Below a phone's own width, the search box has no room to earn its
+       keep next to the hamburger + bell + avatar cluster — hide it rather
+       than let it squeeze everything else into unreadable slivers. */
+    .topbar-search {
+        display: none;
+    }
+}
+
+/* ---------------------------------------------------------------------
+   Profile hero header — used by admin/student_view.php and
+   admin/lecturer_view.php (University Rector's read-only detail pages) to
+   show the record's own photo/initials alongside its name in a branded
+   banner, instead of a bare <h4>.
+   --------------------------------------------------------------------- */
+.profile-hero {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 1.5rem 1.75rem;
+    border-radius: 18px;
+    background: linear-gradient(120deg, var(--admas-navy-start), var(--admas-navy-end));
+    color: #fff;
+    margin-bottom: 1.25rem;
+    position: relative;
+    overflow: hidden;
+}
+
+.profile-hero::after {
+    content: '';
+    position: absolute;
+    top: -40%;
+    right: -8%;
+    width: 220px;
+    height: 220px;
+    border-radius: 50%;
+    background: rgba(14, 165, 233, 0.25);
+    pointer-events: none;
+}
+
+.profile-hero-photo {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 3px solid var(--admas-sky);
+    flex-shrink: 0;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    position: relative;
+    z-index: 1;
+}
+
+.profile-hero-initials {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    background: var(--admas-sky);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 1.7rem;
+    flex-shrink: 0;
+    border: 3px solid rgba(255, 255, 255, 0.35);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    position: relative;
+    z-index: 1;
+}
+
+.profile-hero-body {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+}
+
+.profile-hero-name {
+    font-size: 1.4rem;
+    font-weight: 800;
+    margin: 0 0 0.2rem;
+    color: #fff;
+}
+
+.profile-hero-meta {
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.88rem;
+    margin: 0;
+}
+
+.profile-hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: rgba(14, 165, 233, 0.25);
+    color: #7dd3fc;
+    border: 1px solid rgba(125, 211, 252, 0.4);
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-top: 0.4rem;
+}
+
+/* Info grid used to redesign the plain "Profile" fact rows on the detail
+   pages into small individually-cardified tiles instead of bare label/value
+   pairs sitting on the page background. */
+.info-tile {
+    background: var(--admas-bg);
+    border: 1px solid var(--admas-border);
+    border-radius: 12px;
+    padding: 0.8rem 1rem;
+    height: 100%;
+}
+
+.info-tile-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--admas-text-muted);
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+}
+
+.info-tile-value {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--admas-text);
+}
+
+.section-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    color: var(--admas-text);
+    margin-bottom: 1rem;
+}
+
+.section-heading i {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+    font-size: 1rem;
+}
+
+/* ---------------------------------------------------------------------
+   Export card — sky-blue themed panel offering Excel/PDF export, reused
+   on admin/students.php, admin/lecturers.php and semesters.php.
+   --------------------------------------------------------------------- */
+.export-card {
+    background: linear-gradient(135deg, var(--admas-sky), #38bdf8);
+    border-radius: 16px;
+    padding: 1.25rem 1.5rem;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    box-shadow: 0 10px 25px rgba(14, 165, 233, 0.25);
+    margin-bottom: 1.25rem;
+}
+
+.export-card-title {
+    font-weight: 800;
+    font-size: 1.02rem;
+    margin: 0 0 0.15rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.export-card-sub {
+    font-size: 0.82rem;
+    color: rgba(255, 255, 255, 0.85);
+    margin: 0;
+}
+
+.export-card .btn {
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.export-card .btn:hover {
+    background: #fff;
+    color: var(--admas-sky);
+}
+
+/* ---------------------------------------------------------------------
+   Staff Messages (messages.php) — WhatsApp-style two-pane chat shared by
+   University Rector / Head of Academic Affairs / Dean / Lecturer /
+   Registration Office, so any one of them can reach any other directly.
+   --------------------------------------------------------------------- */
+.chat-shell {
+    display: flex;
+    height: calc(100vh - 230px);
+    min-height: 480px;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid var(--admas-border);
+    background: var(--admas-surface);
+}
+
+.chat-contacts {
+    width: 300px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--admas-border);
+    display: flex;
+    flex-direction: column;
+    background: var(--admas-bg);
+}
+
+.chat-contacts-header {
+    padding: 1rem 1.1rem 0.75rem;
+    font-weight: 800;
+    color: var(--admas-text);
+    border-bottom: 1px solid var(--admas-border);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.chat-contacts-list {
+    overflow-y: auto;
+    flex: 1;
+}
+
+.chat-contact {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.7rem 1.1rem;
+    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    border-bottom: 1px solid var(--admas-border);
+    position: relative;
+    transition: background-color 0.15s ease;
+}
+
+.chat-contact:hover {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+}
+
+.chat-contact.active {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    border-left: 3px solid var(--admas-sky);
+}
+
+.chat-contact-photo,
+.chat-contact-initials {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    object-fit: cover;
+}
+
+.chat-contact-initials {
+    background: var(--admas-navy-start);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+}
+
+.chat-contact-body {
+    min-width: 0;
+    flex: 1;
+}
+
+.chat-contact-name {
+    font-weight: 700;
+    font-size: 0.87rem;
+    color: var(--admas-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-contact-role {
+    font-size: 0.72rem;
+    color: var(--admas-text-muted);
+}
+
+.chat-contact-unread {
+    background: var(--admas-sky);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    border-radius: 999px;
+    min-width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    flex-shrink: 0;
+}
+
+.chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.chat-panel-header {
+    padding: 0.85rem 1.25rem;
+    border-bottom: 1px solid var(--admas-border);
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    background: var(--admas-surface);
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: var(--admas-bg);
+}
+
+.chat-bubble {
+    max-width: 62%;
+    padding: 0.55rem 0.85rem;
+    border-radius: 14px;
+    font-size: 0.88rem;
+    line-height: 1.4;
+    word-break: break-word;
+    box-shadow: 0 1px 2px var(--admas-shadow);
+}
+
+.chat-bubble.mine {
+    align-self: flex-end;
+    background: var(--admas-sky);
+    color: #fff;
+    border-bottom-right-radius: 4px;
+}
+
+.chat-bubble.theirs {
+    align-self: flex-start;
+    background: var(--admas-surface);
+    color: var(--admas-text);
+    border: 1px solid var(--admas-border);
+    border-bottom-left-radius: 4px;
+}
+
+.chat-bubble-time {
+    display: block;
+    font-size: 0.65rem;
+    opacity: 0.75;
+    margin-top: 0.2rem;
+}
+
+.chat-input-bar {
+    padding: 0.85rem 1.1rem;
+    border-top: 1px solid var(--admas-border);
+    display: flex;
+    gap: 0.6rem;
+    background: var(--admas-surface);
+}
+
+.chat-input-bar input {
+    flex: 1;
+}
+
+.chat-empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--admas-text-muted);
+    gap: 0.5rem;
+    text-align: center;
+    padding: 2rem;
+}
+
+.chat-empty-state i {
+    font-size: 2.5rem;
+    color: var(--admas-text-faint);
+}
+
+@media (max-width: 767.98px) {
+    .chat-shell {
+        height: calc(100vh - 190px);
+    }
+
+    .chat-contacts {
+        width: 100%;
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+    }
+
+    .chat-shell.chat-conversation-open .chat-contacts {
+        display: none;
+    }
+
+    .chat-shell:not(.chat-conversation-open) .chat-panel {
+        display: none;
+    }
+
+    .chat-shell {
+        position: relative;
     }
 }

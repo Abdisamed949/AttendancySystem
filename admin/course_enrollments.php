@@ -15,9 +15,18 @@
  * Information Technology student from Academic Year 2023/2024" took a
  * course under an already-ended semester) without writing SQL by hand.
  *
- * System Administrator: any course, any student. Dean: may VIEW any
- * course's enrollment (read-only for other faculties' students — this is
- * real student data, not schedule metadata, so unlike
+ * University Rector and Head of Academic Affairs: any course, any
+ * student, any faculty (head_academic added per the CLAUDE.md §4 revision
+ * granting this role full course-action management, explicitly including
+ * enrollment — see that entry's note on reconciling this against the
+ * "Cannot manage students" line: this page enrolls a student into a
+ * course *roster*, it doesn't touch the student's own profile record, which
+ * is what "manage students" refers to elsewhere in this app, e.g.
+ * admin/students.php — that page was NOT extended to this role and stays
+ * Registration Office/Dean only). head_academic falls through the same
+ * unrestricted `else` branch as university_rector throughout this file. Dean:
+ * may VIEW any course's enrollment (read-only for other faculties'
+ * students — this is real student data, not schedule metadata, so unlike
  * admin/course_offerings.php a Dean never sees another faculty's enrolled
  * students at all), but may only browse/enroll/remove students from their
  * OWN faculty — re-verified server-side on every write, never trusted from
@@ -29,10 +38,12 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
+$currentUser = current_user();
 $role = current_role();
+$isReadOnly = ($role === 'university_rector');
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -91,6 +102,34 @@ if (!$course) {
 }
 
 // ---------------------------------------------------------------------
+// Valid departments a student may be enrolled from for THIS course — the
+// course's own catalog department, plus any department set as a specific
+// offering's Roster Department (cross-faculty "guest" offerings).
+//
+// This exists because `course_enrollments` has no semester/offering
+// awareness at all: get_xiiso_grid_data() always pulls ALL of a course's
+// enrollment rows together, regardless of which offering/semester is
+// being viewed on attendance.php. Bulk-enrolling a student from a
+// department that is neither the course's own nor a configured Roster
+// Department silently blends two faculties' rosters into one and breaks
+// per-semester/per-faculty attendance separation — a real incident this
+// guard exists to prevent from recurring (see CLAUDE.md's course TX/SI
+// mixed-enrollment fix entry).
+// ---------------------------------------------------------------------
+$validEnrollmentDeptStmt = $conn->prepare(
+    'SELECT DISTINCT roster_department_id FROM course_offerings WHERE course_id = ? AND roster_department_id IS NOT NULL'
+);
+$validEnrollmentDeptStmt->bind_param('i', $courseId);
+$validEnrollmentDeptStmt->execute();
+$validEnrollmentDepartmentIds = [(int) $course['department_id']];
+$validDeptRes = $validEnrollmentDeptStmt->get_result();
+while ($row = $validDeptRes->fetch_assoc()) {
+    $validEnrollmentDepartmentIds[] = (int) $row['roster_department_id'];
+}
+$validEnrollmentDeptStmt->close();
+$validEnrollmentDepartmentIds = array_values(array_unique($validEnrollmentDepartmentIds));
+
+// ---------------------------------------------------------------------
 // Flash messages (post-redirect-get, same pattern as the other admin pages)
 // ---------------------------------------------------------------------
 $successMessage = '';
@@ -109,6 +148,11 @@ if (!empty($_SESSION['flash_error'])) {
 // ---------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = (string) ($_POST['action'] ?? '');
+
+    if ($isReadOnly) {
+        $_SESSION['flash_error'] = 'Access scope: View only — this role cannot modify records.';
+        redirect_to('admin/course_enrollments.php?course_id=' . $courseId);
+    }
 
     if ($action === 'bulk_enroll') {
         $ids = array_values(array_unique(array_filter(
@@ -134,6 +178,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $ids = $ownIds;
             }
 
+            // Reject any student whose own department isn't this course's
+            // catalog department or a configured offering's Roster
+            // Department — see the guard note above this file's course
+            // lookup for why this matters (prevents the exact TX/SI
+            // mixed-enrollment incident from happening again).
+            $skippedWrongDepartment = 0;
+            if (!empty($ids)) {
+                $deptPlaceholders = implode(',', array_fill(0, count($validEnrollmentDepartmentIds), '?'));
+                $idPlaceholders = implode(',', array_fill(0, count($ids), '?'));
+                $deptCheckStmt = $conn->prepare(
+                    "SELECT id FROM students WHERE id IN ({$idPlaceholders}) AND department_id IN ({$deptPlaceholders})"
+                );
+                $deptCheckStmt->bind_param(
+                    str_repeat('i', count($ids) + count($validEnrollmentDepartmentIds)),
+                    ...array_merge($ids, $validEnrollmentDepartmentIds)
+                );
+                $deptCheckStmt->execute();
+                $validDeptIds = array_map(static fn ($r) => (int) $r['id'], $deptCheckStmt->get_result()->fetch_all(MYSQLI_ASSOC));
+                $deptCheckStmt->close();
+                $skippedWrongDepartment = count($ids) - count($validDeptIds);
+                $ids = $validDeptIds;
+            }
+
             // INSERT IGNORE relies on the existing uq_student_course unique
             // key to silently skip anyone already enrolled — no separate
             // pre-check needed, and no risk of a duplicate row.
@@ -155,6 +222,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($skippedOutOfScope > 0) {
                 $summary .= ' ' . $skippedOutOfScope . ' outside your faculty, skipped.';
+            }
+            if ($skippedWrongDepartment > 0) {
+                $summary .= ' ' . $skippedWrongDepartment . " department mismatch, skipped — their department isn't this course's own department or a configured offering's Roster Department. If this is a real cross-faculty course, first set the Roster Department via \"Manage Offerings\", then enroll again.";
             }
             $_SESSION['flash_success'] = $summary;
         }
@@ -357,7 +427,7 @@ if ($filterSearch !== '') {
 
 $whereSql = empty($conditions) ? '' : ('AND ' . implode(' AND ', $conditions));
 
-$studentsSql = "SELECT s.id, s.student_no, s.full_name, s.shift,
+$studentsSql = "SELECT s.id, s.student_no, s.full_name, s.shift, s.department_id,
                        ay.label AS academic_year_label, f.name AS faculty_name, d.name AS department_name,
                        sem.name AS semester_name, u.status AS user_status,
                        ce.id AS enrollment_id
@@ -388,7 +458,7 @@ $hasAnyFilter = $filterAcademicYearId > 0 || $filterFacultyId > 0 || $filterDepa
  * X-Requested-With header) can never drift from what a full page load
  * would show.
  */
-function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilter): void
+function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilter, bool $isReadOnly = false, array $validEnrollmentDepartmentIds = []): void
 {
     if (empty($candidateStudents)) {
         ?>
@@ -403,11 +473,21 @@ function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilt
 
     foreach ($candidateStudents as $s) {
         $alreadyEnrolled = $s['enrollment_id'] !== null;
+        // Mirrors the server-side bulk_enroll guard: a student whose own
+        // department isn't this course's own department or a configured
+        // offering's Roster Department will be rejected on submit anyway —
+        // shown here up front (disabled checkbox + explanation) so an admin
+        // doesn't fill out a whole batch only to see it silently skipped.
+        $deptMismatch = !empty($validEnrollmentDepartmentIds) && !in_array((int) $s['department_id'], $validEnrollmentDepartmentIds, true);
         ?>
         <tr>
             <td>
-                <?php if ($alreadyEnrolled): ?>
+                <?php if ($isReadOnly): ?>
+                    <input type="checkbox" disabled title="View only">
+                <?php elseif ($alreadyEnrolled): ?>
                     <input type="checkbox" disabled title="Already enrolled">
+                <?php elseif ($deptMismatch): ?>
+                    <input type="checkbox" disabled title="This student's department doesn't match this course's own department or a configured offering's Roster Department — set the Roster Department via Manage Offerings first if this is a real cross-faculty course.">
                 <?php else: ?>
                     <input type="checkbox" class="row-check-candidate" value="<?= (int) $s['id'] ?>"
                            data-label="<?= htmlspecialchars($s['full_name'] . ' (' . $s['student_no'] . ')') ?>">
@@ -429,6 +509,8 @@ function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilt
             <td>
                 <?php if ($alreadyEnrolled): ?>
                     <span class="badge-pill badge-active">Already Enrolled</span>
+                <?php elseif ($deptMismatch): ?>
+                    <span class="badge-pill badge-inactive" title="Wrong department for this course">Department Mismatch</span>
                 <?php endif; ?>
             </td>
         </tr>
@@ -444,7 +526,7 @@ function render_enroll_candidate_rows(array $candidateStudents, bool $hasAnyFilt
 // to render and swap in without ever navigating the browser at all (so the
 // page truly cannot move, not even a full-reload flash).
 if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
-    render_enroll_candidate_rows($candidateStudents, $hasAnyFilter);
+    render_enroll_candidate_rows($candidateStudents, $hasAnyFilter, $isReadOnly, $validEnrollmentDepartmentIds);
     exit;
 }
 ?>
@@ -472,6 +554,8 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                 <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>" class="text-decoration-none">Manage Offerings</a>
                 <?php if ($role === 'dean'): ?>
                     &nbsp;&middot;&nbsp;You may only enroll/view students from <?= htmlspecialchars($deanFacultyName) ?> Faculty
+                <?php elseif ($isReadOnly): ?>
+                    &nbsp;&middot;&nbsp;View only (oversight)
                 <?php endif; ?>
             </div>
 
@@ -556,6 +640,7 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                                         </td>
                                         <td><?= htmlspecialchars(ENROLL_SHIFT_LABELS[$es['shift']] ?? $es['shift']) ?></td>
                                         <td class="text-end">
+                                            <?php if (!$isReadOnly): ?>
                                             <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" style="display:inline;"
                                                   onsubmit="return confirm('Remove this student\'s enrollment?');">
                                                 <input type="hidden" name="action" value="remove_enrollment">
@@ -565,6 +650,7 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                                                     <i class="bi bi-trash"></i>
                                                 </button>
                                             </form>
+                                            <?php endif; ?>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -576,15 +662,19 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
 
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Find Students to Enroll</h6>
+                    <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Find Students <?= $isReadOnly ? '' : 'to Enroll' ?></h6>
+                    <?php if (!$isReadOnly): ?>
                     <button type="button" id="bulkEnrollBtn" class="btn btn-primary btn-sm d-none" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">Enroll Selected</button>
+                    <?php endif; ?>
                 </div>
 
+                <?php if (!$isReadOnly): ?>
                 <form id="bulkEnrollForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $courseId ?>" class="d-none">
                     <input type="hidden" name="action" value="bulk_enroll">
                     <input type="hidden" name="course_id" value="<?= (int) $courseId ?>">
                     <div id="bulkEnrollIds"></div>
                 </form>
+                <?php endif; ?>
 
                 <!-- Filter bar: real SQL WHERE filters via GET -->
                 <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php" class="row g-2 mb-3" id="enrollFilterForm">
@@ -665,7 +755,7 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                             </tr>
                         </thead>
                         <tbody id="candidateStudentsBody">
-                            <?php render_enroll_candidate_rows($candidateStudents, $hasAnyFilter); ?>
+                            <?php render_enroll_candidate_rows($candidateStudents, $hasAnyFilter, $isReadOnly, $validEnrollmentDepartmentIds); ?>
                         </tbody>
                     </table>
                 </div>
@@ -731,6 +821,9 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
         // swaps just the <tbody>, so the page genuinely cannot move/flash/
         // reload while filtering, not even briefly.
         function admasWireCandidateRowCheckboxes() {
+            if (!document.getElementById('bulkEnrollBtn')) {
+                return;
+            }
             admasInitBulkEnroll({
                 checkboxSelector: '.row-check-candidate',
                 selectAllSelector: '#selectAllCandidates',

@@ -258,7 +258,46 @@ if (($exportFormat === 'excel' || $exportFormat === 'pdf') && $isValid) {
                     </h6>
                 </div>
 
-                <div class="admas-card p-4">
+                <!-- Mobile: a plain vertical list, one card per Xiiso — no
+                     horizontal scrolling at all, unlike the wide table below
+                     (which stays for tablet/desktop, where all 12 columns
+                     fit comfortably). -->
+                <div class="d-md-none">
+                    <?php foreach ($sessions as $s): ?>
+                        <?php
+                        $sIsExam = $s['type'] !== 'regular';
+                        $status = $marksBySessionId[(int) $s['id']] ?? null;
+                        ?>
+                        <div class="admas-card p-3 mb-2 d-flex justify-content-between align-items-center">
+                            <div>
+                                <div class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['label']) ?></div>
+                                <div class="text-muted small"><?= $s['date'] ? htmlspecialchars(date('M j, Y', strtotime((string) $s['date']))) : 'No date set' ?></div>
+                            </div>
+                            <div>
+                                <?php if ($sIsExam): ?>
+                                    <span class="badge-pill" style="background: var(--admas-border); color: var(--admas-text-muted);">Exam</span>
+                                <?php elseif ($status === 'present'): ?>
+                                    <span class="badge-pill badge-present">Present</span>
+                                <?php elseif ($status === 'absent'): ?>
+                                    <span class="badge-pill badge-absent">Absent</span>
+                                <?php else: ?>
+                                    <span class="text-muted">—</span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                    <div class="admas-card p-3 d-flex justify-content-between align-items-center" style="border: 2px solid var(--admas-sky);">
+                        <div class="fw-bold" style="color: var(--admas-text);">Summary</div>
+                        <div class="d-flex align-items-center gap-3">
+                            <span style="color: var(--admas-text);">P: <?= $presentCount ?></span>
+                            <span style="color: var(--admas-text);">A: <?= $absentCount ?></span>
+                            <span class="badge-pill <?= attendance_badge_class($attendancePct, $minAttendancePct) ?>"><?= $attendancePct ?>%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tablet/desktop: the full 12-Xiiso table. -->
+                <div class="admas-card p-4 d-none d-md-block">
                     <div class="table-responsive">
                         <?php
                         $xiisoBandChunks = build_xiiso_chunks($sessions);

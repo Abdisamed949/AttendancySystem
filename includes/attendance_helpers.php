@@ -318,7 +318,7 @@ function delete_attendance_record(mysqli $conn, int $studentId, int $courseId, i
 
 /**
  * Single-course write-permission check, modeled on the course-list scoping
- * already used by attendance.php/reports.php (system_admin: any course;
+ * already used by attendance.php/reports.php (university_rector: any course;
  * dean: only an offering that actually exists inside their own faculty's
  * semester track — via course_offerings/semesters.faculty_id, not the
  * course's own catalog department, so a Dean can write a cross-listed
@@ -345,8 +345,13 @@ function delete_attendance_record(mysqli $conn, int $studentId, int $courseId, i
  */
 function user_can_write_course_attendance(mysqli $conn, string $role, array $currentUser, int $courseId, int $semesterId, ?string $shift = null): bool
 {
-    if ($role === 'system_admin') {
-        return true;
+    // University Rector is a supervisory/oversight role — full VIEW access
+    // everywhere, but never write access to attendance (or any other
+    // day-to-day academic data). Previously this returned true (full CRUD,
+    // matching the role's original "system_admin" scope); now it's always
+    // denied, same as any role with no write authorization for this course.
+    if ($role === 'university_rector') {
+        return false;
     }
 
     if ($role === 'dean') {

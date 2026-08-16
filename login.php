@@ -8,7 +8,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/university_logo.php';
 
 $roleToDashboard = [
-    'system_admin' => 'admin/dashboard.php',
+    'university_rector' => 'admin/dashboard.php',
     'head_academic' => 'head_academic/dashboard.php',
     'registration' => 'registration/dashboard.php',
     'dean' => 'dean/dashboard.php',
@@ -126,52 +126,14 @@ if ($campusShort === '') {
             grid-template-columns: 1fr 1fr;
         }
 
-        @media (max-width: 860px) {
-            .login-card {
-                grid-template-columns: 1fr;
-                min-height: 0;
-            }
-
-            .login-shell {
-                align-items: flex-start;
-                padding: 1rem 0.75rem;
-            }
-
-            .brand-panel {
-                flex-direction: row;
-                justify-content: center;
-                gap: 0.85rem;
-                padding: 1rem 1.25rem;
-                text-align: left;
-            }
-
-            .brand-logo-ring {
-                width: 50px;
-                height: 50px;
-                margin: 0;
-                flex-shrink: 0;
-            }
-
-            .brand-name-line1 {
-                font-size: 1.2rem;
-                margin-bottom: 0.1rem;
-            }
-
-            .brand-name-line2 {
-                font-size: 0.8rem;
-                letter-spacing: 0.18em;
-                margin-bottom: 0;
-            }
-
-            .brand-subtitle {
-                display: none;
-            }
-
-            .form-panel {
-                padding: 1.5rem 1.5rem 1.75rem;
-            }
-        }
-
+        /* Base (desktop) rules — these must all come BEFORE the @media
+           blocks below. CSS gives later same-specificity rules priority
+           regardless of whether they're inside a media query, so a media
+           override placed earlier in the file than its own base rule gets
+           silently beaten by that base rule the instant both declare the
+           same property — the bug that broke every mobile override on
+           this page (logo/name row layout, then the sky-blue unification)
+           until this reordering. */
         .brand-panel {
             background: linear-gradient(160deg, #0b1f3a 0%, #0ea5e9 100%);
             color: #fff;
@@ -254,6 +216,179 @@ if ($campusShort === '') {
         .forgot-password-link:hover {
             text-decoration: underline;
         }
+
+        @media (max-width: 860px) {
+            /* Tablet range (576px–860px): side-by-side stays side-by-side
+               here — grid-template-columns is deliberately NOT overridden
+               (it stays the base rule's "1fr 1fr"), so this block only
+               compresses sizing/spacing so both halves' content actually
+               fits without overflowing. An overflowing child would widen
+               the whole card past the viewport and let the page be dragged
+               sideways — the exact "things move" complaint from the
+               dashboard cards, so every element in here is deliberately
+               sized down rather than left at desktop scale. Each half
+               KEEPS its own base color family here (form-panel stays
+               white, same two-tone card as desktop) — brand-panel's
+               gradient is swapped for a pure sky-blue one (no dark navy
+               stop) specifically on mobile, since the desktop navy tone
+               read as too dark/not "sky blue" at this size. Padding on
+               both halves is also tightened on all four sides so more of
+               the compact content shows without wasted space.
+               Below 576px (true phone width), the block further down this
+               file switches to two STACKED cards instead — this side-by-side
+               compression is only the in-between tablet treatment. */
+            .login-shell {
+                padding: 0;
+                align-items: stretch;
+            }
+
+            .login-card {
+                border-radius: 0;
+                box-shadow: none;
+                min-height: 100vh;
+            }
+
+            .brand-panel,
+            .form-panel {
+                min-width: 0;
+            }
+
+            .brand-panel {
+                background: linear-gradient(160deg, #0ea5e9 0%, #38bdf8 100%);
+                padding: 1rem 0.6rem;
+            }
+
+            .brand-logo-ring {
+                width: 72px;
+                height: 72px;
+                margin: 0 auto 1rem;
+            }
+
+            .brand-name-line1 {
+                font-size: 1.05rem;
+                line-height: 1.15;
+                word-break: break-word;
+            }
+
+            .brand-name-line2 {
+                font-size: 0.72rem;
+                letter-spacing: 0.14em;
+            }
+
+            .brand-subtitle {
+                display: none;
+            }
+
+            .form-panel {
+                padding: 1.25rem 0.85rem;
+            }
+
+            .form-panel h2 {
+                font-size: 1.2rem;
+            }
+
+            .form-panel p.text-muted {
+                font-size: 0.78rem;
+            }
+
+            .form-panel .form-label {
+                font-size: 0.8rem;
+            }
+
+            .form-panel .form-control,
+            .form-panel .form-select {
+                font-size: 0.85rem;
+                padding: 0.5rem 0.6rem;
+            }
+
+            .form-panel .forgot-password-link {
+                font-size: 0.78rem;
+            }
+
+            .form-panel .nav-tabs {
+                flex-wrap: nowrap;
+            }
+
+            .form-panel .nav-tabs .nav-link {
+                font-size: 0.78rem;
+                padding: 0.4rem 0.5rem;
+                white-space: nowrap;
+            }
+
+            .form-panel .btn-primary {
+                font-size: 0.85rem;
+                padding: 0.55rem;
+            }
+        }
+
+        @media (max-width: 575.98px) {
+            /* True phone width: two separate STACKED cards (brand card on
+               top, form card below) instead of the compressed side-by-side
+               columns used down to 576px above — undoes the "side-by-side
+               all the way down" choice from the 860px block, for this
+               narrower range only, per explicit request. Each half becomes
+               its own full-width rounded card with its own shadow; the
+               page scrolls if the stacked content is taller than the
+               screen, which is expected/normal for this layout. */
+            .login-shell {
+                padding: 1.25rem 0.85rem;
+                align-items: flex-start;
+            }
+
+            .login-card {
+                display: flex;
+                flex-direction: column;
+                gap: 1rem;
+                min-height: 0;
+                border-radius: 0;
+                box-shadow: none;
+                background: transparent;
+                overflow: visible;
+            }
+
+            .brand-panel,
+            .form-panel {
+                border-radius: 18px;
+                box-shadow: 0 10px 30px rgba(11, 31, 58, 0.2);
+                width: 100%;
+            }
+
+            .brand-panel {
+                padding: 1.5rem 1.25rem;
+            }
+
+            .brand-logo-ring {
+                width: 64px;
+                height: 64px;
+                margin-bottom: 0.75rem;
+            }
+
+            .brand-name-line1 {
+                font-size: 1.05rem;
+            }
+
+            .brand-name-line2 {
+                font-size: 0.68rem;
+                letter-spacing: 0.1em;
+            }
+
+            .brand-subtitle {
+                display: block;
+                font-size: 0.75rem;
+            }
+
+            .form-panel {
+                padding: 1.25rem 1.1rem;
+            }
+
+            .form-panel h2 {
+                font-size: 1.15rem;
+            }
+
+            .form-panel .nav-tabs .nav-link {
+                padding: 0.4rem 0.5rem;
+            }
+        }
     </style>
 </head>
 <body>
@@ -263,9 +398,11 @@ if ($campusShort === '') {
                 <div class="brand-logo-ring">
                     <img src="<?= htmlspecialchars(BASE_URL . '/' . $loginLogoPath) ?>" alt="<?= htmlspecialchars($universityName) ?> logo" class="brand-logo">
                 </div>
-                <div class="brand-name-line1"><?= htmlspecialchars($universityName) ?></div>
-                <div class="brand-name-line2"><?= htmlspecialchars($campusShort) ?></div>
-                <div class="brand-subtitle">Attendance System</div>
+                <div class="brand-text">
+                    <div class="brand-name-line1"><?= htmlspecialchars($universityName) ?></div>
+                    <div class="brand-name-line2"><?= htmlspecialchars($campusShort) ?></div>
+                    <div class="brand-subtitle">Attendance System</div>
+                </div>
             </div>
             <div class="form-panel">
                 <div class="w-100" style="max-width: 400px;">
@@ -278,45 +415,71 @@ if ($campusShort === '') {
                         </div>
                     <?php endif; ?>
 
-                    <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/login.php">
-                        <div class="mb-3">
-                            <label for="role" class="form-label">Role</label>
-                            <select class="form-select" id="role" name="role" required>
-                                <option value="">Select role</option>
-                                <option value="system_admin" <?= ($submittedRole === 'system_admin') ? 'selected' : '' ?>>System Administrator</option>
-                                <option value="head_academic" <?= ($submittedRole === 'head_academic') ? 'selected' : '' ?>>Head of Academic Affairs</option>
-                                <option value="registration" <?= ($submittedRole === 'registration') ? 'selected' : '' ?>>Registration Office</option>
-                                <option value="dean" <?= ($submittedRole === 'dean') ? 'selected' : '' ?>>Dean</option>
-                                <option value="lecturer" <?= ($submittedRole === 'lecturer') ? 'selected' : '' ?>>Lecturer</option>
-                                <option value="student" <?= ($submittedRole === 'student') ? 'selected' : '' ?>>Student</option>
-                            </select>
+                    <ul class="nav nav-tabs mb-3" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="passwordTabBtn" data-bs-toggle="tab" data-bs-target="#passwordTabPane" type="button" role="tab">Password</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="qrTabBtn" data-bs-toggle="tab" data-bs-target="#qrTabPane" type="button" role="tab">
+                                <i class="bi bi-qr-code"></i> <span class="qr-tab-label">QR Code Scan</span>
+                            </button>
+                        </li>
+                    </ul>
+
+                    <div class="tab-content">
+                        <div class="tab-pane fade show active" id="passwordTabPane" role="tabpanel">
+                            <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/login.php">
+                                <div class="mb-3">
+                                    <label for="role" class="form-label">Role</label>
+                                    <select class="form-select" id="role" name="role" required>
+                                        <option value="">Select role</option>
+                                        <option value="university_rector" <?= ($submittedRole === 'university_rector') ? 'selected' : '' ?>>University Rector</option>
+                                        <option value="head_academic" <?= ($submittedRole === 'head_academic') ? 'selected' : '' ?>>Head of Academic Affairs</option>
+                                        <option value="registration" <?= ($submittedRole === 'registration') ? 'selected' : '' ?>>Registration Office</option>
+                                        <option value="dean" <?= ($submittedRole === 'dean') ? 'selected' : '' ?>>Dean</option>
+                                        <option value="lecturer" <?= ($submittedRole === 'lecturer') ? 'selected' : '' ?>>Lecturer</option>
+                                        <option value="student" <?= ($submittedRole === 'student') ? 'selected' : '' ?>>Student</option>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="username_or_email" class="form-label">Username / Email</label>
+                                    <input type="text" class="form-control" id="username_or_email" name="username_or_email" value="<?= htmlspecialchars($submittedIdentifier) ?>" required>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="password" class="form-label">Password</label>
+                                    <div class="input-group">
+                                        <input type="password" class="form-control" id="password" name="password" required>
+                                        <button class="btn btn-outline-secondary toggle-password" type="button" data-target="password" aria-label="Show password">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="mb-4 text-end">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/forgot_password.php" class="forgot-password-link small">Forgot Password?</a>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary w-100 py-2">Sign In</button>
+                            </form>
                         </div>
 
-                        <div class="mb-3">
-                            <label for="username_or_email" class="form-label">Username / Email</label>
-                            <input type="text" class="form-control" id="username_or_email" name="username_or_email" value="<?= htmlspecialchars($submittedIdentifier) ?>" required>
+                        <div class="tab-pane fade text-center" id="qrTabPane" role="tabpanel">
+                            <p class="text-muted small mb-3">Scan with a phone you've already linked from Profile &amp; Password — no username or password needed.</p>
+                            <img id="qrLoginImage" alt="Login QR code" style="width: 220px; height: 220px; display: none;" class="border rounded p-2 mb-2">
+                            <div id="qrLoginLoading" class="text-muted small">&nbsp;</div>
+                            <div id="qrLoginStatus" class="small fw-semibold mt-2"></div>
+                            <button type="button" id="qrLoginRefreshBtn" class="btn btn-sm btn-outline-secondary mt-2 d-none">Generate New Code</button>
                         </div>
-
-                        <div class="mb-3">
-                            <label for="password" class="form-label">Password</label>
-                            <div class="input-group">
-                                <input type="password" class="form-control" id="password" name="password" required>
-                                <button class="btn btn-outline-secondary toggle-password" type="button" data-target="password" aria-label="Show password">
-                                    <i class="bi bi-eye"></i>
-                                </button>
-                            </div>
-                        </div>
-
-                        <div class="mb-4 text-end">
-                            <a href="<?= htmlspecialchars(BASE_URL) ?>/forgot_password.php" class="forgot-password-link small">Forgot Password?</a>
-                        </div>
-
-                        <button type="submit" class="btn btn-primary w-100 py-2">Sign In</button>
-                    </form>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>window.ADMAS_BASE_URL = <?= json_encode(BASE_URL, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;</script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/password-toggle.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/qr_login.js"></script>
 </body>
 </html>

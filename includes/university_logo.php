@@ -1,6 +1,6 @@
 <?php
 /**
- * University logo upload (System Administrator, Settings page) — same
+ * University logo upload (University Rector, Settings page) — same
  * validate-then-random-filename pattern as includes/profile_photo.php,
  * just for the one shared logo used on the sidebar, login page, and PDF
  * report exports instead of a per-user photo.

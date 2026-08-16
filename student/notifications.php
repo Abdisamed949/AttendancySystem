@@ -101,7 +101,7 @@ $unreadCount = count(array_filter($notifications, static fn ($n) => (int) $n['is
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
                     <h4 class="fw-bold mb-1" style="color: var(--admas-text);">My Notifications</h4>
-                    <p class="text-muted mb-0">Attendance alerts your Dean, Head of Academic Affairs, or the System Administrator have raised for you.</p>
+                    <p class="text-muted mb-0">Attendance alerts your Dean, Head of Academic Affairs, or the University Rector have raised for you.</p>
                 </div>
             </div>
 

@@ -17,7 +17,7 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 
-require_role(['system_admin', 'dean', 'lecturer']);
+require_role(['university_rector', 'dean', 'lecturer']);
 
 $conn = db();
 $currentUser = current_user();

@@ -6,12 +6,24 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/university_logo.php';
+require_once __DIR__ . '/chat_helpers.php';
 
 $activeRole = current_role();
 $activeFolder = role_folder($activeRole);
 $activeScript = basename((string) ($_SERVER['SCRIPT_NAME'] ?? ''));
 $sidebarUniversityName = $settings['university_name'] ?? 'ADMAS University';
 $sidebarLogoPath = get_university_logo_relative_path($settings ?? []);
+
+// Unread Staff Messages badge on the sidebar's own "Messages" link — same
+// one extra count-query-per-page-load pattern as topbar.php's notif bell.
+$sidebarUnreadMessages = 0;
+if (in_array($activeRole, CHAT_STAFF_ROLES, true) && !empty($_SESSION['user_id'])) {
+    $unreadMsgStmt = db()->prepare('SELECT COUNT(*) AS c FROM messages WHERE receiver_id = ? AND is_read = 0');
+    $unreadMsgStmt->bind_param('i', $_SESSION['user_id']);
+    $unreadMsgStmt->execute();
+    $sidebarUnreadMessages = (int) ($unreadMsgStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $unreadMsgStmt->close();
+}
 ?>
 <script>
     (function () {
@@ -45,6 +57,9 @@ $sidebarLogoPath = get_university_logo_relative_path($settings ?? []);
                    class="sidebar-link<?= $activeScript === $item['file'] ? ' active' : '' ?>">
                     <i class="bi <?= htmlspecialchars($item['icon']) ?>"></i>
                     <span><?= htmlspecialchars($item['label']) ?></span>
+                    <?php if ($item['file'] === 'messages.php' && $sidebarUnreadMessages > 0): ?>
+                        <span class="chat-contact-unread ms-auto"><?= $sidebarUnreadMessages ?></span>
+                    <?php endif; ?>
                 </a>
             <?php endif; ?>
         <?php endforeach; ?>

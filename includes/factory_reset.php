@@ -3,7 +3,7 @@
  * Danger Zone: full factory reset (handover feature).
  *
  * Wipes all institution-specific and test data back to an empty shell,
- * keeping only System Administrator login access, the `roles` lookup
+ * keeping only University Rector login access, the `roles` lookup
  * table, and the schema itself. A full mysqldump backup is always taken
  * first; the wipe only runs if that backup succeeds.
  */
@@ -79,7 +79,7 @@ function factory_reset_run_backup(): array
 /**
  * Execute the full data wipe inside a single transaction: deletes every
  * table's rows in FK-safe order except `roles` and `users` rows for
- * system_admin, then resets the `settings` keys that would otherwise
+ * university_rector, then resets the `settings` keys that would otherwise
  * dangle-reference now-deleted rows.
  *
  * @return array{counts: array<string, int>, remaining_admins: array<int, string>}
@@ -98,7 +98,7 @@ function factory_reset_execute(mysqli $conn): array
         'students' => 'DELETE FROM students',
         'semesters' => 'DELETE FROM semesters',
         'lecturers' => 'DELETE FROM lecturers',
-        'users' => "DELETE FROM users WHERE role_id <> (SELECT id FROM roles WHERE name = 'system_admin')",
+        'users' => "DELETE FROM users WHERE role_id <> (SELECT id FROM roles WHERE name = 'university_rector')",
         'departments' => 'DELETE FROM departments',
         'academic_years' => 'DELETE FROM academic_years',
         'faculties' => 'DELETE FROM faculties',
@@ -139,7 +139,7 @@ function factory_reset_execute(mysqli $conn): array
     }
 
     $adminUsernames = [];
-    $adminResult = $conn->query("SELECT username FROM users WHERE role_id = (SELECT id FROM roles WHERE name = 'system_admin') ORDER BY username");
+    $adminResult = $conn->query("SELECT username FROM users WHERE role_id = (SELECT id FROM roles WHERE name = 'university_rector') ORDER BY username");
     if ($adminResult) {
         while ($row = $adminResult->fetch_assoc()) {
             $adminUsernames[] = $row['username'];

@@ -34,7 +34,7 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // logic student/courses.php already uses.
 // ---------------------------------------------------------------------
 $ownStmt = $conn->prepare(
-    'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, s.semester_id,
+    'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, s.semester_id, s.academic_year_id,
             f.name AS faculty_name, f.total_semesters, d.name AS department_name
      FROM students s
      JOIN faculties f ON f.id = s.faculty_id
@@ -76,22 +76,53 @@ if ($ownRow && (int) ($ownRow['semester_id'] ?? 0) > 0) {
     }
 }
 
-// Resolved from this student's own faculty's current semester, not a
-// single global settings value.
-$ownCurrentSemester = $ownRow ? get_current_semester($conn, (int) $ownRow['faculty_id']) : null;
+// Resolved from THIS student's own academic-year cohort's current
+// semester, not just "whichever current semester has the highest id" for
+// the whole faculty. A faculty can now legitimately run several
+// concurrently-current semesters at once for different academic-year
+// cohorts (see get_current_semester()'s own doc comment — it deliberately
+// picks the most-recently-created one, which is only correct when a
+// faculty has a single active cohort). Without this, a student whose own
+// cohort's semester happened to have a lower id than another cohort's
+// current semester would have their real current-semester courses hidden
+// here entirely, even though student/courses.php's own Semester picker
+// correctly resolves the same student to the right semester.
+$ownCurrentSemester = null;
+if ($ownRow) {
+    $ownFacultyIdForSemester = (int) $ownRow['faculty_id'];
+    $ownAcademicYearIdForSemester = (int) $ownRow['academic_year_id'];
+    $curSemStmt = $conn->prepare(
+        "SELECT id, name FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND status = 'current' ORDER BY id DESC LIMIT 1"
+    );
+    $curSemStmt->bind_param('ii', $ownFacultyIdForSemester, $ownAcademicYearIdForSemester);
+    $curSemStmt->execute();
+    $ownCurrentSemester = $curSemStmt->get_result()->fetch_assoc();
+    $curSemStmt->close();
+
+    if (!$ownCurrentSemester) {
+        // No current semester exists yet for this student's own
+        // academic-year cohort specifically — fall back to the faculty's
+        // generic current semester so the dashboard still shows something
+        // rather than nothing.
+        $ownCurrentSemester = get_current_semester($conn, $ownFacultyIdForSemester);
+    }
+}
 $currentSemesterId = (int) ($ownCurrentSemester['id'] ?? 0);
 
 // ---------------------------------------------------------------------
 // Course discovery — same three-source logic as student/courses.php,
 // kept in sync deliberately: course_enrollments first; department
-// fallback if that's empty; plus a third, additive source for a
-// cross-listed/guest-faculty offering whose roster_department_id names
-// this student's own department (see the Multi-Faculty Course Offerings
-// work). Previously this dashboard only ever looked at real `attendance`
-// rows directly, which meant a student's own current-semester courses
-// were invisible here until someone had actually marked at least one
-// session — correct data, but a confusing empty dashboard for a course
-// that's really just "not marked yet".
+// fallback ADDITIVE (not gated on course_enrollments being empty — a real
+// incident: a student with even one explicit course_enrollments row was
+// silently losing every other course their own department offers for
+// free, see the matching fix in student/courses.php); plus a third,
+// additive source for a cross-listed/guest-faculty offering whose
+// roster_department_id names this student's own department (see the
+// Multi-Faculty Course Offerings work). Previously this dashboard only
+// ever looked at real `attendance` rows directly, which meant a student's
+// own current-semester courses were invisible here until someone had
+// actually marked at least one session — correct data, but a confusing
+// empty dashboard for a course that's really just "not marked yet".
 // ---------------------------------------------------------------------
 $courseIds = [];
 if ($ownStudentId > 0) {
@@ -104,7 +135,7 @@ if ($ownStudentId > 0) {
     }
     $enrollStmt->close();
 
-    if (empty($courseIds) && $ownDepartmentId > 0) {
+    if ($ownDepartmentId > 0) {
         $deptCourseStmt = $conn->prepare('SELECT id FROM courses WHERE department_id = ?');
         $deptCourseStmt->bind_param('i', $ownDepartmentId);
         $deptCourseStmt->execute();
@@ -113,6 +144,7 @@ if ($ownStudentId > 0) {
             $courseIds[] = (int) $row['id'];
         }
         $deptCourseStmt->close();
+        $courseIds = array_values(array_unique($courseIds));
     }
 
     if ($ownDepartmentId > 0) {

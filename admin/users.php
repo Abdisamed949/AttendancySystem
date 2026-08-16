@@ -1,6 +1,6 @@
 <?php
 /**
- * User Management (System Administrator only) — Assign Role appointment
+ * User Management (University Rector only) — Assign Role appointment
  * panel plus the full system-wide user list.
  */
 declare(strict_types=1);
@@ -9,11 +9,11 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
 
-require_role(['system_admin']);
+require_role(['university_rector']);
 
 const ROLE_INFO = [
-    ['role' => 'System Administrator', 'scope' => 'Whole system', 'can' => 'Full technical control: all CRUD, User Management, role appointment, system Settings, Notification thresholds, backups', 'cannot' => '—'],
-    ['role' => 'Head of Academic Affairs', 'scope' => 'All faculties', 'can' => 'Set Academic Year & minimum attendance threshold; view cross-faculty reports; register new Lecturer accounts', 'cannot' => 'Cannot manage students, delete accounts, or edit system Settings'],
+    ['role' => 'University Rector', 'scope' => 'Whole system, supervisory/oversight', 'can' => 'Full read-only VIEW access everywhere (Students, Lecturers, Courses, Departments, Faculties, Attendance, Semesters, Academic Years); full CRUD on User Management and Settings only', 'cannot' => 'Cannot create/edit/delete/import/bulk-act on any day-to-day academic-data page — retains full CRUD only on User Management and Settings'],
+    ['role' => 'Head of Academic Affairs', 'scope' => 'All faculties', 'can' => 'Set Academic Year & minimum attendance threshold; view cross-faculty reports; register new Lecturer accounts; cross-faculty Course Management (full CRUD, no bulk import); User Management (reset password, activate/deactivate) over every non-admin account; Assign Role — appoint Dean or Registration Office only', 'cannot' => 'Cannot manage students, manage University Rector accounts, appoint University Rector/Head of Academic Affairs roles, delete accounts, or edit system Settings'],
     ['role' => 'Registration Office', 'scope' => 'All faculties', 'can' => 'Add/edit students, bulk Excel import of students, enrollment reports', 'cannot' => 'No access to Attendance or Settings'],
     ['role' => 'Dean', 'scope' => 'Own faculty only', 'can' => 'Full CRUD on Departments, Courses, Lecturers, Students, Attendance within their faculty; faculty-scoped reports', 'cannot' => 'Cannot view/edit other faculties, no system Settings, no User Management'],
     ['role' => 'Lecturer', 'scope' => 'Own assigned courses only', 'can' => 'Take attendance, view "My Courses", class reports', 'cannot' => 'Cannot see other lecturers\' courses or student management screens'],
@@ -50,7 +50,7 @@ $deanRoleId = $roleIdByName['dean'] ?? 0;
 // A user is already "elevated" if their role is one of these — the Select
 // User dropdown (and the server-side re-check on save) excludes them.
 $elevatedRoleIds = array_values(array_filter([
-    $roleIdByName['system_admin'] ?? 0,
+    $roleIdByName['university_rector'] ?? 0,
     $roleIdByName['head_academic'] ?? 0,
     $roleIdByName['registration'] ?? 0,
     $roleIdByName['dean'] ?? 0,
@@ -312,7 +312,7 @@ $allUsers = $conn->query(
      JOIN roles r ON r.id = u.role_id
      LEFT JOIN faculties f ON f.id = u.faculty_id
      ORDER BY CASE r.name
-                WHEN 'system_admin' THEN 1
+                WHEN 'university_rector' THEN 1
                 WHEN 'head_academic' THEN 2
                 WHEN 'registration' THEN 3
                 WHEN 'dean' THEN 4
@@ -408,7 +408,7 @@ $allUsers = $conn->query(
                 <div class="admas-card p-4">
                     <h6 class="fw-bold mb-3" style="color: var(--admas-text);">How Role Assignment Works</h6>
                     <ul class="text-muted small mb-0 ps-3">
-                        <li class="mb-2">Only lecturers and students can be appointed from here — anyone already Dean, Head of Academic Affairs, Registration Office, or System Administrator must have their role changed by editing that account directly.</li>
+                        <li class="mb-2">Only lecturers and students can be appointed from here — anyone already Dean, Head of Academic Affairs, Registration Office, or University Rector must have their role changed by editing that account directly.</li>
                         <li class="mb-2">Appointing a Dean to a faculty automatically releases whichever user previously held that faculty's Dean role.</li>
                         <li class="mb-2">Every appointment is recorded in the audit trail (<code>role_assignments</code>) along with who made it.</li>
                         <li class="mb-0">Choosing "+ Create New User" generates a brand-new login account and appoints it in the same step — the username and a temporary password are shown once in the success message above.</li>
@@ -433,7 +433,7 @@ $allUsers = $conn->query(
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <div class="form-text">Only users who are not already Dean/Head of Academic Affairs/Registration Office/System Administrator are listed.</div>
+                        <div class="form-text">Only users who are not already Dean/Head of Academic Affairs/Registration Office/University Rector are listed.</div>
                     </div>
 
                     <div id="newUserFields" class="border rounded p-3 mb-3" style="display:none; background: var(--admas-bg);">
