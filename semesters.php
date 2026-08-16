@@ -573,6 +573,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['flash_success'] = '"' . $semRow['name'] . '" set to ' . $statusLabel . '.';
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
+    } elseif ($action === 'end_all_current') {
+        // Bulk Semester Rollover — one click ends EVERY semester currently
+        // status = 'current' within this role's own scope (Dean: own
+        // faculty only, matching every other write action on this page;
+        // Head of Academic Affairs: every faculty at once) instead of
+        // clicking End on each one individually. Re-derives the scoped
+        // WHERE clause itself here rather than trusting any list of ids
+        // from the request.
+        $bulkWhere = "status = 'current'";
+        $bulkParams = [];
+        $bulkTypes = '';
+        if ($role === 'dean') {
+            $bulkWhere .= ' AND faculty_id = ?';
+            $bulkParams[] = $deanFacultyId;
+            $bulkTypes = 'i';
+        }
+
+        $bulkUpdStmt = $conn->prepare("UPDATE semesters SET status = 'ended', is_current = 0 WHERE {$bulkWhere}");
+        if ($bulkTypes !== '') {
+            $bulkUpdStmt->bind_param($bulkTypes, ...$bulkParams);
+        }
+        $bulkUpdStmt->execute();
+        $bulkAffected = $bulkUpdStmt->affected_rows;
+        $bulkUpdStmt->close();
+
+        $_SESSION['flash_success'] = $bulkAffected > 0
+            ? $bulkAffected . ' current semester' . ($bulkAffected === 1 ? '' : 's') . ' ended.'
+            : 'No current semesters to end.';
+        redirect_to('semesters.php');
     } elseif ($action === 'toggle_picker_visibility') {
         // Purely cosmetic — hides this semester from student/courses.php's
         // own Semester Box Picker only (built for the real case of two
@@ -730,6 +759,15 @@ if ($role === 'dean') {
     )->fetch_all(MYSQLI_ASSOC);
 }
 
+// Bulk Semester Rollover panel data — every semester in $semesters (already
+// role-scoped: Dean's own faculty only, Head of Academic Affairs/University
+// Rector see every faculty) that is currently status = 'current'. Reused by
+// both the confirm-dialog count on screen and the "end_all_current" POST
+// handler below (which re-derives its own scoped list server-side rather
+// than trusting this array, since a request can't be trusted to carry it).
+$currentSemesters = array_values(array_filter($semesters, static fn ($s) => $s['status'] === 'current'));
+$currentSemesterCount = count($currentSemesters);
+
 $selectedSemesterId = $forcedSelectedSemesterId ?? (int) ($_GET['semester_id'] ?? 0);
 if ($selectedSemesterId === 0 && !empty($semesters)) {
     $selectedSemesterId = (int) $semesters[0]['id'];
@@ -805,6 +843,41 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                 <div>
                     <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Semesters</h4>
                     <p class="text-muted mb-0">Create semesters and generate their 12 Xiiso sessions (10 regular + Midterm + Final).</p>
+                </div>
+            </div>
+
+            <!-- Save All Semesters — end every currently-current semester
+                 (within this role's own scope) in one click, instead of
+                 clicking End on each one individually. University Rector
+                 sees this panel (view only, per its supervisory role) but
+                 the button itself is hidden/disabled for that role, same
+                 convention as every other write action on this page. -->
+            <div class="admas-card p-4 mb-4" style="border: 2px solid var(--admas-sky);">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div>
+                        <h6 class="fw-bold mb-1" style="color: var(--admas-text);">
+                            <i class="bi bi-arrow-repeat" style="color: var(--admas-sky);"></i> Save All Semesters
+                        </h6>
+                        <p class="text-muted small mb-0">
+                            End every currently-current semester
+                            <?= $role === 'dean' ? 'in ' . htmlspecialchars($deanFacultyName) : 'across every faculty' ?>
+                            at once, in a single click, instead of ending each one individually.
+                            Currently <strong><?= $currentSemesterCount ?></strong> semester<?= $currentSemesterCount === 1 ? ' is' : 's are' ?> marked Current<?= $role === 'dean' ? '' : ' (all faculties combined)' ?>.
+                        </p>
+                    </div>
+                    <?php if ($isReadOnly): ?>
+                        <button type="button" class="btn btn-outline-secondary" disabled title="View only — Head of Academic Affairs or Dean can perform this action">
+                            <i class="bi bi-flag-fill"></i> Save All Semesters
+                        </button>
+                    <?php else: ?>
+                        <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php"
+                              onsubmit="return confirm('Save All Semesters: end all <?= $currentSemesterCount ?> currently-current semester<?= $currentSemesterCount === 1 ? '' : 's' ?><?= $role === 'dean' ? ' in ' . htmlspecialchars($deanFacultyName, ENT_QUOTES) : '' ?>? This cannot be undone — set a new semester Current afterward to keep marking attendance.');">
+                            <input type="hidden" name="action" value="end_all_current">
+                            <button type="submit" class="btn text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= $currentSemesterCount === 0 ? 'disabled' : '' ?>>
+                                <i class="bi bi-flag-fill"></i> Save All Semesters
+                            </button>
+                        </form>
+                    <?php endif; ?>
                 </div>
             </div>
 

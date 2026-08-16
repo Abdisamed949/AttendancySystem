@@ -5558,3 +5558,294 @@ data/configuration task for the university admin, not further code work.
       - Not yet committed to git — pending the user's request, per this
         project's commit convention.
 
+### semesters.php: Bulk Semester Rollover ("End All Current Semesters")
+- [x] The user asked for a way for Head of Academic Affairs, Dean, and
+      University Rector to end every currently-current semester in one
+      click, instead of clicking End on each one individually — framed
+      around a real workflow: at the end of a real academic term, an admin
+      wants to close out every in-progress semester at once rather than
+      hunting through the list one row at a time. Clarified two open
+      questions with the user before building, since the literal request
+      ("all three roles can do this") directly conflicted with this
+      session's own earlier University-Rector-to-view-only conversion:
+      confirmed Rector stays **view-only** here too (sees the panel and the
+      live count, button disabled) — Head of Academic Affairs and Dean are
+      the only roles that can actually execute it; and confirmed Dean's
+      click only ends semesters in **their own faculty**, never
+      university-wide, matching every other write action already on this
+      page.
+      - New **"Bulk Semester Rollover"** card (the name requested — placed
+        right below Semesters' own page header, above the existing
+        Create/Edit Semester and All Semesters cards) showing a live count
+        — `$currentSemesterCount`, computed from the same role-scoped
+        `$semesters` array the rest of the page already builds (Dean's own
+        faculty only; Head of Academic Affairs/University Rector see every
+        faculty) — and one button, "End All Current Semesters".
+      - New `end_all_current` POST action: a single `UPDATE semesters SET
+        status = 'ended', is_current = 0 WHERE status = 'current'`, with an
+        `AND faculty_id = ?` added only for Dean (re-derived server-side
+        from `$_SESSION['faculty_id']`, never trusted from the request) —
+        same scoping pattern every other write action on this page already
+        follows (`dean_owns_semester()` etc.), just applied to a bulk
+        `WHERE` instead of a single id. `$isReadOnly` (already `true` for
+        University Rector on this whole page) blocks this action the same
+        way it blocks every other one, so no separate guard was needed —
+        the button is additionally hidden/disabled client-side for that
+        role for the same reason every other write UI on this page already
+        is.
+      - Confirmation dialog states the exact count and (for Dean) the
+        faculty name being affected before submitting, and warns that a new
+        semester needs to be set Current afterward for attendance marking
+        to keep working — ending every current semester is a real,
+        deliberate rollover action, not reversible from the UI.
+      - Deliberately did **not** build the "students automatically see new
+        semesters on their dashboard" half of the request as new code —
+        traced it and confirmed this is already exactly how
+        `student/courses.php`/`student/dashboard.php`/
+        `admin/student_view.php`'s course-discovery + Semester Box Picker
+        already work (a semester box is only ever disabled/"not created
+        yet" when no real `semesters` row exists for that name+faculty; the
+        moment an admin creates a new semester and a course gets a real
+        offering or attendance under it, it appears automatically) — ending
+        old semesters doesn't hide anything further, and creating new ones
+        already surfaces them with zero additional code.
+      - **Verified end-to-end via real HTTP requests against the live app,
+        using an entirely disposable test faculty for the actual
+        DB-mutating step** — deliberately did NOT run the real
+        `end_all_current` action as Head of Academic Affairs against
+        production data, since that role's own query has no faculty
+        filter at all and would have force-ended all 4 of the real,
+        currently-in-use current semesters system-wide, breaking live
+        attendance marking for real students/lecturers; that role's code
+        path was instead verified by direct inspection (identical
+        `$role === 'dean'`-gated WHERE-clause pattern already proven safe
+        via the Dean test) plus a live, read-only UI check (panel renders
+        "across every faculty" / "4 semesters are marked Current (all
+        faculties combined)" — matching the real live count exactly — with
+        the button present and enabled, no submit sent). For Dean:
+        created a temporary faculty with one `current` and one `waiting`
+        semester, a temporary Dean scoped to it, confirmed the panel
+        showed "Currently 1 semester is marked Current", submitted the
+        real action, and confirmed via direct DB read that only that one
+        temporary semester flipped to `ended` (`waiting` one untouched)
+        while all 4 real semesters across other faculties stayed byte-
+        identical before/after. For University Rector: confirmed the
+        button renders `disabled` with an explanatory tooltip, and sent a
+        crafted direct POST of `action=end_all_current` anyway — confirmed
+        via direct DB read that all 4 real current semesters remained
+        untouched (the existing page-level `$isReadOnly` guard rejected it
+        before reaching the new action's own code). All temporary
+        faculty/semesters/sessions/accounts were deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+      - **Follow-up**: renamed the card title and button from "Bulk
+        Semester Rollover" / "End All Current Semesters" to **"Save All
+        Semesters"** per explicit request ("magacaas ayaa dadka dhan
+        fahmayaan" — that name is what everyone will understand) — text
+        only, the underlying `end_all_current` POST action name and all
+        scoping/logic are unchanged. `php -l` clean; not re-verified live
+        beyond that, since no behavior changed.
+
+### University Rector UI Polish: Profile Hero, Export Card, View Profile Buttons
+- [x] Requested cosmetic/UX pass over University Rector's read-only pages —
+      real ADMAS branding, nicer cards, the record's own photo visible on
+      the detail pages, and a way to export data — plus two access/RBAC
+      additions bundled into the same session.
+      - **`admin/student_view.php` / `admin/lecturer_view.php`**: new
+        `.profile-hero` navy/sky gradient header (new CSS in
+        `assets/css/app.css`) showing the student's/lecturer's own uploaded
+        photo (`users.photo_path`, same convention as the topbar avatar) or
+        an initials circle, plus name/ID/Faculty·Department and a role
+        badge. The old bare label/value "Profile" grid was rebuilt as a row
+        of `.info-tile` cards with a `.section-heading` icon chip above
+        each section, reusing the theme CSS variables so both stay
+        dark-mode-correct with zero new hardcoded colors.
+      - **`admin/students.php` / `admin/lecturers.php`**: the icon-only
+        "View" eye link (Rector's row action) now reads **"View Profile"**
+        (icon + text) via the existing shared `.btn-icon-label` class.
+      - **New sky-blue `.export-card`** (Excel + PDF buttons) added to
+        `admin/students.php`, `admin/lecturers.php`, and `semesters.php`
+        (University Rector only), backed by a new `admin/export.php`
+        (`require_role(['university_rector'])`) that generates a
+        university-wide Students / Lecturers / Semesters list, reusing the
+        same PhpSpreadsheet/Dompdf branded-export pattern already
+        established in `reports.php`.
+      - **Head of Academic Affairs granted the same read-only "View
+        Students information" access as University Rector**: added
+        `'head_academic'` to `admin/students.php`'s `require_role()` and
+        folded it into the existing `$isReadOnly` flag (`in_array($role,
+        ['university_rector', 'head_academic'], true)`), and to
+        `admin/student_view.php`'s `require_role()` — no other logic
+        needed changing, since every write branch on that page already
+        gates on `$isReadOnly`, not the specific role name. Added the nav
+        entry (`includes/nav_items.php`) and updated CLAUDE.md §4's live
+        table accordingly.
+      - Verified end-to-end via temporary `university_rector`/
+        `head_academic` accounts: "View Profile" renders and links
+        correctly on both list pages; both detail pages render the photo/
+        initials hero and info-tile cards with zero PHP warnings; the
+        Export card's Excel/PDF links on all three pages return real,
+        valid files (200, correct `Content-Type`); Head of Academic Affairs
+        gets the identical read-only `admin/students.php`/
+        `admin/student_view.php` experience (no Add/Edit/Delete/Import UI,
+        a crafted `action=delete` POST rejected server-side with zero DB
+        change). Temporary accounts deleted afterward.
+
+### Staff Messages (internal chat between staff roles)
+- [x] A WhatsApp-style two-pane direct-message chat so University Rector /
+      Head of Academic Affairs / Dean / Lecturer / Registration Office can
+      message each other directly (e.g. to ask about an issue) without
+      leaving the app — students are deliberately not part of this channel.
+      - New `messages` table (`migrations/2026_08_staff_messages.sql`,
+        `sender_id`/`receiver_id`/`body`/`is_read`/`created_at`, indexed for
+        both "one conversation" and "my unread count" lookups) — applied
+        and mirrored into `admas_attendance_schema.sql`, `mysqldump` backup
+        taken first per this file's own convention.
+      - New `includes/chat_helpers.php`: `CHAT_STAFF_ROLES` (the one
+        source of truth for who may use this feature) and
+        `chat_is_valid_contact()` (an active user whose role is in that
+        set) — shared by `messages.php` and both ajax endpoints so the
+        "who can message whom" rule can never drift between them.
+      - New `messages.php` (app root, shared-file convention like
+        `attendance.php`/`reports.php`): a contact list (every other active
+        staff user, most-recently-messaged first, with unread badges and a
+        last-message preview) on the left, the open conversation on the
+        right. A plain `<form>` POST to the same file is the no-JS
+        fallback; `assets/js/staff_chat.js` upgrades it to `fetch()`-based
+        sending plus a 3-second poll (`ajax/chat_poll.php`) that appends
+        new messages without a full reload and marks them read the moment
+        they're actually seen.
+      - New `ajax/chat_send.php` (inserts one message, rejects an invalid/
+        non-staff `receiver_id` or an empty body) and `ajax/chat_poll.php`
+        (GET, returns messages newer than `?after_id` in either direction
+        between the caller and `?with`, and flips unread rows addressed to
+        the caller to read).
+      - `includes/nav_items.php` gained a "Messages" entry for the five
+        staff roles; `includes/sidebar.php` computes and shows a small
+        unread-count badge next to it (one extra `COUNT(*)` query per page
+        load for those roles only, same pattern as `topbar.php`'s existing
+        notification bell).
+      - Verified end-to-end via temporary Rector/Head of Academic Affairs/
+        Dean accounts: a real send/receive/read-receipt round-trip (DB
+        `is_read` flipped the moment the recipient opened the
+        conversation), a poll correctly returning only genuinely-new
+        messages, a Dean correctly unable to send to a non-staff/forged
+        user id (`400`, "Invalid recipient.", zero row inserted), and cross-
+        conversation isolation (polling a conversation with no messages
+        between two real staff members correctly returns empty, not
+        another pair's messages). All temporary accounts and every test
+        message row deleted afterward; `messages` table confirmed empty.
+
+### Lecturer Check-In / Check-Out
+- [x] A distinct feature from student Attendance: a lecturer's own
+      arrival/departure log, recorded per **course + Xiiso session** they
+      actually teach (confirmed with the user via two rounds of
+      `AskUserQuestion` before writing any code — name: "Lecturer Check-In
+      / Check-Out"; granularity: per session, not one flat daily clock;
+      "left early" flagging: explicitly **not** automated — Head of
+      Academic Affairs/Dean/University Rector see the raw timestamps and
+      judge for themselves, no reference "expected end time" config was
+      added anywhere).
+      - New `lecturer_checkins` table
+        (`migrations/2026_08_lecturer_checkins.sql`, mirrored into
+        `admas_attendance_schema.sql`): `lecturer_id`/`course_id`/
+        `session_id`/`check_in_at`/`check_out_at` (nullable until checked
+        out), unique per `(lecturer_id, course_id, session_id)` so a
+        lecturer can never double-check-in to the same class session.
+      - New `lecturer/checkin.php` (lecturer-only, self-service): lists
+        this lecturer's own **current-semester** offerings' sessions whose
+        date has already arrived, most recent first, each row a Check In/
+        Check Out button. The real security boundary is
+        `lecturer_owns_current_session()` — a `(course_id, session_id)`
+        pair is only ever a legitimate target if it belongs to one of this
+        lecturer's own current `course_offerings` rows, re-checked
+        server-side on every POST, not just filtered into the display list.
+      - New `lecturer_checkins.php` (app root, read-only report shared by
+        University Rector/Head of Academic Affairs — university-wide — and
+        Dean — own-faculty lecturers only, enforced via the same
+        `d.faculty_id = ?` join pattern already used elsewhere in this
+        app), with a Lecturer/date-range filter bar.
+      - `admin/lecturer_view.php` (University Rector's per-lecturer detail
+        page) gained a new "Check-In/Out History" card — raw timestamps,
+        a total-check-ins and a not-checked-out-count badge, no automatic
+        judgement.
+      - `includes/nav_items.php`: "Lecturer Check-In" (lecturer only) and
+        "Lecturer Check-Ins" (the three viewing roles).
+      - Verified end-to-end via a temporary lecturer holding a real
+        current-semester `course_offerings` row: a full Check-In → Check-
+        Out cycle via real HTTP POSTs, correctly reflected on both
+        `lecturer_checkins.php` and `admin/lecturer_view.php`; confirmed a
+        Dean scoped to a different faculty could not see that lecturer's
+        record (correct empty-state, not an error). Temporary
+        account/offering/checkin rows deleted afterward.
+      - **Populated with real check-in history for the university's actual
+        3 lecturers** (Mr Abdirahman, abdinakani qaanuushi, Eng Maax)
+        against their own real current course offerings and real Xiiso
+        session dates, at the user's explicit request, so the feature has
+        real data to look at — left in place permanently, not test data.
+        While seeding this, discovered the real lecturer had already been
+        live-testing the feature themselves (3 real check-in rows already
+        present for "Mr Abdirahman" at real-time timestamps) — those were
+        left completely untouched; the seed script was adjusted around
+        them rather than overwritten.
+
+### Bug Fix: Multi-Cohort Semester Picker Defaulted to the Wrong Semester
+- [x] Reported directly by the user with a screenshot: a student really
+      enrolled in "Semester 9 (2023/2024)" was shown "Semester 3
+      (2025/2026)" as the default/active semester on their own "My
+      Courses" page, and that same course/data confusion carried through to
+      the student's own dashboard ("no courses for the current semester")
+      whenever their faculty had more than one semester marked `current` at
+      once (an intentional, existing capability from an earlier session —
+      independent concurrent cohorts/tracks per faculty).
+      - **Root cause**: the Semester Box Picker's default-selection
+        fallback (`student/courses.php`, `admin/student_view.php`) picked
+        "whichever box is marked `current`, in ascending Semester-number
+        order" — never actually checking which semester the specific
+        student is assigned to (`students.semester_id`). With two
+        concurrently-current semesters, the lower-numbered one always won,
+        regardless of which cohort the student in question actually
+        belongs to. Separately, `student/dashboard.php`'s own "current
+        semester" resolution (`get_current_semester($conn, $facultyId)`)
+        has an analogous, documented limitation — it returns the
+        most-recently-created current semester for the whole faculty, not
+        the one for this student's own academic-year cohort.
+      - **Fix**: both picker pages now resolve the student's own
+        `semester_id` first (added to their existing student-row `SELECT`)
+        and use it as the default whenever it's among the created options,
+        only falling back to "whichever is current" if the student has no
+        semester assigned yet. `student/dashboard.php` now first looks for
+        a `current` semester matching the student's own `(faculty_id,
+        academic_year_id)` specifically, falling back to the generic
+        per-faculty `get_current_semester()` only if none exists for that
+        exact cohort yet.
+      - **Follow-up bug, same root cause, reported separately**: with the
+        above fixed, the *correct* box was now being selected, but a
+        second, different-numbered semester that also happened to be
+        `current` still showed its own "(current)" text label at the same
+        time — two boxes both claiming "(current)" on screen, confusing on
+        its own even once selection itself was correct. Fixed by tying the
+        "(current)" label to a single `$myCurrentSemesterId` (the student's
+        own semester if set, else whichever is actually selected) instead
+        of any box whose raw DB `status` happens to be `current` — at most
+        one box can ever say "(current)" on either page now.
+      - Verified live against the real data that reproduced the original
+        report (Informatics: Semester 9 and Semester 3 both genuinely
+        `current`): a temporary student assigned to Semester 9 now
+        correctly defaults to the Semester 9 box (not Semester 3) on both
+        `student/courses.php` and `admin/student_view.php`, with exactly
+        one "(current)" label shown on each page; a second temporary
+        student in the same real cohort confirmed `student/dashboard.php`
+        now shows all 4 of that cohort's real courses instead of "No
+        courses recorded for this semester yet." All temporary accounts
+        deleted afterward.
+
+### attendance.php: Roster Search Filter
+- [x] Added a client-side Student No/Name search box above the Xiiso Grid
+      roster table (new `assets/js/roster_search.js`) so a lecturer/Dean/
+      University Rector can quickly find a specific student in a large
+      class — pure `input`-event row filtering over the already-rendered
+      `<tr data-student-row>` rows, no extra query. Verified live: renders
+      correctly above a real 25-student roster with zero PHP
+      warnings/notices/fatals.
+
