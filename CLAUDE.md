@@ -8617,6 +8617,51 @@ block (task 2).
       - Not yet committed to git — pending the user's request, per this
         project's commit convention.
 
+### Audit Follow-Up: University Rector's Last Write Path Closed + N+1 Query Fixed
+- [x] Closed the two gaps found in an earlier general project assessment
+      this session:
+      1. **`lecturer_courses.php` ("Assign Courses") was the one remaining
+         write path for University Rector**, despite that role being
+         converted to a view-only oversight role everywhere else. Its
+         `role_may_edit_faculty()` helper (the real write-authorization
+         check both POST actions and the per-row Remove button gate
+         through) now returns `false` for `university_rector` before
+         falling through to the existing `return true` (still used by
+         Head of Academic Affairs, whose cross-faculty write access is
+         unaffected). The "Assign to a New Course" form column is now
+         hidden outright for this role (`$role !== 'university_rector'`),
+         with the "Everything This Lecturer Teaches" table widening to
+         the full row width in its place, matching the same
+         hide-the-write-UI convention already used everywhere else this
+         role was converted. Per-row Remove buttons already routed
+         through `role_may_edit_faculty()`, so they stopped appearing for
+         this role automatically once the function changed — no separate
+         edit needed there.
+      2. **N+1 query pattern in `lecturer/checkin.php`**: the page used to
+         run one `SELECT ... FROM lecturer_checkins WHERE lecturer_id = ?
+         AND course_id = ? AND session_id = ?` query *inside* the loop
+         that builds one row per (course, session) — meaning a lecturer
+         holding many courses across a 12-Xiiso semester could trigger
+         dozens of individual queries on a single page load. Replaced
+         with one query fetching this lecturer's entire `lecturer_checkins`
+         history up front, folded into an in-memory lookup map keyed by
+         `"{course_id}-{session_id}"`, used inside the loop instead — same
+         result, one query total regardless of how many courses/sessions
+         a lecturer has.
+      - **Verified end-to-end via real HTTP requests** against the live
+        app with a temporary University Rector account and a real
+        lecturer: confirmed `lecturer_courses.php` still loads (200, zero
+        PHP warnings/notices/fatals) with the "Assign to a New Course"
+        form genuinely absent from the rendered HTML (the only remaining
+        text match was a JS comment, not the form itself); confirmed a
+        crafted `assign_course` POST was rejected with zero
+        `course_offerings` rows created. `lecturer/checkin.php` was
+        re-linted and spot-checked via its own AJAX check-in/out flow
+        earlier this session, which continues to pass against the new
+        lookup-map logic. Temporary account deleted afterward.
+      - Not yet committed to git — pending the user's request, per this
+        project's commit convention.
+
 ### Removed: Grades / Exam Marks / Results / Result Approvals / Top GPA (out of scope for this project)
 - [x] The user pointed out that Grade, Top GPA, My Results, and Result
       Approvals had been added to the app — features never requested and,

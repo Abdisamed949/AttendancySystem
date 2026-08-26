@@ -87,6 +87,15 @@ function role_may_edit_faculty(string $role, int $deanFacultyId, int $facultyId)
     if ($role === 'dean') {
         return $facultyId === $deanFacultyId;
     }
+    if ($role === 'university_rector') {
+        // University Rector is a supervisory, read-only Viewer everywhere
+        // else in this app (except User Management/Settings) — this page
+        // was the one remaining write path that had never been converted;
+        // closing it here matches that same boundary. Head of Academic
+        // Affairs keeps full cross-faculty write access (falls through to
+        // the final `return true`).
+        return false;
+    }
 
     return true;
 }
@@ -397,7 +406,7 @@ foreach ($semesters as $sem) {
             <?php endif; ?>
 
             <div class="row g-3 mt-1">
-                <div class="col-lg-8">
+                <div class="col-lg-<?= $role !== 'university_rector' ? '8' : '12' ?>">
                     <div class="admas-card p-4">
                         <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Everything This Lecturer Teaches</h6>
                         <div class="table-responsive">
@@ -474,6 +483,7 @@ foreach ($semesters as $sem) {
                     </div>
                 </div>
 
+                <?php if ($role !== 'university_rector'): ?>
                 <div class="col-lg-4">
                     <div class="admas-card p-4">
                         <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Assign to a New Course</h6>
@@ -596,6 +606,7 @@ foreach ($semesters as $sem) {
                         </form>
                     </div>
                 </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>

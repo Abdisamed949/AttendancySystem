@@ -155,6 +155,20 @@ $offeringsStmt->execute();
 $offerings = $offeringsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $offeringsStmt->close();
 
+// This lecturer's entire lecturer_checkins history, fetched once and
+// looked up in-memory below (keyed by "courseId-sessionId") instead of
+// running one query per (course, session) row inside the loop — a real
+// N+1 pattern that would grow with every course/session a lecturer holds.
+$checkinsByKey = [];
+$allCheckinsStmt = $conn->prepare('SELECT id, course_id, session_id, check_in_at, check_out_at FROM lecturer_checkins WHERE lecturer_id = ?');
+$allCheckinsStmt->bind_param('i', $lecturerId);
+$allCheckinsStmt->execute();
+$allCheckinsResult = $allCheckinsStmt->get_result();
+while ($ci = $allCheckinsResult->fetch_assoc()) {
+    $checkinsByKey[$ci['course_id'] . '-' . $ci['session_id']] = $ci;
+}
+$allCheckinsStmt->close();
+
 $rows = [];
 $sessionsBySemesterId = [];
 foreach ($offerings as $off) {
@@ -168,11 +182,7 @@ foreach ($offerings as $off) {
             continue;
         }
 
-        $checkinStmt = $conn->prepare('SELECT id, check_in_at, check_out_at FROM lecturer_checkins WHERE lecturer_id = ? AND course_id = ? AND session_id = ?');
-        $checkinStmt->bind_param('iii', $lecturerId, $off['course_id'], $session['id']);
-        $checkinStmt->execute();
-        $checkin = $checkinStmt->get_result()->fetch_assoc();
-        $checkinStmt->close();
+        $checkin = $checkinsByKey[$off['course_id'] . '-' . $session['id']] ?? null;
 
         $rows[] = [
             'course_id' => (int) $off['course_id'],
