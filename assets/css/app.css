@@ -169,6 +169,729 @@ body.sidebar-open .sidebar-backdrop {
     color: rgba(255, 255, 255, 0.6);
 }
 
+/* Mobile-only university brand (logo + name), shown above .sidebar-profile
+   specifically at mobile widths — see the matching comment in
+   includes/sidebar.php. Hidden on desktop, where this drawer isn't
+   off-canvas and .sidebar-profile already opens the sidebar directly. */
+.sidebar-mobile-brand {
+    display: none;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 1.1rem 1.25rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+.sidebar-mobile-brand img {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    background: #fff;
+    border-radius: 50%;
+    padding: 3px;
+    flex-shrink: 0;
+}
+
+.sidebar-mobile-brand-name {
+    font-weight: 700;
+    font-size: 0.95rem;
+    line-height: 1.2;
+    color: #fff;
+}
+
+/* Sidebar identity block: Role label on top, profile photo (or a fallback
+   person icon when none is uploaded) in the middle, full name at the
+   bottom — replaces the university logo/name that used to sit here (the
+   university's own identity now lives only in the sky-blue top strip, via
+   includes/topbar.php). Role label and name intentionally share one font
+   family so the block reads as one designed unit. */
+.sidebar-profile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.5rem;
+    padding: 1.5rem 1rem 1.25rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+.sidebar-profile-role,
+.sidebar-profile-name {
+    font-family: "Segoe UI Rounded", "SF Pro Rounded", Nunito, "Segoe UI", Roboto, sans-serif;
+}
+
+.sidebar-profile-role {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff;
+}
+
+.sidebar-profile-photo {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2.5px solid var(--admas-sky);
+    background: #fff;
+}
+
+.sidebar-profile-photo-fallback {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2.5px solid var(--admas-sky);
+    background: rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(199, 221, 245, 0.85);
+    font-size: 1.7rem;
+}
+
+.sidebar-profile-name {
+    font-size: 0.76rem;
+    font-weight: 500;
+    line-height: 1.25;
+    color: rgba(199, 221, 245, 0.85);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Shared "who" cell — a circular photo (or a colour-coded initial when no
+   photo has been uploaded) next to a name/sub-line, used everywhere a
+   person appears in a list: Students, Lecturers, Staff/User Management,
+   the Attendance roster. See includes/avatar_helpers.php's
+   render_person_avatar_cell(). */
+.who-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.who-avatar {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--admas-surface);
+    box-shadow: 0 0 0 1.5px var(--admas-sky);
+    display: block;
+}
+
+.who-avatar-fallback {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 800;
+    font-size: 0.82rem;
+    box-shadow: 0 0 0 1.5px var(--admas-surface);
+}
+
+.who-cell.who-sm .who-avatar,
+.who-cell.who-sm .who-avatar-fallback {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    font-size: 0.68rem;
+}
+
+.who-text-name {
+    font-weight: 600;
+    color: var(--admas-text);
+    line-height: 1.25;
+}
+
+.who-text-sub {
+    font-size: 0.76rem;
+    color: var(--admas-text-muted);
+}
+
+/* Dashboard leaderboard rows — Lecturer Workload / Lecturer Check-In
+   Ranking (admin/dean/head_academic dashboard.php): each row pairs a
+   small .who-cell avatar with a thin progress bar and a raw count,
+   instead of a Chart.js bar chart, so a lecturer's own photo can appear
+   directly on the ranking. */
+.dash-rank-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.dash-rank-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.dash-rank-row .who-cell {
+    flex: 0 0 auto;
+    width: 128px;
+    min-width: 128px;
+    max-width: 128px;
+    overflow: hidden;
+}
+
+/* The name/sub-line wrapper .who-cell renders as its second child (no
+   class of its own) needs min-width: 0 — without it, a flex child never
+   shrinks below its own text's natural width, so a long name silently
+   overflows past .who-cell's 128px box and visually runs UNDER the
+   progress bar sitting right next to it instead of being clipped. */
+.dash-rank-row .who-cell > div {
+    min-width: 0;
+    overflow: hidden;
+}
+
+.dash-rank-row .who-text-name {
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dash-rank-bar-wrap {
+    flex: 1 1 auto;
+}
+
+.dash-rank-count {
+    flex: 0 0 auto;
+    min-width: 20px;
+    text-align: right;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--admas-text);
+}
+
+/* "My Last Documents" row list — student/dashboard.php */
+.last-doc-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.last-doc-row {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid var(--admas-border);
+}
+
+.last-doc-row:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.last-doc-icon {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    color: var(--admas-sky);
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+}
+
+.last-doc-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.last-doc-title {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--admas-text);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.last-doc-sub {
+    font-size: 0.78rem;
+    color: var(--admas-text-muted);
+}
+
+.last-doc-by {
+    flex: none;
+}
+
+/* Class Time Table grid — student/dashboard.php, lecturer/dashboard.php,
+   class_timetable.php. A plain table (Day columns, Time-slot rows) with
+   each occupied cell rendered as a small tinted tile. */
+.timetable-table {
+    table-layout: fixed;
+}
+
+.timetable-table th,
+.timetable-table td {
+    text-align: center;
+    vertical-align: top;
+}
+
+.timetable-time-col {
+    width: 110px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: var(--admas-text-muted);
+    white-space: nowrap;
+    text-align: left !important;
+}
+
+.timetable-slot {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    border-radius: 10px;
+    padding: 0.45rem 0.55rem;
+    text-align: left;
+    margin: 0 auto 0.3rem;
+}
+
+.timetable-slot:last-child {
+    margin-bottom: 0;
+}
+
+.timetable-slot-course {
+    font-weight: 700;
+    font-size: 0.8rem;
+    color: var(--admas-text);
+    line-height: 1.25;
+}
+
+.timetable-slot-meta {
+    font-size: 0.7rem;
+    color: var(--admas-text-muted);
+    margin-top: 0.1rem;
+}
+
+.timetable-empty-cell {
+    color: var(--admas-text-faint);
+}
+
+/* Compact modifier — dashboard cards (student/lecturer), smaller than the
+   full class_timetable.php grid. */
+.timetable-compact .timetable-time-col {
+    width: 78px;
+    font-size: 0.68rem;
+}
+
+.timetable-compact th {
+    font-size: 0.68rem;
+    padding: 0.4rem 0.35rem;
+}
+
+.timetable-compact td {
+    padding: 0.3rem;
+}
+
+.timetable-compact .timetable-slot {
+    padding: 0.3rem 0.4rem;
+    margin-bottom: 0.2rem;
+}
+
+.timetable-compact .timetable-slot-course {
+    font-size: 0.68rem;
+}
+
+.timetable-compact .timetable-slot-meta {
+    font-size: 0.6rem;
+}
+
+/* Print-style Class Time Table (student/class_timetable.php) — styled to
+   resemble ADMAS's real printed timetable sheet: logo + name header,
+   Faculty/Year/Semester line, a tan/peach day-header row, "REGISTRAR"
+   signature line at the bottom. */
+.timetable-print-card {
+    position: relative;
+    border: 1px solid var(--admas-border);
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 18px 40px -18px rgb(14 165 233 / 0.35), 0 4px 14px var(--admas-shadow);
+}
+
+.timetable-print-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    padding: 3px;
+    border-radius: 18px;
+    background: linear-gradient(120deg, var(--admas-sky), var(--admas-navy-end), var(--admas-sky));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+}
+
+.timetable-print-card::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 6px;
+    background: linear-gradient(90deg, var(--admas-sky), var(--admas-navy-end) 50%, var(--admas-sky));
+    pointer-events: none;
+}
+
+.timetable-print-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+.timetable-print-logo {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex: none;
+}
+
+.timetable-print-header-text {
+    flex: 1;
+}
+
+.timetable-print-university {
+    font-weight: 800;
+    font-size: 1.35rem;
+    letter-spacing: 0.02em;
+    color: var(--admas-text);
+}
+
+.timetable-print-campus {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--admas-text);
+    margin-bottom: 0.4rem;
+}
+
+.timetable-print-faculty,
+.timetable-print-year {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--admas-text);
+}
+
+.timetable-print-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--admas-border);
+    padding-bottom: 0.6rem;
+    margin-bottom: 0.6rem;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--admas-text);
+}
+
+.timetable-print-title {
+    text-decoration: underline;
+}
+
+.timetable-print-table {
+    table-layout: fixed;
+}
+
+.timetable-print-table th {
+    background: #f6c98c;
+    color: #3a2a12;
+    font-weight: 800;
+    border: 1px solid var(--admas-text);
+    padding: 0.55rem 0.5rem;
+}
+
+.timetable-print-table .timetable-time-col {
+    width: 130px;
+    font-size: 0.8rem;
+    padding: 0.55rem 0.6rem;
+}
+
+.timetable-print-table td {
+    border: 1px solid var(--admas-border);
+    vertical-align: middle;
+    padding: 0.6rem 0.65rem;
+}
+
+.timetable-print-cell {
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: var(--admas-text);
+    text-align: left;
+}
+
+.timetable-print-cell > div {
+    margin-bottom: 0.15rem;
+}
+
+.timetable-print-cell > div:last-child {
+    margin-bottom: 0;
+}
+
+.timetable-print-cell-editable {
+    border-bottom: 1px dashed var(--admas-border);
+    padding-bottom: 0.3rem;
+}
+
+.timetable-edit-btn {
+    font-size: 0.72rem;
+    text-decoration: none;
+    color: var(--admas-sky);
+}
+
+.timetable-edit-btn:hover {
+    text-decoration: underline;
+}
+
+.timetable-print-signature {
+    margin-top: 2rem;
+    font-weight: 700;
+    color: var(--admas-text);
+}
+
+/* Compact modifier — the print-style card scaled down for a dashboard
+   widget instead of the full dedicated page. */
+.timetable-print-compact {
+    border-radius: 14px;
+    box-shadow: 0 12px 28px -16px rgb(14 165 233 / 0.3), 0 3px 10px var(--admas-shadow);
+}
+
+.timetable-print-compact::before {
+    border-radius: 14px;
+    padding: 2px;
+}
+
+.timetable-print-compact::after {
+    height: 4px;
+}
+
+.timetable-print-compact .timetable-print-logo {
+    width: 32px;
+    height: 32px;
+}
+
+.timetable-print-compact .timetable-print-header {
+    gap: 0.6rem;
+    margin-bottom: 0.5rem;
+}
+
+.timetable-print-compact .timetable-print-university {
+    font-size: 0.82rem;
+}
+
+.timetable-print-compact .timetable-print-campus {
+    font-size: 0.7rem;
+    margin-bottom: 0.1rem;
+}
+
+.timetable-print-compact .timetable-print-faculty,
+.timetable-print-compact .timetable-print-year {
+    font-size: 0.68rem;
+}
+
+.timetable-print-compact .timetable-print-meta {
+    font-size: 0.7rem;
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.4rem;
+}
+
+/* Same table-layout: fixed squeeze the mobile fix below addresses for the
+   full-size page — this compact dashboard widget is always narrow (one
+   card in a grid, never full-width), so it needs the same min-width fix
+   unconditionally, not only under the mobile media query. */
+.timetable-print-compact .timetable-print-table {
+    min-width: 480px;
+}
+
+.timetable-print-compact .timetable-print-table .timetable-time-col {
+    width: 88px;
+    font-size: 0.62rem;
+    padding: 0.3rem 0.3rem;
+    white-space: nowrap;
+}
+
+.timetable-print-compact .timetable-print-table th {
+    font-size: 0.6rem;
+    padding: 0.3rem 0.3rem;
+    white-space: nowrap;
+}
+
+.timetable-print-compact .timetable-print-table td {
+    padding: 0.3rem 0.3rem;
+}
+
+.timetable-print-compact .timetable-print-cell {
+    font-size: 0.62rem;
+    line-height: 1.35;
+}
+
+.timetable-print-compact .timetable-print-cell > div {
+    margin-bottom: 0.12rem;
+}
+
+.timetable-print-compact .timetable-print-cell > div:last-child {
+    margin-bottom: 0;
+}
+
+/* Mobile sizing for the full-page Class Time Table (student and lecturer
+   versions both use .timetable-print-card, not the dashboard-widget
+   .timetable-print-compact modifier) — shrinks the same way .timetable-print-compact
+   already does on a dashboard widget, so a Day x Time grid this wide fits a
+   phone screen instead of relying on .table-responsive's scrollbar alone. */
+@media (max-width: 767.98px) {
+    .timetable-print-card:not(.timetable-print-compact) {
+        border-width: 1px;
+        padding: 1rem !important;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-header {
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-logo {
+        width: 48px;
+        height: 48px;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-university {
+        font-size: 1rem;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-campus {
+        font-size: 0.85rem;
+        margin-bottom: 0.25rem;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-faculty,
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-year {
+        font-size: 0.78rem;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-meta {
+        font-size: 0.76rem;
+    }
+
+    /* The real fix for the "day headers overlap into unreadable text"
+       mobile bug: .timetable-print-table's own table-layout: fixed forces
+       all 7 columns (Time + 6 days) to squeeze into whatever width the
+       card has — on a ~360px phone that's ~40px per day column, nowhere
+       near enough for "WEDNESDAY", and with no white-space/overflow
+       handling the text wraps and visibly spills across neighboring
+       cells. A min-width lets the table grow past the viewport instead —
+       the .table-responsive wrapper already on every Class Time Table
+       page (student/lecturer/shared) turns that into a normal horizontal
+       swipe, exactly like the real printed sheet's own uncompressed
+       columns. */
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-table {
+        min-width: 640px;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-table .timetable-time-col {
+        width: 96px;
+        font-size: 0.66rem;
+        padding: 0.4rem 0.35rem;
+        white-space: nowrap;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-table th {
+        font-size: 0.64rem;
+        padding: 0.4rem 0.35rem;
+        white-space: nowrap;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-table td {
+        padding: 0.4rem 0.35rem;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-cell {
+        font-size: 0.66rem;
+        line-height: 1.45;
+    }
+
+    .timetable-print-card:not(.timetable-print-compact) .timetable-print-signature {
+        margin-top: 1.25rem;
+        font-size: 0.85rem;
+    }
+}
+
+/* Mobile-only identity strip — includes/topbar.php's counterpart to
+   .sidebar-profile above, shown instead of it under the same breakpoint
+   the sidebar itself goes off-canvas at, so the profile photo/name/role
+   stay visible in the body at all times on a phone rather than being
+   hidden behind the hamburger menu. Hidden entirely on desktop, where the
+   always-visible sidebar already shows this. */
+.topbar-profile-strip {
+    display: none;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.65rem 1rem;
+    background: var(--admas-surface);
+    border-bottom: 1px solid var(--admas-border);
+    text-decoration: none;
+    color: inherit;
+}
+
+.topbar-profile-strip-photo {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--admas-sky);
+    flex-shrink: 0;
+}
+
+.topbar-profile-strip-fallback {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid var(--admas-sky);
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.topbar-profile-strip-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.topbar-profile-strip-name {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--admas-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.topbar-profile-strip-role {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--admas-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
 .sidebar-nav {
     flex: 1;
     padding: 0.75rem 0.75rem 1.5rem;
@@ -203,6 +926,28 @@ body.sidebar-open .sidebar-backdrop {
     background: var(--admas-sky);
     color: #fff;
     font-weight: 600;
+}
+
+.sidebar-group-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.42);
+    padding: 0.85rem 0.9rem 0.3rem;
+}
+
+.sidebar-group-title:first-child {
+    padding-top: 0.15rem;
+}
+
+.sidebar-link.sidebar-link-logout {
+    color: rgba(252, 165, 165, 0.85);
+}
+
+.sidebar-link.sidebar-link-logout:hover {
+    background: rgba(252, 165, 165, 0.12);
+    color: #fca5a5;
 }
 
 /* Main content shell */
@@ -315,12 +1060,6 @@ body.sidebar-open .sidebar-backdrop {
     border: 2px solid var(--admas-surface);
 }
 
-.topbar-user {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-}
-
 .logout-btn {
     border: none;
     background: var(--admas-bg);
@@ -342,47 +1081,6 @@ body.sidebar-open .sidebar-backdrop {
     color: #dc2626;
 }
 
-.avatar-initials {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    background: var(--admas-sky);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 0.9rem;
-    flex-shrink: 0;
-}
-
-.avatar-photo {
-    display: block;
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    object-fit: cover;
-    flex-shrink: 0;
-    border: 2px solid var(--admas-sky);
-}
-
-.user-meta {
-    display: flex;
-    flex-direction: column;
-    line-height: 1.15;
-}
-
-.user-name {
-    font-weight: 600;
-    font-size: 0.9rem;
-    color: var(--admas-text);
-}
-
-.user-role {
-    font-size: 0.75rem;
-    color: var(--admas-text-muted);
-}
-
 /* Page body */
 .page-body {
     padding: 1.5rem;
@@ -401,13 +1099,129 @@ body.sidebar-open .sidebar-backdrop {
     gap: 0.5rem;
 }
 
-/* Cards */
+/* Semester-scope banner — sits alongside .scope-banner on every dashboard,
+   telling the viewer which semester's data the KPIs/charts below reflect
+   (a distinct concern from the role/faculty access-scope banner above it).
+   Green-tinted so it reads as a different, second kind of notice, not a
+   restatement of the sky-blue access banner. */
+.semester-scope-banner {
+    background: rgb(34 197 94 / var(--admas-tint-opacity));
+    color: #16a34a;
+    border-radius: 10px;
+    padding: 0.65rem 1rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 1.25rem;
+    margin-left: 0.6rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* ---------------------------------------------------------------------
+   Semester Box Picker — used on admin/student_view.php and
+   student/courses.php to pick which "Semester N" box of a faculty's
+   program to view. Rounded pill buttons instead of plain bordered
+   rectangles, with a small live-dot on whichever box is this viewer's own
+   actual current semester, and a dashed, visibly inert style for a
+   semester number that has no real row created yet.
+   --------------------------------------------------------------------- */
+.semester-picker-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--admas-text-muted);
+    font-weight: 700;
+    margin-bottom: 0.65rem;
+}
+
+.semester-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.sem-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 1.05rem;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    border: 1.5px solid var(--admas-sky);
+    color: var(--admas-sky);
+    background: var(--admas-surface);
+    text-decoration: none;
+    transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.sem-box:hover {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+    text-decoration: none;
+    transform: translateY(-1px);
+}
+
+.sem-box.sem-box-active {
+    background: var(--admas-sky);
+    border-color: var(--admas-sky);
+    color: #fff;
+    box-shadow: 0 4px 14px rgb(14 165 233 / 0.35);
+}
+
+.sem-box.sem-box-active:hover { color: #fff; }
+
+.sem-box-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #16a34a;
+    flex-shrink: 0;
+}
+
+.sem-box.sem-box-active .sem-box-dot { background: #fff; }
+
+.sem-box-disabled {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.45rem 1.05rem;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    border: 1.5px dashed var(--admas-border);
+    color: var(--admas-text-faint);
+    background: transparent;
+    cursor: not-allowed;
+}
+
+/* Cards — a restrained, brand-consistent frame on every .admas-card
+   project-wide: a subtle sky-tinted border, a soft shadow, and a thin
+   sky-blue accent bar down the left edge (same device already used by
+   .kpi-card's own colored left bar — a plain sky bar here, .kpi-card's
+   later, more-specific rule below still wins on KPI cards so they keep
+   their own category color instead of this generic one). No gradient
+   ring, no overflow:hidden, so nothing inside a card (dropdowns,
+   popovers) can get clipped. All colors come from the existing theme
+   tokens, so this reads correctly in both light and dark mode. */
 .admas-card {
+    position: relative;
     background: var(--admas-surface);
     border-radius: 16px;
-    border: 1px solid var(--admas-border);
-    box-shadow: 0 1px 2px var(--admas-shadow);
+    border: 1.5px solid rgb(14 165 233 / 0.35);
+    box-shadow: 0 4px 14px var(--admas-shadow);
     transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+}
+
+.admas-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--admas-sky);
+    pointer-events: none;
 }
 
 .kpi-card {
@@ -492,6 +1306,62 @@ a.kpi-card {
     font-size: 0.8rem;
     color: var(--admas-text-muted);
     font-weight: 500;
+}
+
+/* Denser dashboards on laptop-sized screens (1366x768/1440x900/1536x864
+   class widths) — KPI cards/icons/values and page padding all trim down a
+   notch so more of a dashboard fits without scrolling, without changing
+   any layout logic (still the same grid/columns, just smaller). Desktop
+   (>1600px) and phone/tablet (their own separate breakpoints elsewhere in
+   this file) are both untouched. */
+@media (min-width: 768px) and (max-width: 1600px) {
+    .page-body {
+        padding: 1.1rem 1.25rem;
+    }
+
+    .admas-card {
+        border-radius: 13px;
+    }
+
+    .kpi-card {
+        padding: 1rem 1.1rem;
+        gap: 0.75rem;
+    }
+
+    .kpi-icon {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        font-size: 1.2rem;
+    }
+
+    .kpi-value {
+        font-size: 1.4rem;
+    }
+
+    .kpi-label {
+        font-size: 0.74rem;
+    }
+
+    .admas-card.p-4 {
+        padding: 1.1rem !important;
+    }
+
+    /* The 4-card quad grid (student/lecturer dashboards) is the one thing
+       those two dashboards carry that Rector/Dean/Head Academic's don't —
+       shrink it a further notch on laptop-height screens so the whole
+       dashboard fits without scrolling, matching how compact those three
+       already are. */
+    .dashboard-quad .admas-table th,
+    .dashboard-quad .admas-table td {
+        padding: 0.3rem 0.45rem;
+        font-size: 0.76rem;
+    }
+
+    .dashboard-quad h6 {
+        font-size: 0.7rem;
+        margin-bottom: 0.4rem !important;
+    }
 }
 
 .kpi-arrow {
@@ -830,6 +1700,24 @@ td.col-exam {
         width: auto;
         max-width: 34vw;
     }
+
+    /* Identity moves from the now off-canvas sidebar into the always-
+       visible body strip below the topbar — see the matching comment on
+       .topbar-profile-strip above. */
+    .sidebar-profile {
+        display: none;
+    }
+
+    .topbar-profile-strip {
+        display: flex;
+    }
+
+    /* University branding — absent from the desktop sidebar (which opens
+       straight on .sidebar-profile) — appears at the top of the drawer on
+       mobile, since it's otherwise absent from the mobile view entirely. */
+    .sidebar-mobile-brand {
+        display: flex;
+    }
 }
 
 @media (max-width: 575.98px) {
@@ -983,6 +1871,123 @@ td.col-exam {
     color: var(--admas-sky);
     font-size: 1rem;
 }
+
+/* Color variants so multiple stacked .section-heading blocks (e.g. Personal
+   Details / Contact Details / Enrollment Details on the student detail
+   pages) read as distinct groups at a glance, not one repeated sky icon. */
+.section-heading.accent-navy i { background: rgb(11 31 58 / var(--admas-tint-opacity)); color: var(--admas-text); }
+.section-heading.accent-green i { background: rgb(34 197 94 / var(--admas-tint-opacity)); color: #16a34a; }
+.section-heading.accent-amber i { background: rgb(245 158 11 / var(--admas-tint-opacity)); color: #d97706; }
+
+/* Registration Details card (admin/student_view.php) — one slim card with
+   Personal/Contact/Enrollment grouped as mini-sections inside it, instead
+   of three separate full-width cards. */
+.reg-group + .reg-group {
+    margin-top: 1.1rem;
+    padding-top: 1.1rem;
+    border-top: 1px dashed var(--admas-border);
+}
+.reg-group-title {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 700;
+    color: var(--admas-text-faint);
+    margin-bottom: 0.65rem;
+}
+.reg-field-label {
+    font-size: 0.72rem;
+    color: var(--admas-text-muted);
+    font-weight: 600;
+}
+.reg-field-value {
+    font-size: 0.88rem;
+    color: var(--admas-text);
+    font-weight: 700;
+    margin-top: 0.1rem;
+}
+
+/* Courses & Attendance card (admin/student_view.php) — a compact row list
+   instead of a wide table, since this card now shares a row with
+   Registration Details rather than spanning the full page width. */
+.course-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.65rem 0;
+    border-bottom: 1px solid var(--admas-border);
+}
+.course-row:last-child { border-bottom: none; }
+.course-row .course-code { flex-shrink: 0; }
+.course-main { min-width: 0; flex: 1; }
+.course-name {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--admas-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.course-lecturer { font-size: 0.76rem; color: var(--admas-text-muted); margin-top: 0.1rem; }
+.course-score { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.course-score-muted {
+    flex-shrink: 0;
+    background: var(--admas-bg);
+    color: var(--admas-text-faint);
+    font-weight: 600;
+}
+
+/* View Profile pages (admin/student_view.php, admin/lecturer_view.php —
+   University Rector/Dean/Head of Academic Affairs' read-only detail
+   views) — every card shrunk a further notch, scoped to .view-profile-page
+   only so it never touches these same shared classes (.semester-card,
+   .admas-table, .badge-pill...) on other pages like
+   student/attendance_history.php or lecturer/teaching_history.php. */
+.view-profile-page .profile-hero {
+    padding: 1rem 1.25rem;
+    gap: 0.9rem;
+    margin-bottom: 0.9rem;
+}
+.view-profile-page .profile-hero-photo,
+.view-profile-page .profile-hero-initials {
+    width: 58px;
+    height: 58px;
+    font-size: 1.15rem;
+}
+.view-profile-page .profile-hero-name { font-size: 1.1rem; }
+.view-profile-page .profile-hero-meta { font-size: 0.78rem; }
+.view-profile-page .profile-hero-badge { font-size: 0.66rem; padding: 0.15rem 0.55rem; }
+
+.view-profile-page .admas-card.p-4 { padding: 1rem !important; }
+
+.view-profile-page .section-heading { font-size: 0.92rem; margin-bottom: 0.6rem; }
+.view-profile-page .section-heading i { width: 26px; height: 26px; font-size: 0.85rem; }
+
+.view-profile-page .info-tile { padding: 0.55rem 0.7rem; }
+.view-profile-page .info-tile-label { font-size: 0.64rem; margin-bottom: 0.15rem; }
+.view-profile-page .info-tile-value { font-size: 0.82rem; }
+
+.view-profile-page .reg-group + .reg-group { margin-top: 0.7rem; padding-top: 0.7rem; }
+.view-profile-page .reg-group-title { font-size: 0.64rem; margin-bottom: 0.4rem; }
+.view-profile-page .reg-field-label { font-size: 0.64rem; }
+.view-profile-page .reg-field-value { font-size: 0.78rem; margin-top: 0.05rem; }
+
+.view-profile-page .course-row { padding: 0.45rem 0; gap: 0.5rem; }
+.view-profile-page .course-name { font-size: 0.8rem; }
+.view-profile-page .course-lecturer { font-size: 0.68rem; }
+.view-profile-page .course-score,
+.view-profile-page .course-score-muted { font-size: 0.78rem; }
+
+.view-profile-page .semester-card.p-4 { padding: 0.85rem 1rem !important; }
+.view-profile-page .semester-card h5 { font-size: 0.9rem; }
+
+.view-profile-page table.admas-table th,
+.view-profile-page table.admas-table td {
+    padding: 0.4rem 0.55rem;
+    font-size: 0.78rem;
+}
+
+.view-profile-page .badge-pill { font-size: 0.64rem; padding: 0.22rem 0.55rem; }
 
 /* ---------------------------------------------------------------------
    Export card — sky-blue themed panel offering Excel/PDF export, reused

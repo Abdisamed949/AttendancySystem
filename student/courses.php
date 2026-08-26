@@ -331,19 +331,19 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
 
             <?php if (!empty($semesterBoxes)): ?>
                 <div class="admas-card p-3 mb-3" style="border: 2px solid var(--admas-sky);">
-                    <div class="text-muted small mb-2">Semester</div>
-                    <div class="d-flex flex-wrap gap-2">
+                    <div class="semester-picker-label">Semester</div>
+                    <div class="semester-picker">
                         <?php foreach ($semesterBoxes as $box): ?>
                             <?php if ($box['semester_id'] > 0): ?>
+                                <?php $isCurrent = $box['status'] === 'current' && $box['semester_id'] === $myCurrentSemesterId; ?>
                                 <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php?semester_id=<?= $box['semester_id'] ?>"
-                                   class="btn btn-sm <?= $box['semester_id'] === $filterSemesterId ? 'text-white' : '' ?>"
-                                   <?= $box['semester_id'] === $filterSemesterId
-                                        ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"'
-                                        : 'style="border: 1px solid var(--admas-sky); color: var(--admas-sky);"' ?>>
-                                    <?= htmlspecialchars($box['name']) ?><?= ($box['status'] === 'current' && $box['semester_id'] === $myCurrentSemesterId) ? ' (current)' : '' ?>
+                                   class="sem-box <?= $box['semester_id'] === $filterSemesterId ? 'sem-box-active' : '' ?>"
+                                   title="<?= $isCurrent ? 'Current semester' : '' ?>">
+                                    <?php if ($isCurrent): ?><span class="sem-box-dot"></span><?php endif; ?>
+                                    <?= htmlspecialchars($box['name']) ?>
                                 </a>
                             <?php else: ?>
-                                <span class="btn btn-sm btn-outline-secondary disabled" style="opacity: 0.4;" title="Not created yet">
+                                <span class="sem-box-disabled" title="Not created yet">
                                     <?= htmlspecialchars($box['name']) ?>
                                 </span>
                             <?php endif; ?>

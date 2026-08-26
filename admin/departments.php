@@ -12,13 +12,17 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// Dean converted from full CRUD to a faculty-scoped Viewer, per explicit
+// request — the existing $role === 'dean' scoping below still narrows the
+// list to their own faculty only.
+$isReadOnly = in_array($role, ['university_rector', 'dean'], true);
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -209,6 +213,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $departmentId = (int) ($_POST['department_id'] ?? 0);
         $result = delete_department_row($conn, $departmentId, $role, $deanFacultyId);
         if ($result['ok']) {
+            audit_log($conn, 'delete_department', 'department', $departmentId, isset($result['message']) ? preg_replace('/ deleted\.?$/', '', $result['message']) : null);
             $_SESSION['flash_success'] = 'Department deleted successfully.';
             redirect_to('admin/departments.php');
         } else {
@@ -244,6 +249,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
                 }
                 if ($deletedCount > 0) {
+                    audit_log($conn, 'bulk_delete', 'department', null, null, $summary);
                     $_SESSION['flash_success'] = $summary;
                 } else {
                     $_SESSION['flash_error'] = $summary;
@@ -332,13 +338,26 @@ if ($role === 'dean') {
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 <?php if ($role === 'dean'): ?>
-                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only — view only
                 <?php elseif ($isReadOnly): ?>
                     Access scope: Full system — view only (oversight)
                 <?php else: ?>
                     Access scope: Full system — all faculties, departments, and courses
                 <?php endif; ?>
             </div>
+
+            <?php if (in_array($role, ['university_rector', 'head_academic'], true)): ?>
+                <div class="export-card">
+                    <div>
+                        <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export Departments</p>
+                        <p class="export-card-sub">Download the full, university-wide department list.</p>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=departments&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=departments&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <div class="mb-4">
                 <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Department Management</h4>
@@ -400,15 +419,15 @@ if ($role === 'dean') {
                                                 <td><?= number_format((int) $d['student_count']) ?></td>
                                                 <td>
                                                     <?php if (!$isReadOnly): ?>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments.php?edit=<?= (int) $d['id'] ?>" class="btn-icon" title="Edit">
-                                                        <i class="bi bi-pencil"></i>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/departments.php?edit=<?= (int) $d['id'] ?>" class="btn-icon-label" title="Edit">
+                                                        <i class="bi bi-pencil"></i> Edit
                                                     </a>
                                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/departments.php" style="display:inline;"
                                                           onsubmit="return confirm('Delete this department? This cannot be undone.');">
                                                         <input type="hidden" name="action" value="delete">
                                                         <input type="hidden" name="department_id" value="<?= (int) $d['id'] ?>">
-                                                        <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                            <i class="bi bi-trash"></i>
+                                                        <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                            <i class="bi bi-trash"></i> Delete
                                                         </button>
                                                     </form>
                                                     <?php else: ?>

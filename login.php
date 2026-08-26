@@ -463,6 +463,9 @@ if ($campusShort === '') {
 
                                 <button type="submit" class="btn btn-primary w-100 py-2">Sign In</button>
                             </form>
+                            <div class="text-center mt-3">
+                                <a href="<?= htmlspecialchars(BASE_URL) ?>/register.php" class="small">New student? Register</a>
+                            </div>
                         </div>
 
                         <div class="tab-pane fade text-center" id="qrTabPane" role="tabpanel">

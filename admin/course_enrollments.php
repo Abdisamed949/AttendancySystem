@@ -37,13 +37,17 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/export_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// Dean converted from full CRUD to a faculty-scoped Viewer, per explicit
+// request — the existing $role === 'dean' scoping throughout this file
+// still narrows everything to their own faculty only.
+$isReadOnly = in_array($role, ['university_rector', 'dean'], true);
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -529,6 +533,42 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
     render_enroll_candidate_rows($candidateStudents, $hasAnyFilter, $isReadOnly, $validEnrollmentDepartmentIds);
     exit;
 }
+
+// ---------------------------------------------------------------------
+// Export (PDF/Excel) — the "Currently Enrolled" roster, exactly as scoped
+// above (Dean: own faculty only). Must run before any HTML output.
+// ---------------------------------------------------------------------
+$exportFormat = (string) ($_GET['export'] ?? '');
+if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
+    $exportColumns = [
+        ['key' => 'student_no', 'label' => 'Student No'],
+        ['key' => 'full_name', 'label' => 'Full Name'],
+        ['key' => 'faculty_name', 'label' => 'Faculty'],
+        ['key' => 'department_name', 'label' => 'Department'],
+        ['key' => 'academic_year_label', 'label' => 'Academic Year'],
+        ['key' => 'semester_name', 'label' => 'Semester'],
+        ['key' => 'shift_label', 'label' => 'Shift'],
+    ];
+    $exportRows = array_map(static fn ($s) => [
+        'student_no' => $s['student_no'],
+        'full_name' => $s['full_name'],
+        'faculty_name' => $s['faculty_name'],
+        'department_name' => $s['department_name'],
+        'academic_year_label' => $s['academic_year_label'],
+        'semester_name' => $s['semester_name'] ?? '—',
+        'shift_label' => ENROLL_SHIFT_LABELS[$s['shift']] ?? $s['shift'],
+    ], $enrolledStudents);
+
+    $title = 'Enrolled Students — ' . $course['code'] . ' — ' . $course['name'];
+    $subtitle = count($enrolledStudents) . ' student' . (count($enrolledStudents) === 1 ? '' : 's') . ' enrolled';
+    $filename = 'enrollment_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $course['code']);
+
+    if ($exportFormat === 'excel') {
+        stream_table_as_excel($exportColumns, $exportRows, $title, $subtitle, $filename);
+    }
+    $branding = export_branding($conn);
+    stream_table_as_pdf($exportColumns, $exportRows, $title, $subtitle, $filename, $branding['university_name'], $branding['campus_line'], $branding['logo_base64']);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -553,7 +593,7 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                 &nbsp;&middot;&nbsp;
                 <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>" class="text-decoration-none">Manage Offerings</a>
                 <?php if ($role === 'dean'): ?>
-                    &nbsp;&middot;&nbsp;You may only enroll/view students from <?= htmlspecialchars($deanFacultyName) ?> Faculty
+                    &nbsp;&middot;&nbsp;<?= htmlspecialchars($deanFacultyName) ?> Faculty only — view only
                 <?php elseif ($isReadOnly): ?>
                     &nbsp;&middot;&nbsp;View only (oversight)
                 <?php endif; ?>
@@ -593,7 +633,15 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
             <?php endif; ?>
 
             <div class="admas-card p-4 mb-3">
-                <h6 class="small text-uppercase text-muted mb-2">Currently Enrolled (<?= count($enrolledStudents) ?>)</h6>
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                    <h6 class="small text-uppercase text-muted mb-0">Currently Enrolled (<?= count($enrolledStudents) ?>)</h6>
+                    <?php if (!empty($enrolledStudents)): ?>
+                        <div class="d-flex gap-2">
+                            <a href="?course_id=<?= (int) $courseId ?>&export=excel" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
+                            <a href="?course_id=<?= (int) $courseId ?>&export=pdf" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
+                        </div>
+                    <?php endif; ?>
+                </div>
                 <?php if (!empty($enrolledStudents) && !empty($courseCurrentSemesterIds)): ?>
                     <p class="small text-muted mb-2">
                         <span class="badge-pill badge-present">Current</span> = this student's own current semester matches a semester this course is actively offered in right now.
@@ -646,8 +694,8 @@ if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest') {
                                                 <input type="hidden" name="action" value="remove_enrollment">
                                                 <input type="hidden" name="course_id" value="<?= (int) $courseId ?>">
                                                 <input type="hidden" name="student_id" value="<?= (int) $es['id'] ?>">
-                                                <button type="submit" class="btn-icon text-danger" title="Remove">
-                                                    <i class="bi bi-trash"></i>
+                                                <button type="submit" class="btn-icon-label text-danger" title="Remove">
+                                                    <i class="bi bi-trash"></i> Remove
                                                 </button>
                                             </form>
                                             <?php endif; ?>

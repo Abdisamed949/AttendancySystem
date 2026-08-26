@@ -9,6 +9,9 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/university_logo.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
 
 require_role(['dean']);
 
@@ -40,7 +43,6 @@ if ($deanFacultyId > 0) {
     $fStmt->close();
     $deanFacultyName = $fRow ? (string) $fRow['name'] : '';
 }
-
 // This faculty's own current semester — not a single global settings
 // value, and not just its academic_year_id (two of this faculty's own
 // semesters can share one academic year, so filtering by year alone can
@@ -215,6 +217,109 @@ if ($currentSemesterId > 0) {
     $lowAttendanceAlerts = $alertsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $alertsStmt->close();
 }
+
+// ---------------------------------------------------------------------
+// Class Time Table — every scheduled course_offerings row within this
+// faculty's own current semester (any course, including one cross-listed
+// INTO this faculty — the semester_id itself is faculty-scoped, so this
+// can never surface another faculty's schedule).
+// ---------------------------------------------------------------------
+$deanTimetableRows = [];
+if ($currentSemesterId > 0) {
+    $ttStmt = $conn->prepare(
+        "SELECT c.code, c.name AS course_name, co.day_of_week, co.start_time, co.end_time, co.room, l.full_name AS lecturer_name
+         FROM course_offerings co
+         JOIN courses c ON c.id = co.course_id
+         LEFT JOIN lecturers l ON l.id = co.lecturer_id
+         WHERE co.semester_id = ? AND co.day_of_week IS NOT NULL AND co.start_time IS NOT NULL AND co.end_time IS NOT NULL"
+    );
+    $ttStmt->bind_param('i', $currentSemesterId);
+    $ttStmt->execute();
+    $deanTimetableRows = $ttStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $ttStmt->close();
+}
+$deanTimetableGrid = build_class_timetable_grid($deanTimetableRows);
+$dashboardLogoRelativePath = get_university_logo_relative_path($settings);
+$printDayOrder = array_values(array_diff(DAY_OF_WEEK_DISPLAY_ORDER, ['friday']));
+
+// ---------------------------------------------------------------------
+// Students per Department (doughnut) — reuses $studentCountByDept above,
+// same chart type as University Rector's own "Students per Faculty"
+// chart, scaled down one level since Dean's own scope is one faculty.
+// ---------------------------------------------------------------------
+$deptStudentChartLabels = [];
+$deptStudentChartData = [];
+foreach ($departmentRows as $d) {
+    $deptStudentChartLabels[] = $d['name'];
+    $deptStudentChartData[] = $studentCountByDept[(int) $d['id']] ?? 0;
+}
+
+// ---------------------------------------------------------------------
+// Lecturer Workload (Current Semester, own faculty only) — top 8
+// lecturers by number of CURRENT course_offerings, same chart as
+// admin/dashboard.php's own, scoped to this Dean's faculty.
+// ---------------------------------------------------------------------
+$lecturerWorkloadStmt = $conn->prepare(
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id AND se.status = 'current'
+     JOIN lecturers l ON l.id = co.lecturer_id
+     JOIN users u ON u.id = l.user_id
+     JOIN departments d ON d.id = l.department_id
+     WHERE d.faculty_id = ?
+     GROUP BY l.id, l.full_name, u.photo_path
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+);
+$lecturerWorkloadStmt->bind_param('i', $deanFacultyId);
+$lecturerWorkloadStmt->execute();
+$lecturerWorkload = $lecturerWorkloadStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$lecturerWorkloadStmt->close();
+// Lecturer Check-In Ranking (own faculty only) — top 8 lecturers by total
+// Check-Ins this current semester, most first — same shape as
+// admin/dashboard.php's own, scoped to this Dean's faculty.
+$lecturerCheckinStmt = $conn->prepare(
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
+     FROM lecturer_checkins lc
+     JOIN lecturers l ON l.id = lc.lecturer_id
+     JOIN users u ON u.id = l.user_id
+     JOIN departments d ON d.id = l.department_id
+     JOIN sessions sess ON sess.id = lc.session_id
+     JOIN semesters se ON se.id = sess.semester_id AND se.status = 'current'
+     WHERE d.faculty_id = ?
+     GROUP BY l.id, l.full_name, u.photo_path
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+);
+$lecturerCheckinStmt->bind_param('i', $deanFacultyId);
+$lecturerCheckinStmt->execute();
+$lecturerCheckinRanking = $lecturerCheckinStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$lecturerCheckinStmt->close();
+
+// ---------------------------------------------------------------------
+// Student registration trend — last 6 months, own faculty only.
+// ---------------------------------------------------------------------
+$registrationTrendLabels = [];
+$registrationTrendData = [];
+$regByMonth = [];
+$regStmt = $conn->prepare(
+    "SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS c
+     FROM students
+     WHERE faculty_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+     GROUP BY ym"
+);
+$regStmt->bind_param('i', $deanFacultyId);
+$regStmt->execute();
+$regRes = $regStmt->get_result();
+while ($row = $regRes->fetch_assoc()) {
+    $regByMonth[$row['ym']] = (int) $row['c'];
+}
+$regStmt->close();
+for ($i = 5; $i >= 0; $i--) {
+    $ym = date('Y-m', strtotime("-{$i} months"));
+    $registrationTrendLabels[] = date('M Y', strtotime($ym . '-01'));
+    $registrationTrendData[] = $regByMonth[$ym] ?? 0;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -226,9 +331,24 @@ if ($currentSemesterId > 0) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
     <style>
+        /* Matches admin/dashboard.php's own density exactly, so the Dean
+           dashboard fits on the same laptop screen without scrolling —
+           fixed-height chart boxes (paired with Chart.js's
+           maintainAspectRatio: false below) plus scroll-capped list/table
+           panels instead of growing with the data. */
         .dash-chart-box {
             position: relative;
-            height: 160px;
+            height: 140px;
+        }
+
+        .dash-alerts-box {
+            max-height: 160px;
+            overflow-y: auto;
+        }
+
+        .dash-table-box {
+            max-height: 200px;
+            overflow-y: auto;
         }
     </style>
 </head>
@@ -243,12 +363,23 @@ if ($currentSemesterId > 0) {
                 <i class="bi bi-shield-check"></i>
                 Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
             </div>
+            <?php if ($deanCurrentSemester): ?>
+                <div class="semester-scope-banner">
+                    <i class="bi bi-calendar-week"></i>
+                    Showing: <?= htmlspecialchars((string) $deanCurrentSemester['name']) ?> (current, <?= htmlspecialchars($deanFacultyName) ?>)
+                </div>
+            <?php else: ?>
+                <div class="semester-scope-banner">
+                    <i class="bi bi-calendar-week"></i>
+                    No current semester set for <?= htmlspecialchars($deanFacultyName) ?> yet
+                </div>
+            <?php endif; ?>
 
             <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
-            <p class="text-muted mb-4">Here's what's happening in <?= htmlspecialchars($deanFacultyName) ?> today.</p>
+            <p class="text-muted mb-2">Here's what's happening in <?= htmlspecialchars($deanFacultyName) ?> today.</p>
 
             <!-- KPI Cards -->
-            <div class="row g-3 mb-4">
+            <div class="row g-3 mb-3">
                 <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-people-fill"></i></div>
@@ -291,12 +422,12 @@ if ($currentSemesterId > 0) {
                 </div>
             </div>
 
-            <div class="row g-3">
+            <div class="row g-3 mb-0">
                 <div class="col-xl-8">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Departments in My Faculty</h6>
-                        <div class="table-responsive">
-                            <table class="table admas-table align-middle">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">Departments in My Faculty</h6>
+                        <div class="table-responsive dash-table-box">
+                            <table class="table admas-table table-sm align-middle">
                                 <thead>
                                     <tr>
                                         <th>Department</th>
@@ -333,24 +464,85 @@ if ($currentSemesterId > 0) {
                     </div>
                 </div>
                 <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">
                             <i class="bi bi-exclamation-triangle-fill text-warning"></i>
                             Low Attendance — My Faculty
                         </h6>
                         <?php if (empty($lowAttendanceAlerts)): ?>
                             <p class="text-muted small mb-0">No students in your faculty are currently below the <?= htmlspecialchars((string) $minAttendancePct) ?>% attendance threshold.</p>
                         <?php else: ?>
-                            <?php foreach ($lowAttendanceAlerts as $alert): ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
-                                    <div>
-                                        <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
-                                        <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
-                                    </div>
-                                    <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
-                                </a>
-                            <?php endforeach; ?>
+                            <div class="dash-alerts-box">
+                                <?php foreach ($lowAttendanceAlerts as $alert): ?>
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/notifications.php" class="alert-row" title="Open Notifications to notify this student">
+                                        <div>
+                                            <div class="alert-student-name"><?= htmlspecialchars((string) $alert['full_name']) ?></div>
+                                            <div class="alert-student-meta"><?= htmlspecialchars((string) $alert['student_no']) ?> &middot; <?= htmlspecialchars((string) $alert['course_name']) ?></div>
+                                        </div>
+                                        <div class="alert-pct"><?= number_format((float) $alert['attendance_pct'], 1) ?>%</div>
+                                    </a>
+                                <?php endforeach; ?>
+                            </div>
                         <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Same additional oversight charts as University Rector's own
+                 dashboard (Students count, Lecturer Workload, Student
+                 Registrations), scoped one level down since Dean's own
+                 scope is a single faculty — per-department instead of
+                 per-faculty. Placed above the attendance charts below, per
+                 explicit request. -->
+            <div class="row g-3 mt-0">
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Students per Department</h6>
+                        <?php if (empty($deptStudentChartLabels)): ?>
+                            <p class="text-muted small mb-0">No departments exist in this faculty yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="deptStudentChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Lecturer Workload</h6>
+                        <?php if (empty($lecturerWorkload)): ?>
+                            <p class="text-muted small mb-0">No lecturers in this faculty currently have an assigned offering this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerWorkload as $lw): ?>
+                                    <?php render_dash_rank_row($lw['photo_path'], $lw['full_name'], (int) $lw['c'], 'var(--admas-sky)'); ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">
+                            <i class="bi bi-door-open-fill"></i> Lecturer Check-In Ranking
+                        </h6>
+                        <?php if (empty($lecturerCheckinRanking)): ?>
+                            <p class="text-muted small mb-0">No lecturers in this faculty have checked in yet this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerCheckinRanking as $lr): ?>
+                                    <?php render_dash_rank_row($lr['photo_path'], $lr['full_name'], (int) $lr['c'], '#16a34a'); ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Registrations (6mo)</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="registrationTrendChart"></canvas>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -384,6 +576,29 @@ if ($currentSemesterId > 0) {
                         <?php endif; ?>
                     </div>
                 </div>
+            </div>
+
+            <div class="admas-card p-2 timetable-print-card timetable-print-compact mt-3">
+                <div class="timetable-print-header">
+                    <img src="<?= htmlspecialchars(BASE_URL . '/' . $dashboardLogoRelativePath) ?>" alt="" class="timetable-print-logo">
+                    <div class="timetable-print-header-text">
+                        <div class="timetable-print-university"><?= htmlspecialchars(mb_strtoupper((string) ($settings['university_name'] ?? 'ADMAS University'))) ?></div>
+                        <div class="timetable-print-faculty">Faculty: <?= htmlspecialchars($deanFacultyName) ?></div>
+                        <?php if ($deanCurrentSemester): ?>
+                            <div class="timetable-print-year"><?= htmlspecialchars((string) $deanCurrentSemester['name']) ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="timetable-print-meta">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/class_timetable.php" class="timetable-print-title text-decoration-none">Class Time Table</a>
+                </div>
+                <?php if (empty($deanTimetableGrid['time_slots'])): ?>
+                    <p class="text-muted small mb-0 py-2">No scheduled class times have been set for <?= htmlspecialchars($deanFacultyName) ?> yet.</p>
+                <?php else: ?>
+                    <div class="table-responsive">
+                        <?php render_class_timetable_grid_table($deanTimetableGrid, $printDayOrder, 'course_name', 'timetable-print-table'); ?>
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -454,6 +669,54 @@ if ($currentSemesterId > 0) {
             },
         });
         <?php endif; ?>
+
+        <?php if (!empty($deptStudentChartLabels)): ?>
+        new Chart(document.getElementById('deptStudentChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?= json_encode($deptStudentChartLabels) ?>,
+                datasets: [{
+                    label: 'Students',
+                    data: <?= json_encode($deptStudentChartData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        new Chart(document.getElementById('registrationTrendChart'), {
+            type: 'line',
+            data: {
+                labels: <?= json_encode($registrationTrendLabels) ?>,
+                datasets: [{
+                    label: 'Students Registered',
+                    data: <?= json_encode($registrationTrendData) ?>,
+                    borderColor: chartSky,
+                    backgroundColor: chartSky,
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: { ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
+                },
+            },
+        });
     </script>
 </body>
 </html>

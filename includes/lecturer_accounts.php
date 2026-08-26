@@ -26,6 +26,30 @@ function find_import_column(array $headerRow, array $candidates): int|false
 }
 
 /**
+ * Split one combined "Student Name" string into the three physical columns
+ * students.first_name/father_name/grandfather_name actually store (which
+ * together generate students.full_name) — first word / second word /
+ * everything left over, the same word1/word2/remainder rule the original
+ * legacy full_name -> 3-column backfill migration used
+ * (migrations/2026_08_students_name_parts.sql). Used wherever a single
+ * "Student Name" field/column (the Add Student form, this Enrollment
+ * template's Excel import) needs to feed the existing 3-column storage
+ * without duplicating the split logic at each call site.
+ *
+ * @return array{first_name: string, father_name: string, grandfather_name: ?string}
+ */
+function split_student_full_name(string $fullName): array
+{
+    $parts = array_values(array_filter(preg_split('/\s+/', trim($fullName)), static fn ($p) => $p !== ''));
+
+    return [
+        'first_name' => $parts[0] ?? '',
+        'father_name' => $parts[1] ?? '',
+        'grandfather_name' => count($parts) > 2 ? implode(' ', array_slice($parts, 2)) : null,
+    ];
+}
+
+/**
  * Base slug for a name-derived username: the person's own given name (the
  * first word of their full name), lowercase, alphanumeric only. Somali names
  * are Given + Father + Grandfather, not Given + Surname, so later words
@@ -60,10 +84,22 @@ function id_sequence_suffix(string $idNo, int $digits = 2): string
     return substr($alnum, -$digits);
 }
 
-function lecturer_username_exists(mysqli $conn, string $username): bool
+/**
+ * $excludeUserId lets a Reset Password action recompute a lecturer's own
+ * deterministic username without that lecturer's own current row counting
+ * as a "collision" against itself — without this, resetting an account
+ * whose username is already correct would spuriously append a numeric
+ * suffix (e.g. "garjeex041") every time Reset Password is clicked.
+ */
+function lecturer_username_exists(mysqli $conn, string $username, ?int $excludeUserId = null): bool
 {
-    $stmt = $conn->prepare('SELECT id FROM users WHERE username = ?');
-    $stmt->bind_param('s', $username);
+    if ($excludeUserId !== null) {
+        $stmt = $conn->prepare('SELECT id FROM users WHERE username = ? AND id != ?');
+        $stmt->bind_param('si', $username, $excludeUserId);
+    } else {
+        $stmt = $conn->prepare('SELECT id FROM users WHERE username = ?');
+        $stmt->bind_param('s', $username);
+    }
     $stmt->execute();
     $exists = (bool) $stmt->get_result()->fetch_assoc();
     $stmt->close();
@@ -72,17 +108,24 @@ function lecturer_username_exists(mysqli $conn, string $username): bool
 }
 
 /**
- * Build a username for a lecturer: name slug + last 2 digits of their
- * staff_no sequence (e.g. "acali07"). Falls back to an incrementing suffix
- * in the rare case that combination is already taken.
+ * Build a username for a lecturer: name slug + their FULL staff_no
+ * (alphanumeric characters only, e.g. staff_no "STF-2044" -> "stf2044"),
+ * not a shortened/truncated form — the whole ID the admin actually typed
+ * in, per explicit request that a lecturer's username/password stay tied
+ * to their real, complete Staff ID. Falls back to an incrementing suffix
+ * in the rare case that combination is already taken. Pass $excludeUserId
+ * when recomputing an EXISTING lecturer's own username (e.g. Reset
+ * Password) so their own current row is never treated as a collision
+ * against the freshly-computed value.
  */
-function generate_lecturer_username(mysqli $conn, string $fullName, string $staffNo): string
+function generate_lecturer_username(mysqli $conn, string $fullName, string $staffNo, ?int $excludeUserId = null): string
 {
-    $base = name_username_base($fullName, 'lecturer') . id_sequence_suffix($staffNo);
+    $idPart = strtolower((string) preg_replace('/[^a-zA-Z0-9]/', '', $staffNo));
+    $base = name_username_base($fullName, 'lecturer') . $idPart;
 
     $username = $base;
     $suffix = 1;
-    while (lecturer_username_exists($conn, $username)) {
+    while (lecturer_username_exists($conn, $username, $excludeUserId)) {
         $username = $base . $suffix;
         $suffix++;
     }
@@ -110,19 +153,63 @@ function generate_student_username(mysqli $conn, string $fullName, string $stude
 }
 
 /**
- * Build a unique username for a general admin-appointed account — Dean, Head
- * of Academic Affairs, Registration Office — using the same name-slug base,
- * with an incrementing suffix on collision (these accounts have no
- * student_no/staff_no-style ID to derive a suffix from).
+ * Student credential scheme used by admin/students.php's Add Student form,
+ * admin/students_import.php's bulk import, and the "Reset Password" action
+ * on admin/students.php, admin/users.php, and head_academic/users.php —
+ * one value ("{DepartmentCode}-{ID}", e.g. "IT-1472/23") used as BOTH the
+ * username and the (temporary/reset) password, per explicit request. Uses
+ * the student's own DEPARTMENT code (not their faculty's) — reverted back
+ * from an earlier faculty-code-based scheme after real students found the
+ * faculty code less intuitive to type than their own department's.
+ * "{ID}" is only the trailing segment of the Student No after its LAST
+ * hyphen (e.g. "BUS25-009" -> "009", so a department-like prefix already
+ * baked into the Student No itself isn't duplicated alongside the real
+ * department code); a Student No with no hyphen at all (e.g. "1472/23") is
+ * used as-is, unchanged.
+ * Unlike the old "{Code}-{StudentNo}" scheme (student_no's own global
+ * uniqueness made a collision impossible), shortening down to just the
+ * trailing ID segment can collide across two students in the SAME
+ * department whose Student Nos happen to share the same tail — so this
+ * needs the same collision-retry suffix loop already used for
+ * lecturer/admin usernames.
  */
-function generate_admin_username(mysqli $conn, string $fullName): string
+function student_credential_value(mysqli $conn, string $departmentCode, string $studentNo, ?int $excludeUserId = null): string
 {
-    $base = name_username_base($fullName, 'staff');
+    $lastHyphenPos = strrpos($studentNo, '-');
+    $idSegment = $lastHyphenPos !== false ? substr($studentNo, $lastHyphenPos + 1) : $studentNo;
+    $base = $departmentCode . '-' . $idSegment;
+
+    $candidate = $base;
+    $suffix = 1;
+    while (lecturer_username_exists($conn, $candidate, $excludeUserId)) {
+        $candidate = $base . $suffix;
+        $suffix++;
+    }
+
+    return $candidate;
+}
+
+/**
+ * Build a username for a general admin-appointed account — Dean, Head of
+ * Academic Affairs, Registration Office, and (since the "same for the
+ * lecturer" follow-up) Lecturer too — using the exact Full Name the admin
+ * typed in (trimmed, but otherwise unchanged — same case/spelling as
+ * written), per explicit request that these accounts' username just BE
+ * their name, not an initial+lastname or name+ID slug. Falls back to an
+ * incrementing numeric suffix in the rare case that exact name is already
+ * taken by another account (this app has no other uniquifying ID for this
+ * account type to fall back on). Pass $excludeUserId when recomputing an
+ * EXISTING account's own username (e.g. Reset Password) so their own
+ * current row is never treated as a collision against itself.
+ */
+function generate_admin_username(mysqli $conn, string $fullName, ?int $excludeUserId = null): string
+{
+    $base = trim($fullName);
 
     $username = $base;
     $suffix = 1;
-    while (lecturer_username_exists($conn, $username)) {
-        $username = $base . $suffix;
+    while (lecturer_username_exists($conn, $username, $excludeUserId)) {
+        $username = $base . ' ' . $suffix;
         $suffix++;
     }
 
@@ -130,10 +217,11 @@ function generate_admin_username(mysqli $conn, string $fullName): string
 }
 
 /**
- * Generate a random temporary password containing at least one uppercase
- * letter, one lowercase letter, one digit, and one symbol. Still used for
- * admin-appointed accounts (Dean, Head of Academic Affairs, Registration
- * Office) which have no student_no/staff_no-style ID to use as a password.
+ * Generate a random temporary password — still used for the Reset Password
+ * action on a Dean/Head of Academic Affairs/Registration Office account
+ * (there's no admin-typed value to fall back to at reset time, unlike
+ * account creation, which now takes a manually-typed password instead of
+ * calling this function).
  */
 function generate_temp_password(): string
 {

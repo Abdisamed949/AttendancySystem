@@ -21,6 +21,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
+require_once __DIR__ . '/includes/avatar_helpers.php';
 
 require_role(['university_rector', 'dean', 'lecturer']);
 
@@ -382,13 +383,14 @@ if ($currentSemester !== null && array_key_exists($filterCourseId, $courseById))
 // the grid (read-only), matching how reports.php already lets the same
 // roles view historical data they can't edit.
 $canWriteAttendance = false;
-// University Rector is a supervisory/oversight role — full VIEW access to
-// every course/semester's grid, but never write access, regardless of what
-// user_can_write_course_attendance() would otherwise say. Forcing this to
-// false here (rather than special-casing every render site) reuses the
-// exact same disabled-grid/"Read-only" rendering already built for a
-// lecturer/dean viewing a semester outside their normal write scope.
-if ($role !== 'university_rector' && array_key_exists($filterCourseId, $courseById) && $currentSemester !== null) {
+// University Rector and Dean are both supervisory/Viewer-only roles now —
+// full VIEW access to every course/semester's grid within their scope, but
+// never write access, regardless of what user_can_write_course_attendance()
+// would otherwise say (it also independently returns false for both roles,
+// this just skips the pointless query). Reuses the exact same
+// disabled-grid/"Read-only" rendering already built for a lecturer viewing
+// a semester outside their normal write scope.
+if (!in_array($role, ['university_rector', 'dean'], true) && array_key_exists($filterCourseId, $courseById) && $currentSemester !== null) {
     $canWriteAttendance = user_can_write_course_attendance($conn, $role, $currentUser, $filterCourseId, (int) $currentSemester['id'], $filterShift !== '' ? $filterShift : null);
 }
 
@@ -448,7 +450,7 @@ foreach ($courses as $c) {
 
 $scopeBanner = match ($role) {
     'university_rector' => 'Access scope: Full system — view only (oversight)',
-    'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only',
+    'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only — view only',
     'lecturer' => 'Access scope: Your assigned courses only',
     default => '',
 };
@@ -701,7 +703,7 @@ $scopeBanner = match ($role) {
                                         ?>
                                         <tr data-student-row="<?= $gsid ?>">
                                             <td><?= htmlspecialchars($st['student_no']) ?></td>
-                                            <td class="fw-semibold col-group-end" style="color: var(--admas-text);"><?= htmlspecialchars($st['full_name']) ?></td>
+                                            <td class="col-group-end"><?php render_person_avatar_cell($st['photo_path'] ?? null, (string) $st['full_name'], '', true); ?></td>
                                             <?php foreach ($gridData['sessions'] as $sIndex => $s): ?>
                                                 <?php
                                                 $gSessId = (int) $s['id'];

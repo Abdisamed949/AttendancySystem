@@ -1,0 +1,250 @@
+/* Course Documents — card-per-course layout with type tabs and optional
+   cover-image file cards. Reuses the app's existing theme tokens so both
+   light and dark mode stay correct. */
+
+/* Wraps every course's own card so they lay out side by side, filling the
+   page width on wider screens instead of stacking one full-width card per
+   row — each card still sizes to its own content (tabs + however many
+   documents that course has). */
+.course-doc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+    gap: 1.25rem;
+    align-items: start;
+}
+
+.course-doc-card {
+    padding: 1.25rem 1.5rem 1.5rem;
+    margin-bottom: 0 !important;
+}
+
+/* Course picker grid — the first thing shown on Course Documents/Course
+   Materials, before any one course is opened. Each card is a plain link
+   into ?course_id=X, which then renders that one course's own
+   .course-doc-card detail view (bordered via the shared .admas-card
+   frame) below a "Back to Courses" link. */
+.course-pick-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1.1rem;
+}
+
+.course-pick-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+    padding: 1.25rem 1.4rem 1.4rem;
+    text-decoration: none;
+    border: 1.5px solid var(--admas-border);
+    border-radius: 16px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .course-pick-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 10px 22px var(--admas-shadow);
+        border-color: var(--admas-sky);
+    }
+}
+
+.course-pick-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+    font-size: 1.2rem;
+    margin-bottom: 0.2rem;
+}
+
+.course-pick-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 0.6rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--admas-border);
+}
+
+.course-pick-view-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--admas-sky);
+}
+
+.course-pick-card:hover .course-pick-view-btn {
+    text-decoration: underline;
+}
+
+.course-doc-back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--admas-sky);
+    text-decoration: none;
+    margin-bottom: 1rem;
+}
+
+.course-doc-back-link:hover {
+    text-decoration: underline;
+}
+
+.course-doc-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.course-doc-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--admas-text);
+}
+
+.course-doc-sub {
+    font-size: 0.82rem;
+    color: var(--admas-text-muted);
+}
+
+.course-doc-tabs {
+    border-bottom: 1px solid var(--admas-border);
+    margin-bottom: 1rem;
+    gap: 0.35rem;
+}
+
+.course-doc-tabs .nav-link {
+    color: var(--admas-text-muted);
+    font-size: 0.84rem;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.4rem 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.course-doc-tabs .nav-link.active {
+    background-color: var(--admas-sky);
+    color: #fff;
+}
+
+.course-doc-tabs .tab-count {
+    background: rgba(255, 255, 255, 0.25);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.7rem;
+}
+
+.course-doc-tabs .nav-link:not(.active) .tab-count {
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+    color: var(--admas-sky);
+}
+
+.doc-file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 1rem;
+}
+
+.doc-file-card {
+    position: relative;
+    border: 1px solid var(--admas-border);
+    border-radius: 12px;
+    overflow: hidden;
+    background-color: var(--admas-surface);
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    flex-direction: column;
+    min-height: 160px;
+}
+
+.doc-file-icon {
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.9rem;
+    background: rgb(14 165 233 / var(--admas-tint-opacity));
+}
+
+.doc-file-card[style*="background-image"] .doc-file-body {
+    color: #fff;
+    margin-top: auto;
+}
+
+.doc-file-card[style*="background-image"] .doc-file-desc,
+.doc-file-card[style*="background-image"] .doc-file-meta {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.doc-file-card:not([style*="background-image"]) {
+    justify-content: space-between;
+}
+
+.doc-file-body {
+    padding: 0.85rem 0.9rem;
+}
+
+.doc-file-eyebrow {
+    display: inline-block;
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--admas-sky);
+    margin-bottom: 0.2rem;
+}
+
+.doc-file-card[style*="background-image"] .doc-file-eyebrow {
+    color: #bfe8fd;
+}
+
+.doc-file-title {
+    font-weight: 700;
+    font-size: 0.92rem;
+    line-height: 1.3;
+    color: var(--admas-text);
+}
+
+.doc-file-card[style*="background-image"] .doc-file-title {
+    color: #fff;
+}
+
+.doc-file-desc {
+    font-size: 0.78rem;
+    color: var(--admas-text-muted);
+    margin-top: 0.2rem;
+}
+
+.doc-file-meta {
+    font-size: 0.72rem;
+    color: var(--admas-text-faint);
+    margin-top: 0.4rem;
+}
+
+.doc-file-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.25rem;
+    padding: 0.5rem 0.6rem;
+    background: rgba(0, 0, 0, 0.02);
+}
+
+.doc-file-card[style*="background-image"] .doc-file-actions {
+    background: rgba(0, 0, 0, 0.25);
+}

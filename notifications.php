@@ -13,6 +13,7 @@ require_once __DIR__ . '/includes/nav_items.php';
 
 require_once __DIR__ . '/includes/attendance_helpers.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
+require_once __DIR__ . '/includes/export_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
@@ -240,6 +241,41 @@ $scopeBanner = match ($role) {
     'dean' => 'Access scope: ' . $deanFacultyName . ' Faculty only',
     default => '',
 };
+
+// ---------------------------------------------------------------------
+// Export (PDF/Excel) — same generic table export used by
+// lecturer/teaching_history.php and student/attendance_history.php. Must
+// run before any HTML output.
+// ---------------------------------------------------------------------
+$exportFormat = (string) ($_GET['export'] ?? '');
+if ($exportFormat === 'excel' || $exportFormat === 'pdf') {
+    $exportColumns = [
+        ['key' => 'student_no', 'label' => 'Student No'],
+        ['key' => 'full_name', 'label' => 'Full Name'],
+        ['key' => 'faculty_name', 'label' => 'Faculty'],
+        ['key' => 'semester_name', 'label' => 'Semester'],
+        ['key' => 'course', 'label' => 'Course'],
+        ['key' => 'attendance_pct', 'label' => 'Score (of 10)'],
+    ];
+    $exportRows = array_map(static fn ($a) => [
+        'student_no' => $a['student_no'],
+        'full_name' => $a['full_name'],
+        'faculty_name' => $a['faculty_name'],
+        'semester_name' => $a['semester_name'] ?? '—',
+        'course' => $a['code'] . ' — ' . $a['course_name'],
+        'attendance_pct' => number_format((float) $a['attendance_pct'], 1),
+    ], $alerts);
+
+    $title = 'Attendance Alerts';
+    $subtitle = count($alerts) . ' student' . (count($alerts) === 1 ? '' : 's') . ' below the ' . $minAttendancePct . '/10 threshold';
+    $filename = 'attendance_alerts_' . date('Ymd');
+
+    if ($exportFormat === 'excel') {
+        stream_table_as_excel($exportColumns, $exportRows, $title, $subtitle, $filename);
+    }
+    $branding = export_branding($conn);
+    stream_table_as_pdf($exportColumns, $exportRows, $title, $subtitle, $filename, $branding['university_name'], $branding['campus_line'], $branding['logo_base64']);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -268,6 +304,12 @@ $scopeBanner = match ($role) {
                     <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Notifications / Alerts</h4>
                     <p class="text-muted mb-0">Students whose attendance has dropped below the minimum threshold for the current academic year.</p>
                 </div>
+                <?php if (!empty($alerts)): ?>
+                    <div class="d-flex gap-2">
+                        <a href="?export=excel" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-excel"></i> Export Excel</a>
+                        <a href="?export=pdf" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"><i class="bi bi-file-earmark-pdf"></i> Export PDF</a>
+                    </div>
+                <?php endif; ?>
             </div>
 
             <?php if ($successMessage !== ''): ?>

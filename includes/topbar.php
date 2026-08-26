@@ -11,6 +11,11 @@ $campus = $settings['campus'] ?? '';
 $contactEmail = $settings['contact_email'] ?? '';
 $contactPhone = $settings['contact_phone'] ?? '';
 
+// $initials is no longer rendered by this partial itself (the topbar's own
+// name/photo cluster was removed once the sidebar grew its own identity
+// block), but every */profile.php page still reuses this exact variable
+// for its own photo-fallback circle, via PHP's shared include scope — kept
+// here rather than duplicated six times.
 $initials = '';
 foreach (preg_split('/\s+/', trim((string) ($currentUser['full_name'] ?? ''))) as $part) {
     if ($part !== '') {
@@ -19,7 +24,13 @@ foreach (preg_split('/\s+/', trim((string) ($currentUser['full_name'] ?? ''))) a
 }
 $initials = mb_substr($initials, 0, 2) ?: '?';
 
-$roleLabel = role_label(current_role());
+// Mobile-only identity strip (below) — the sidebar's own .sidebar-profile
+// block is hidden off-canvas behind the hamburger on narrow screens, so the
+// profile photo/name/role were invisible until the menu was opened. Shown
+// here instead, always visible in the body, mobile widths only (desktop
+// keeps relying on the always-visible sidebar for this).
+$topbarProfilePhotoPath = (string) ($currentUser['photo_path'] ?? '');
+$topbarRoleLabel = role_label(current_role());
 
 // ---------------------------------------------------------------------
 // Unread notifications bell — scoped the same way as notifications.php:
@@ -104,22 +115,23 @@ if ($topbarRole === 'university_rector' || $topbarRole === 'head_academic') {
                 <i class="bi bi-bell"></i>
             </button>
         <?php endif; ?>
-        <div class="topbar-user">
-            <?php if (!empty($currentUser['photo_path'])): ?>
-                <img class="avatar-photo" width="42" height="42" src="<?= htmlspecialchars(BASE_URL) ?>/uploads/profile_photos/<?= htmlspecialchars((string) $currentUser['photo_path']) ?>" alt="">
-            <?php else: ?>
-                <div class="avatar-initials"><?= htmlspecialchars($initials) ?></div>
-            <?php endif; ?>
-            <div class="user-meta">
-                <span class="user-name"><?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></span>
-                <span class="user-role"><?= htmlspecialchars($roleLabel) ?></span>
-            </div>
-        </div>
         <a href="<?= htmlspecialchars(BASE_URL) ?>/logout.php" class="logout-btn" aria-label="Logout" title="Logout">
             <i class="bi bi-box-arrow-right"></i>
         </a>
     </div>
 </div>
+<a href="<?= htmlspecialchars(BASE_URL . '/' . role_folder(current_role()) . '/profile.php') ?>" class="topbar-profile-strip">
+    <?php if ($topbarProfilePhotoPath !== ''): ?>
+        <img class="topbar-profile-strip-photo" width="40" height="40"
+             src="<?= htmlspecialchars(BASE_URL) ?>/uploads/profile_photos/<?= htmlspecialchars($topbarProfilePhotoPath) ?>" alt="">
+    <?php else: ?>
+        <div class="topbar-profile-strip-fallback"><i class="bi bi-person-fill"></i></div>
+    <?php endif; ?>
+    <div class="topbar-profile-strip-text">
+        <span class="topbar-profile-strip-name"><?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></span>
+        <span class="topbar-profile-strip-role"><?= htmlspecialchars($topbarRoleLabel) ?></span>
+    </div>
+</a>
 </div>
 <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/theme_toggle.js"></script>
 <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/sidebar_toggle.js"></script>

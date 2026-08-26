@@ -2,7 +2,8 @@
 /**
  * Gmail SMTP configuration for outgoing mail (Forgot Password codes).
  *
- * >>> PUT YOUR REAL GMAIL APP PASSWORD BELOW, in SMTP_PASSWORD. <<<
+ * This is a TEMPLATE — copy this file to includes/mail_config.php (which
+ * is gitignored and never committed) and fill in real values there.
  *
  * SMTP_USERNAME must be a real Gmail address, and SMTP_PASSWORD must be a
  * 16-character Gmail "App Password" (Google Account -> Security -> 2-Step
@@ -17,7 +18,7 @@ declare(strict_types=1);
 if (!defined('SMTP_HOST')) {
     define('SMTP_HOST', 'smtp.gmail.com');
     define('SMTP_PORT', 587);
-    define('SMTP_USERNAME', 'maticn033@gmail.com'); // <-- replace with the sending Gmail address
-    define('SMTP_PASSWORD', 'jtbexzfyamqmjwvf');    // <-- replace with a real Gmail App Password
+    define('SMTP_USERNAME', 'your-address@gmail.com'); // <-- replace with the sending Gmail address
+    define('SMTP_PASSWORD', 'your16charapppassword');  // <-- replace with a real Gmail App Password
     define('SMTP_FROM_NAME', 'ADMAS Attendance System');
 }

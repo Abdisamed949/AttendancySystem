@@ -354,21 +354,11 @@ function user_can_write_course_attendance(mysqli $conn, string $role, array $cur
         return false;
     }
 
+    // Dean converted from full CRUD to a faculty-scoped Viewer, per
+    // explicit request (same conversion University Rector already had) —
+    // never write access to attendance, regardless of faculty.
     if ($role === 'dean') {
-        $facultyId = (int) ($_SESSION['faculty_id'] ?? 0);
-        if ($facultyId <= 0) {
-            return false;
-        }
-        $stmt = $conn->prepare(
-            'SELECT 1 FROM course_offerings co JOIN semesters se ON se.id = co.semester_id
-             WHERE co.course_id = ? AND co.semester_id = ? AND se.faculty_id = ?'
-        );
-        $stmt->bind_param('iii', $courseId, $semesterId, $facultyId);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        return $row !== null;
+        return false;
     }
 
     if ($role === 'lecturer') {
@@ -421,18 +411,20 @@ function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?stri
 
     if ($shift !== null && $shift !== '') {
         $stmt = $conn->prepare(
-            "SELECT s.id, s.student_no, s.full_name
+            "SELECT s.id, s.student_no, s.full_name, u.photo_path
              FROM course_enrollments ce
              JOIN students s ON s.id = ce.student_id
+             LEFT JOIN users u ON u.id = s.user_id
              WHERE ce.course_id = ? AND s.status = 'active' AND s.shift = ?
              ORDER BY s.student_no"
         );
         $stmt->bind_param('is', $courseId, $shift);
     } else {
         $stmt = $conn->prepare(
-            "SELECT s.id, s.student_no, s.full_name
+            "SELECT s.id, s.student_no, s.full_name, u.photo_path
              FROM course_enrollments ce
              JOIN students s ON s.id = ce.student_id
+             LEFT JOIN users u ON u.id = s.user_id
              WHERE ce.course_id = ? AND s.status = 'active'
              ORDER BY s.student_no"
         );
@@ -452,33 +444,37 @@ function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?stri
         if ($rosterDepartmentId !== null) {
             if ($shift !== null && $shift !== '') {
                 $stmt = $conn->prepare(
-                    "SELECT id, student_no, full_name FROM students
-                     WHERE department_id = ? AND status = 'active' AND shift = ?
-                     ORDER BY student_no"
+                    "SELECT s.id, s.student_no, s.full_name, u.photo_path FROM students s
+                     LEFT JOIN users u ON u.id = s.user_id
+                     WHERE s.department_id = ? AND s.status = 'active' AND s.shift = ?
+                     ORDER BY s.student_no"
                 );
                 $stmt->bind_param('is', $rosterDepartmentId, $shift);
             } else {
                 $stmt = $conn->prepare(
-                    "SELECT id, student_no, full_name FROM students
-                     WHERE department_id = ? AND status = 'active'
-                     ORDER BY student_no"
+                    "SELECT s.id, s.student_no, s.full_name, u.photo_path FROM students s
+                     LEFT JOIN users u ON u.id = s.user_id
+                     WHERE s.department_id = ? AND s.status = 'active'
+                     ORDER BY s.student_no"
                 );
                 $stmt->bind_param('i', $rosterDepartmentId);
             }
         } elseif ($shift !== null && $shift !== '') {
             $stmt = $conn->prepare(
-                "SELECT s.id, s.student_no, s.full_name
+                "SELECT s.id, s.student_no, s.full_name, u.photo_path
                  FROM students s
                  JOIN courses c ON c.department_id = s.department_id
+                 LEFT JOIN users u ON u.id = s.user_id
                  WHERE c.id = ? AND s.status = 'active' AND s.shift = ?
                  ORDER BY s.student_no"
             );
             $stmt->bind_param('is', $courseId, $shift);
         } else {
             $stmt = $conn->prepare(
-                "SELECT s.id, s.student_no, s.full_name
+                "SELECT s.id, s.student_no, s.full_name, u.photo_path
                  FROM students s
                  JOIN courses c ON c.department_id = s.department_id
+                 LEFT JOIN users u ON u.id = s.user_id
                  WHERE c.id = ? AND s.status = 'active'
                  ORDER BY s.student_no"
             );
@@ -527,6 +523,26 @@ function get_xiiso_grid_data(mysqli $conn, int $courseId, int $semesterId, ?stri
  */
 function get_course_roster_student_ids(mysqli $conn, int $courseId, int $semesterId, ?string $shift = null): array
 {
+    // When resolving the roster for the 'any' (catch-all) offering, a
+    // student whose own shift already has its OWN dedicated offering for
+    // this exact (course, semester) must be excluded here — otherwise that
+    // student would be counted under both the 'any' offering AND their
+    // specific-shift offering at once (double-counted "Enrolled Students").
+    // This mirrors the exact-shift-wins-over-'any' precedence already used
+    // by get_offering_summary(). No-op (empty exclusion set) for the
+    // ordinary single-offering-per-course case.
+    $excludedShifts = [];
+    if (($shift === null || $shift === '') && $semesterId > 0) {
+        $shiftStmt = $conn->prepare(
+            "SELECT DISTINCT shift FROM course_offerings WHERE course_id = ? AND semester_id = ? AND shift != 'any'"
+        );
+        $shiftStmt->bind_param('ii', $courseId, $semesterId);
+        $shiftStmt->execute();
+        $excludedShifts = array_map(static fn ($r) => (string) $r['shift'], $shiftStmt->get_result()->fetch_all(MYSQLI_ASSOC));
+        $shiftStmt->close();
+    }
+    $excludedPlaceholders = !empty($excludedShifts) ? implode(',', array_fill(0, count($excludedShifts), '?')) : '';
+
     if ($shift !== null && $shift !== '') {
         $stmt = $conn->prepare(
             "SELECT s.id FROM course_enrollments ce
@@ -534,6 +550,13 @@ function get_course_roster_student_ids(mysqli $conn, int $courseId, int $semeste
              WHERE ce.course_id = ? AND s.status = 'active' AND s.shift = ?"
         );
         $stmt->bind_param('is', $courseId, $shift);
+    } elseif ($excludedPlaceholders !== '') {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM course_enrollments ce
+             JOIN students s ON s.id = ce.student_id
+             WHERE ce.course_id = ? AND s.status = 'active' AND s.shift NOT IN ({$excludedPlaceholders})"
+        );
+        $stmt->bind_param('i' . str_repeat('s', count($excludedShifts)), $courseId, ...$excludedShifts);
     } else {
         $stmt = $conn->prepare(
             "SELECT s.id FROM course_enrollments ce
@@ -555,6 +578,9 @@ function get_course_roster_student_ids(mysqli $conn, int $courseId, int $semeste
         if ($shift !== null && $shift !== '') {
             $stmt = $conn->prepare("SELECT id FROM students WHERE department_id = ? AND status = 'active' AND shift = ?");
             $stmt->bind_param('is', $rosterDepartmentId, $shift);
+        } elseif ($excludedPlaceholders !== '') {
+            $stmt = $conn->prepare("SELECT id FROM students WHERE department_id = ? AND status = 'active' AND shift NOT IN ({$excludedPlaceholders})");
+            $stmt->bind_param('i' . str_repeat('s', count($excludedShifts)), $rosterDepartmentId, ...$excludedShifts);
         } else {
             $stmt = $conn->prepare("SELECT id FROM students WHERE department_id = ? AND status = 'active'");
             $stmt->bind_param('i', $rosterDepartmentId);
@@ -565,6 +591,12 @@ function get_course_roster_student_ids(mysqli $conn, int $courseId, int $semeste
              WHERE c.id = ? AND s.status = 'active' AND s.shift = ?"
         );
         $stmt->bind_param('is', $courseId, $shift);
+    } elseif ($excludedPlaceholders !== '') {
+        $stmt = $conn->prepare(
+            "SELECT s.id FROM students s JOIN courses c ON c.department_id = s.department_id
+             WHERE c.id = ? AND s.status = 'active' AND s.shift NOT IN ({$excludedPlaceholders})"
+        );
+        $stmt->bind_param('i' . str_repeat('s', count($excludedShifts)), $courseId, ...$excludedShifts);
     } else {
         $stmt = $conn->prepare(
             "SELECT s.id FROM students s JOIN courses c ON c.department_id = s.department_id
@@ -628,6 +660,32 @@ function build_month_groups(array $sessions): array
  * used to add a sky-blue divider every 4 Xiiso columns on the grid views,
  * matching the university's own paper/Excel tracker's banded layout.
  */
+/**
+ * A (course_id, session_id) pair is only ever a legitimate Lecturer
+ * Check-In/Check-Out target if it belongs to one of this lecturer's own
+ * CURRENT-semester offerings — the real security/correctness boundary for
+ * both the check_in and check_out actions, shared by lecturer/checkin.php
+ * (page load + no-JS form fallback) and ajax/lecturer_checkin_action.php
+ * (the AJAX path), so the two can never drift on what counts as "owns this
+ * session."
+ */
+function lecturer_owns_current_session(mysqli $conn, int $lecturerId, int $courseId, int $sessionId): bool
+{
+    $stmt = $conn->prepare(
+        "SELECT sess.id
+         FROM sessions sess
+         JOIN semesters se ON se.id = sess.semester_id AND se.status = 'current'
+         JOIN course_offerings co ON co.semester_id = se.id AND co.course_id = ? AND co.lecturer_id = ?
+         WHERE sess.id = ?"
+    );
+    $stmt->bind_param('iii', $courseId, $lecturerId, $sessionId);
+    $stmt->execute();
+    $found = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $found !== null;
+}
+
 function build_xiiso_chunks(array $sessions, int $chunkSize = 4): array
 {
     $chunks = [];

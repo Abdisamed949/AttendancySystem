@@ -32,7 +32,12 @@ require_once __DIR__ . '/vendor/autoload.php';
 // university_rector converted from full-CRUD to view-only oversight; bulk
 // attendance import has no meaningful "view" mode, so access is removed
 // for this role — dean/lecturer are unaffected.
-require_role(['dean', 'lecturer']);
+// Dean converted from full CRUD to a faculty-scoped Viewer, per explicit
+// request — this is a pure write action (bulk historical-attendance
+// import) with no read-only equivalent, so Dean no longer reaches this
+// page at all (same treatment University Rector already got when it was
+// converted to view-only).
+require_role(['lecturer']);
 
 use PhpOffice\PhpSpreadsheet\Reader\Csv;
 use PhpOffice\PhpSpreadsheet\Reader\Xls;

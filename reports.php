@@ -11,6 +11,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
+require_once __DIR__ . '/includes/avatar_helpers.php';
 require_once __DIR__ . '/includes/university_logo.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
@@ -28,12 +29,22 @@ const REPORT_TYPE_LABELS = [
     'department_summary' => 'Department Summary',
     'faculty_summary' => 'Faculty Summary',
     'xiiso_grid' => 'Xiiso Attendance Grid',
+    'at_risk_students' => 'At-Risk Students',
+    'lecturer_recording_rate' => 'Lecturer Recording Rate',
 ];
 
 const REPORT_TYPES_BY_ROLE = [
-    'university_rector' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
-    'head_academic' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid'],
-    'dean' => ['course_attendance', 'department_summary', 'xiiso_grid'],
+    // At-Risk Students / Lecturer Recording Rate share the exact same
+    // Faculty/Department/Semester filter bar as course_attendance below —
+    // no new UI/JS was needed to add them, only these two entries plus a
+    // builder function and a match() arm — so their audience mirrors
+    // notifications.php's own (the other "catch it before it's official"
+    // surface): university_rector/head_academic/dean, not lecturer
+    // (about their colleagues, not their own record) or registration (no
+    // attendance access at all).
+    'university_rector' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid', 'at_risk_students', 'lecturer_recording_rate'],
+    'head_academic' => ['course_attendance', 'department_summary', 'faculty_summary', 'xiiso_grid', 'at_risk_students', 'lecturer_recording_rate'],
+    'dean' => ['course_attendance', 'department_summary', 'xiiso_grid', 'at_risk_students', 'lecturer_recording_rate'],
     'registration' => ['department_summary', 'faculty_summary'],
     'lecturer' => ['course_attendance', 'xiiso_grid'],
 ];
@@ -147,6 +158,165 @@ function build_course_attendance_report(mysqli $conn, string $role, int $faculty
             'sessions_recorded' => (int) $r['sessions_recorded'],
             'avg_present_pct' => (float) $r['avg_present_pct'],
             'avg_absent_pct' => (float) $r['avg_absent_pct'],
+        ];
+    }
+
+    return [$columns, $data];
+}
+
+/**
+ * Students who are NOT yet below the attendance threshold, but sit close
+ * enough to it (within a 2-point buffer above it, out of 10) that they're
+ * worth flagging before notifications.php's own below-threshold alert ever
+ * fires. Ranked closest-to-the-line first. "Sessions Remaining" is the
+ * course's own regular-session count still unmarked for this semester —
+ * context for how much room is left to recover (or to fall further).
+ */
+function build_at_risk_students_report(mysqli $conn, int $facultyId, int $departmentId, int $semesterId, float $minAttendancePct): array
+{
+    $conditions = [];
+    $params = [$semesterId, $semesterId, $semesterId, $minAttendancePct, $minAttendancePct + 2];
+    $types = 'iiidd';
+
+    if ($facultyId > 0) {
+        $conditions[] = 'f.id = ?';
+        $params[] = $facultyId;
+        $types .= 'i';
+    }
+    if ($departmentId > 0) {
+        $conditions[] = 'c.department_id = ?';
+        $params[] = $departmentId;
+        $types .= 'i';
+    }
+
+    $whereExtra = empty($conditions) ? '' : (' AND ' . implode(' AND ', $conditions));
+    $scoreSql = attendance_score_subquery();
+
+    $sql = "SELECT s.student_no, s.full_name, u.photo_path, c.code, c.name AS course_name,
+                   d.name AS department_name, f.name AS faculty_name, t.present_score AS score,
+                   GREATEST(0, (SELECT COUNT(*) FROM sessions sx WHERE sx.semester_id = ? AND sx.type = 'regular')
+                       - COALESCE(rec.recorded_count, 0)) AS sessions_remaining
+            FROM ({$scoreSql} GROUP BY a.student_id, a.course_id) t
+            JOIN students s ON s.id = t.student_id
+            JOIN users u ON u.id = s.user_id
+            JOIN courses c ON c.id = t.course_id
+            JOIN departments d ON d.id = c.department_id
+            JOIN faculties f ON f.id = d.faculty_id
+            LEFT JOIN (
+                SELECT a.course_id, COUNT(DISTINCT a.session_id) AS recorded_count
+                FROM attendance a
+                JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+                WHERE sess.semester_id = ?
+                GROUP BY a.course_id
+            ) rec ON rec.course_id = c.id
+            WHERE t.present_score >= ? AND t.present_score < ?{$whereExtra}
+            ORDER BY t.present_score ASC, sessions_remaining ASC, s.full_name";
+
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    $columns = [
+        ['key' => 'student_no', 'label' => 'Student No'],
+        ['key' => 'full_name', 'label' => 'Full Name'],
+        ['key' => 'course', 'label' => 'Course'],
+        ['key' => 'department', 'label' => 'Department'],
+        ['key' => 'faculty', 'label' => 'Faculty'],
+        ['key' => 'score', 'label' => 'Score (of 10)'],
+        ['key' => 'sessions_remaining', 'label' => 'Sessions Remaining'],
+    ];
+
+    $data = [];
+    foreach ($rows as $r) {
+        $data[] = [
+            'student_no' => $r['student_no'],
+            'full_name' => $r['full_name'],
+            'photo_path' => $r['photo_path'],
+            'course' => $r['code'] . ' — ' . $r['course_name'],
+            'department' => $r['department_name'],
+            'faculty' => $r['faculty_name'],
+            'score' => (int) $r['score'],
+            'sessions_remaining' => (int) $r['sessions_remaining'],
+        ];
+    }
+
+    return [$columns, $data];
+}
+
+/**
+ * Of the regular sessions a semester actually expects, how many has each
+ * lecturer holding a real course_offerings row that semester actually
+ * marked attendance for — a per-(lecturer, course) pair, deduplicated so a
+ * lecturer holding two shift-offerings of the same course is never counted
+ * twice. Ranked lowest-first, so the lecturer most behind on recording
+ * shows at the top.
+ */
+function build_lecturer_recording_rate_report(mysqli $conn, int $facultyId, int $departmentId, int $semesterId): array
+{
+    $conditions = [];
+    $params = [$semesterId, $semesterId];
+    $types = 'ii';
+
+    if ($facultyId > 0) {
+        $conditions[] = 'd2.faculty_id = ?';
+        $params[] = $facultyId;
+        $types .= 'i';
+    }
+    if ($departmentId > 0) {
+        $conditions[] = 'c2.department_id = ?';
+        $params[] = $departmentId;
+        $types .= 'i';
+    }
+    $whereExtra = empty($conditions) ? '' : (' AND ' . implode(' AND ', $conditions));
+
+    $sql = "SELECT lc.lecturer_id, l.staff_no, l.full_name,
+                   COUNT(*) AS course_count,
+                   SUM(COALESCE(rec.recorded_count, 0)) AS total_recorded
+            FROM (SELECT DISTINCT co.lecturer_id, co.course_id FROM course_offerings co WHERE co.semester_id = ? AND co.lecturer_id IS NOT NULL) lc
+            JOIN lecturers l ON l.id = lc.lecturer_id
+            JOIN courses c2 ON c2.id = lc.course_id
+            JOIN departments d2 ON d2.id = c2.department_id
+            LEFT JOIN (
+                SELECT a.course_id, COUNT(DISTINCT a.session_id) AS recorded_count
+                FROM attendance a
+                JOIN sessions sess ON sess.id = a.session_id AND sess.type = 'regular'
+                WHERE sess.semester_id = ?
+                GROUP BY a.course_id
+            ) rec ON rec.course_id = lc.course_id
+            WHERE 1 = 1{$whereExtra}
+            GROUP BY lc.lecturer_id, l.staff_no, l.full_name
+            ORDER BY total_recorded ASC, l.full_name";
+
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    $columns = [
+        ['key' => 'staff_no', 'label' => 'Staff No'],
+        ['key' => 'full_name', 'label' => 'Full Name'],
+        ['key' => 'course_count', 'label' => 'Courses This Semester'],
+        ['key' => 'total_recorded', 'label' => 'Sessions Recorded'],
+        ['key' => 'total_expected', 'label' => 'Sessions Expected'],
+        ['key' => 'recording_rate', 'label' => 'Recording Rate'],
+    ];
+
+    $data = [];
+    foreach ($rows as $r) {
+        $courseCount = (int) $r['course_count'];
+        $expected = $courseCount * ATTENDANCE_MAX_SCORE;
+        $recorded = (int) $r['total_recorded'];
+        $rate = $expected > 0 ? round(($recorded / $expected) * 100, 1) : 0.0;
+        $data[] = [
+            'staff_no' => $r['staff_no'],
+            'full_name' => $r['full_name'],
+            'course_count' => $courseCount,
+            'total_recorded' => $recorded,
+            'total_expected' => $expected,
+            'recording_rate' => $rate . '%',
         ];
     }
 
@@ -418,7 +588,7 @@ function build_xiiso_grid_report(mysqli $conn, int $courseId, int $semesterId, ?
     $data = [];
     foreach ($students as $st) {
         $sid = (int) $st['id'];
-        $row = ['student_no' => $st['student_no'], 'full_name' => $st['full_name']];
+        $row = ['student_no' => $st['student_no'], 'full_name' => $st['full_name'], 'photo_path' => $st['photo_path'] ?? null];
 
         $presentCount = 0;
         $absentCount = 0;
@@ -823,6 +993,12 @@ $reportSemesterOptional = $role === 'registration';
     'xiiso_grid' => (array_key_exists($filterXiisoCourseId, $xiisoCourseById) && $filterXiisoSemesterId > 0)
         ? build_xiiso_grid_report($conn, $filterXiisoCourseId, $filterXiisoSemesterId, $filterXiisoShift !== '' ? $filterXiisoShift : null)
         : [[], []],
+    'at_risk_students' => $filterReportSemesterId > 0
+        ? build_at_risk_students_report($conn, $filterFacultyId, $filterDepartmentId, $filterReportSemesterId, (float) ($settings['min_attendance_pct'] ?? 7.5))
+        : [[], []],
+    'lecturer_recording_rate' => $filterReportSemesterId > 0
+        ? build_lecturer_recording_rate_report($conn, $filterFacultyId, $filterDepartmentId, $filterReportSemesterId)
+        : [[], []],
     default => [[], []],
 };
 
@@ -1211,7 +1387,13 @@ $scopeBanner = match ($role) {
                                 <?php foreach ($reportRows as $r): ?>
                                     <tr>
                                         <?php foreach ($reportColumns as $col): ?>
-                                            <td class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) ? 'col-summary' : '') . ' ' . (!empty($col['exam']) ? 'col-exam' : '')) ?>"><?= htmlspecialchars((string) $r[$col['key']]) ?></td>
+                                            <td class="<?= trim((!empty($col['group_end']) ? 'col-group-end' : '') . ' ' . (!empty($col['summary']) ? 'col-summary' : '') . ' ' . (!empty($col['exam']) ? 'col-exam' : '')) ?>">
+                                                <?php if ($col['key'] === 'full_name' && array_key_exists('photo_path', $r)): ?>
+                                                    <?php render_person_avatar_cell($r['photo_path'], (string) $r['full_name'], '', true); ?>
+                                                <?php else: ?>
+                                                    <?= htmlspecialchars((string) $r[$col['key']]) ?>
+                                                <?php endif; ?>
+                                            </td>
                                         <?php endforeach; ?>
                                     </tr>
                                 <?php endforeach; ?>

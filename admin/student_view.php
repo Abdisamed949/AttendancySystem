@@ -1,13 +1,12 @@
 <?php
 /**
  * Read-only student detail page for University Rector's supervisory/
- * oversight role, and (added alongside the University Rector UI polish
- * session) Head of Academic Affairs' own "View Students information"
- * access, granted the identical read-only scope. Reachable only via the
- * "View Profile" link on admin/students.php's Actions column for these
- * two roles — no other role is granted access here, since every other
- * role already has its own way to see this data (e.g. Dean's own
- * already-scoped admin/students.php).
+ * oversight role, Head of Academic Affairs' "View Students information"
+ * access (university-wide), and Dean's own faculty-scoped Viewer access
+ * (own faculty only — a crafted student_id belonging to another faculty
+ * is rejected server-side below, not just hidden from the list). Reachable
+ * only via the "View Profile" link on admin/students.php's Actions column
+ * for these three roles.
  *
  * Course discovery + attendance scoring below is a direct adaptation of
  * student/courses.php's own logic (course_enrollments first, department
@@ -24,10 +23,16 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 
-require_role(['university_rector', 'head_academic']);
+require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
+$role = current_role();
+
+$deanFacultyId = 0;
+if ($role === 'dean') {
+    $deanFacultyId = (int) ($_SESSION['faculty_id'] ?? 0);
+}
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip + threshold)
@@ -55,6 +60,9 @@ $studentId = (int) ($_GET['student_id'] ?? 0);
 $studentStmt = $conn->prepare(
     'SELECT s.id, s.student_no, s.full_name, s.first_name, s.father_name, s.grandfather_name,
             s.shift, s.department_id, s.faculty_id, s.semester_id, s.academic_year_id,
+            s.mother_name, s.sex, s.birth_date, s.street_address, s.phone,
+            s.emergency_contact_name, s.emergency_contact_phone, s.nationality, s.enrollment_date,
+            s.certificate_type, s.school_roll_number, s.degree, s.program, s.class_year,
             ay.label AS academic_year_label, f.name AS faculty_name, d.name AS department_name,
             sem.name AS semester_name, u.email, u.status AS user_status, u.photo_path
      FROM students s
@@ -71,6 +79,14 @@ $student = $studentStmt->get_result()->fetch_assoc();
 $studentStmt->close();
 
 if (!$student) {
+    $_SESSION['flash_error'] = 'Student not found.';
+    redirect_to('admin/students.php');
+}
+
+// A Dean may only ever view their own faculty's students — never trusted
+// from the student_id alone, re-checked here against the session's own
+// faculty_id (same pattern as every other Dean-scoped page in this app).
+if ($role === 'dean' && (int) $student['faculty_id'] !== $deanFacultyId) {
     $_SESSION['flash_error'] = 'Student not found.';
     redirect_to('admin/students.php');
 }
@@ -267,6 +283,7 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
     $courses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 }
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -284,10 +301,14 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
     <div class="main-content">
         <?php include __DIR__ . '/../includes/topbar.php'; ?>
 
-        <div class="page-body">
+        <div class="page-body view-profile-page">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                Access scope: Full system — view only (oversight)
+                <?php if ($role === 'dean'): ?>
+                    Access scope: Own faculty only — view only
+                <?php else: ?>
+                    Access scope: Full system — view only (oversight)
+                <?php endif; ?>
             </div>
 
             <div class="mb-3">
@@ -378,74 +399,99 @@ if (!empty($courseIds) && $filterSemesterId > 0) {
                 </div>
             </div>
 
-            <?php if (!empty($semesterBoxes)): ?>
-                <div class="admas-card p-3 mb-3" style="border: 2px solid var(--admas-sky);">
-                    <div class="text-muted small mb-2">Semester</div>
-                    <div class="d-flex flex-wrap gap-2">
-                        <?php foreach ($semesterBoxes as $box): ?>
-                            <?php if ($box['semester_id'] > 0): ?>
-                                <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/student_view.php?student_id=<?= (int) $studentId ?>&semester_id=<?= $box['semester_id'] ?>"
-                                   class="btn btn-sm <?= $box['semester_id'] === $filterSemesterId ? 'text-white' : '' ?>"
-                                   <?= $box['semester_id'] === $filterSemesterId
-                                        ? 'style="background-color: var(--admas-sky); border-color: var(--admas-sky);"'
-                                        : 'style="border: 1px solid var(--admas-sky); color: var(--admas-sky);"' ?>>
-                                    <?= htmlspecialchars($box['name']) ?><?= ($box['status'] === 'current' && $box['semester_id'] === $myCurrentSemesterId) ? ' (current)' : '' ?>
-                                </a>
-                            <?php else: ?>
-                                <span class="btn btn-sm btn-outline-secondary disabled" style="opacity: 0.4;" title="Not created yet">
-                                    <?= htmlspecialchars($box['name']) ?>
-                                </span>
-                            <?php endif; ?>
-                        <?php endforeach; ?>
+            <div class="row g-3 split-row">
+                <div class="col-lg-6">
+                    <div class="admas-card p-4 h-100">
+                        <div class="section-heading accent-navy"><i class="bi bi-clipboard2-data"></i> Registration Details</div>
+
+                        <div class="reg-group">
+                            <div class="reg-group-title">Personal</div>
+                            <div class="row row-cols-2 g-3">
+                                <div><div class="reg-field-label">Mother's Name</div><div class="reg-field-value"><?= htmlspecialchars($student['mother_name'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Sex</div><div class="reg-field-value"><?= htmlspecialchars($student['sex'] ? ucfirst((string) $student['sex']) : '—') ?></div></div>
+                                <div><div class="reg-field-label">Birth Date</div><div class="reg-field-value"><?= htmlspecialchars($student['birth_date'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Nationality</div><div class="reg-field-value"><?= htmlspecialchars($student['nationality'] ?: '—') ?></div></div>
+                            </div>
+                        </div>
+
+                        <div class="reg-group">
+                            <div class="reg-group-title">Contact</div>
+                            <div class="row row-cols-2 g-3">
+                                <div><div class="reg-field-label">Street Address</div><div class="reg-field-value"><?= htmlspecialchars($student['street_address'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Phone</div><div class="reg-field-value"><?= htmlspecialchars($student['phone'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Emergency Contact</div><div class="reg-field-value"><?= htmlspecialchars($student['emergency_contact_name'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Emergency Phone</div><div class="reg-field-value"><?= htmlspecialchars($student['emergency_contact_phone'] ?: '—') ?></div></div>
+                            </div>
+                        </div>
+
+                        <div class="reg-group">
+                            <div class="reg-group-title">Enrollment</div>
+                            <div class="row row-cols-2 g-3">
+                                <div><div class="reg-field-label">Enrollment Date</div><div class="reg-field-value"><?= htmlspecialchars($student['enrollment_date'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Certificate Type</div><div class="reg-field-value"><?= htmlspecialchars($student['certificate_type'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">School Roll Number</div><div class="reg-field-value"><?= htmlspecialchars($student['school_roll_number'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Degree</div><div class="reg-field-value"><?= htmlspecialchars($student['degree'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Program</div><div class="reg-field-value"><?= htmlspecialchars($student['program'] ?: '—') ?></div></div>
+                                <div><div class="reg-field-label">Class Year</div><div class="reg-field-value"><?= htmlspecialchars($student['class_year'] ?: '—') ?></div></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            <?php endif; ?>
 
-            <div class="admas-card p-4">
-                <div class="section-heading"><i class="bi bi-journal-check"></i> Courses &amp; Attendance</div>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Course Code</th>
-                                <th>Name</th>
-                                <th>Lecturer</th>
-                                <th>Attendance Score (out of 10)</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($courses)): ?>
-                                <tr>
-                                    <td colspan="4" class="text-center text-muted py-4">No courses recorded for this semester.</td>
-                                </tr>
-                            <?php else: ?>
+                <div class="col-lg-6">
+                    <div class="admas-card p-4 h-100">
+                        <div class="section-heading accent-amber"><i class="bi bi-journal-check"></i> Courses &amp; Attendance</div>
+
+                        <?php if (!empty($semesterBoxes)): ?>
+                            <div class="mb-3">
+                                <div class="semester-picker-label">Semester</div>
+                                <div class="semester-picker">
+                                    <?php foreach ($semesterBoxes as $box): ?>
+                                        <?php if ($box['semester_id'] > 0): ?>
+                                            <?php $isCurrent = $box['status'] === 'current' && $box['semester_id'] === $myCurrentSemesterId; ?>
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/student_view.php?student_id=<?= (int) $studentId ?>&semester_id=<?= $box['semester_id'] ?>"
+                                               class="sem-box <?= $box['semester_id'] === $filterSemesterId ? 'sem-box-active' : '' ?>"
+                                               title="<?= $isCurrent ? 'Current semester' : '' ?>">
+                                                <?php if ($isCurrent): ?><span class="sem-box-dot"></span><?php endif; ?>
+                                                <?= htmlspecialchars($box['name']) ?>
+                                            </a>
+                                        <?php else: ?>
+                                            <span class="sem-box-disabled" title="Not created yet">
+                                                <?= htmlspecialchars($box['name']) ?>
+                                            </span>
+                                        <?php endif; ?>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                        <?php endif; ?>
+
+                        <?php if (empty($courses)): ?>
+                            <p class="text-center text-muted py-4 mb-0">No courses recorded for this semester.</p>
+                        <?php else: ?>
+                            <div>
                                 <?php foreach ($courses as $c): ?>
                                     <?php
                                     $totalMarks = (int) $c['total_marks'];
                                     $pct = $totalMarks > 0 ? min(ATTENDANCE_MAX_SCORE, (int) $c['present_count']) : null;
                                     ?>
-                                    <tr>
-                                        <td><span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span></td>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['name']) ?></td>
-                                        <td>
-                                            <?php if ($c['lecturer_name']): ?>
-                                                <?= htmlspecialchars($c['lecturer_name']) ?>
-                                            <?php else: ?>
-                                                <span class="text-muted fst-italic">Unassigned</span>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td>
-                                            <?php if ($pct === null): ?>
-                                                <span class="text-muted">No records yet</span>
-                                            <?php else: ?>
-                                                <span class="badge-pill <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= $pct ?></span>
-                                            <?php endif; ?>
-                                        </td>
-                                    </tr>
+                                    <div class="course-row">
+                                        <span class="badge-pill badge-active course-code"><?= htmlspecialchars($c['code']) ?></span>
+                                        <div class="course-main">
+                                            <div class="course-name"><?= htmlspecialchars($c['name']) ?></div>
+                                            <div class="course-lecturer">
+                                                <?= $c['lecturer_name'] ? htmlspecialchars($c['lecturer_name']) : 'Unassigned' ?>
+                                            </div>
+                                        </div>
+                                        <?php if ($pct === null): ?>
+                                            <span class="badge-pill course-score-muted">No records yet</span>
+                                        <?php else: ?>
+                                            <span class="badge-pill course-score <?= attendance_badge_class($pct, $minAttendancePct) ?>"><?= $pct ?> / 10</span>
+                                        <?php endif; ?>
+                                    </div>
                                 <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
+                            </div>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
         </div>

@@ -10,6 +10,10 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/course_document_helpers.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/university_logo.php';
 
 require_role(['student']);
 
@@ -35,7 +39,7 @@ $minAttendancePct = (float) ($settings['min_attendance_pct'] ?? 75);
 // ---------------------------------------------------------------------
 $ownStmt = $conn->prepare(
     'SELECT s.id, s.full_name, s.faculty_id, s.department_id, s.shift, s.semester_id, s.academic_year_id,
-            f.name AS faculty_name, f.total_semesters, d.name AS department_name
+            f.name AS faculty_name, f.total_semesters, f.semesters_per_year, d.name AS department_name
      FROM students s
      JOIN faculties f ON f.id = s.faculty_id
      JOIN departments d ON d.id = s.department_id
@@ -48,6 +52,44 @@ $ownStmt->close();
 $ownStudentId = $ownRow ? (int) $ownRow['id'] : 0;
 $ownDepartmentId = $ownRow ? (int) $ownRow['department_id'] : 0;
 $ownShift = (string) ($ownRow['shift'] ?? '');
+
+// Available Documents — every course_documents row across every course
+// this student can reach (same access boundary as student/course_documents.php).
+$availableDocumentsCount = 0;
+$accessibleCourseIdsForDocs = array_map(static fn ($c) => (int) $c['id'], student_accessible_courses($conn, $ownStudentId));
+if (!empty($accessibleCourseIdsForDocs)) {
+    $docCountPlaceholders = implode(',', array_fill(0, count($accessibleCourseIdsForDocs), '?'));
+    $docCountStmt = $conn->prepare("SELECT COUNT(*) AS c FROM course_documents WHERE course_id IN ({$docCountPlaceholders})");
+    $docCountStmt->bind_param(str_repeat('i', count($accessibleCourseIdsForDocs)), ...$accessibleCourseIdsForDocs);
+    $docCountStmt->execute();
+    $availableDocumentsCount = (int) ($docCountStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $docCountStmt->close();
+}
+
+// My Last Documents — the most recently shared Quiz/Assignment/Chapter
+// documents across every course this student can reach, each showing the
+// uploading lecturer's own name + photo (same includes/avatar_helpers.php
+// helper used everywhere else a person appears in this app).
+$lastDocuments = [];
+if (!empty($accessibleCourseIdsForDocs)) {
+    $lastDocsPlaceholders = implode(',', array_fill(0, count($accessibleCourseIdsForDocs), '?'));
+    $lastDocsStmt = $conn->prepare(
+        "SELECT cd.id, cd.document_type, cd.chapter_number, cd.title, cd.created_at,
+                c.code AS course_code, c.name AS course_name,
+                l.full_name AS lecturer_name, u.photo_path AS lecturer_photo_path
+         FROM course_documents cd
+         JOIN courses c ON c.id = cd.course_id
+         JOIN lecturers l ON l.id = cd.uploaded_by_lecturer_id
+         LEFT JOIN users u ON u.id = l.user_id
+         WHERE cd.course_id IN ({$lastDocsPlaceholders})
+         ORDER BY cd.created_at DESC
+         LIMIT 5"
+    );
+    $lastDocsStmt->bind_param(str_repeat('i', count($accessibleCourseIdsForDocs)), ...$accessibleCourseIdsForDocs);
+    $lastDocsStmt->execute();
+    $lastDocuments = $lastDocsStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $lastDocsStmt->close();
+}
 
 // ---------------------------------------------------------------------
 // Program-completion banner: true only when the student's OWN semester
@@ -92,7 +134,7 @@ if ($ownRow) {
     $ownFacultyIdForSemester = (int) $ownRow['faculty_id'];
     $ownAcademicYearIdForSemester = (int) $ownRow['academic_year_id'];
     $curSemStmt = $conn->prepare(
-        "SELECT id, name FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND status = 'current' ORDER BY id DESC LIMIT 1"
+        "SELECT id, name, start_date FROM semesters WHERE faculty_id = ? AND academic_year_id = ? AND status = 'current' ORDER BY id DESC LIMIT 1"
     );
     $curSemStmt->bind_param('ii', $ownFacultyIdForSemester, $ownAcademicYearIdForSemester);
     $curSemStmt->execute();
@@ -210,6 +252,42 @@ if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
 }
 
 // ---------------------------------------------------------------------
+// Class Time Table — this student's own current-semester courses that
+// have a real scheduled Day/Time slot set on their offering. Same course
+// discovery (courseIds/currentSemesterId/ownShift) as "My Course
+// Attendance" above, just resolving the offering's own schedule fields
+// instead of attendance marks.
+// ---------------------------------------------------------------------
+$myTimetableRows = [];
+if ($ownStudentId > 0 && $currentSemesterId > 0 && !empty($courseIds)) {
+    $ttPlaceholders = implode(',', array_fill(0, count($courseIds), '?'));
+    $ttSql = "SELECT c.code, c.name AS course_name, co.day_of_week, co.start_time, co.end_time, co.room, l.full_name AS lecturer_name
+              FROM courses c
+              JOIN course_offerings co ON co.id = (
+                  SELECT co2.id FROM course_offerings co2
+                  WHERE co2.course_id = c.id AND co2.semester_id = ? AND (co2.shift = ? OR co2.shift = 'any')
+                  ORDER BY (co2.shift = ?) DESC
+                  LIMIT 1
+              )
+              LEFT JOIN lecturers l ON l.id = co.lecturer_id
+              WHERE c.id IN ({$ttPlaceholders})
+                AND co.day_of_week IS NOT NULL AND co.start_time IS NOT NULL AND co.end_time IS NOT NULL";
+    $ttStmt = $conn->prepare($ttSql);
+    $ttTypes = 'sss' . str_repeat('i', count($courseIds));
+    $ttParams = array_merge([$currentSemesterId, $ownShift, $ownShift], $courseIds);
+    $ttStmt->bind_param($ttTypes, ...$ttParams);
+    $ttStmt->execute();
+    $myTimetableRows = $ttStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $ttStmt->close();
+}
+$myTimetableGrid = build_class_timetable_grid($myTimetableRows);
+$semesterYearNumber = $ownCurrentSemester
+    ? semester_year_number((string) $ownCurrentSemester['name'], (int) ($ownRow['semesters_per_year'] ?? 3))
+    : null;
+$dashboardLogoRelativePath = get_university_logo_relative_path($settings);
+$printDayOrder = array_values(array_diff(DAY_OF_WEEK_DISPLAY_ORDER, ['friday']));
+
+// ---------------------------------------------------------------------
 // KPI cards
 // ---------------------------------------------------------------------
 // "My Attendance %" is the average of each scored course's own out-of-10
@@ -282,6 +360,15 @@ if ($ownStudentId > 0) {
                 <i class="bi bi-shield-check"></i>
                 Access scope: Own personal record only
             </div>
+            <?php if ($ownCurrentSemester): ?>
+                <div class="semester-scope-banner">
+                    <i class="bi bi-calendar-week"></i>
+                    Showing: <?= htmlspecialchars((string) $ownCurrentSemester['name']) ?> (current)
+                    <?php if ($ownRow): ?>
+                        &mdash; <?= htmlspecialchars((string) $ownRow['faculty_name']) ?> / <?= htmlspecialchars((string) $ownRow['department_name']) ?>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
 
             <?php if ($programComplete): ?>
                 <div class="alert alert-success d-flex align-items-center gap-2 mb-3" role="alert">
@@ -304,11 +391,11 @@ if ($ownStudentId > 0) {
                     </span>
                 </div>
             <?php endif; ?>
-            <p class="text-muted mb-4">Here's a summary of your attendance this academic year.</p>
+            <p class="text-muted mb-2">Here's a summary of your attendance this academic year.</p>
 
             <!-- KPI Cards -->
-            <div class="row g-3 mb-4">
-                <div class="col-sm-6 col-xl-4">
+            <div class="row g-2 mb-3">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/student/attendance_history.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-graph-up-arrow"></i></div>
                         <div>
@@ -318,7 +405,7 @@ if ($ownStudentId > 0) {
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
-                <div class="col-sm-6 col-xl-4">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-journal-bookmark-fill"></i></div>
                         <div>
@@ -328,7 +415,7 @@ if ($ownStudentId > 0) {
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
-                <div class="col-sm-6 col-xl-4">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/student/courses.php" class="admas-card kpi-card accent-amber h-100">
                         <div class="kpi-icon bg-amber"><i class="bi bi-exclamation-triangle-fill"></i></div>
                         <div>
@@ -338,22 +425,34 @@ if ($ownStudentId > 0) {
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
+                <div class="col-sm-6 col-xl-3">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/student/course_documents.php" class="admas-card kpi-card accent-green h-100">
+                        <div class="kpi-icon bg-green"><i class="bi bi-folder2-open"></i></div>
+                        <div>
+                            <div class="kpi-value"><?= number_format($availableDocumentsCount) ?></div>
+                            <div class="kpi-label">Available Documents</div>
+                        </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
+                </div>
             </div>
 
-            <div class="row g-3">
+            <div class="row g-2 dashboard-quad">
                 <?php if (!empty($courseChartLabels)): ?>
-                <div class="col-xl-5">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Attendance by Course</h6>
-                        <canvas id="courseAttendanceChart" height="200"></canvas>
+                <div class="col-lg-6">
+                    <div class="admas-card p-2 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">My Attendance by Course</h6>
+                        <canvas id="courseAttendanceChart" height="95"></canvas>
                     </div>
                 </div>
                 <?php endif; ?>
-                <div class="col-xl-<?= !empty($courseChartLabels) ? '7' : '12' ?>">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Course Attendance</h6>
+                <div class="col-lg-<?= !empty($courseChartLabels) ? '6' : '12' ?>">
+                    <div class="admas-card p-2 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">
+                            <?= $ownCurrentSemester ? 'Course Attendance — ' . htmlspecialchars((string) $ownCurrentSemester['name']) : 'My Course Attendance' ?>
+                        </h6>
                         <div class="table-responsive">
-                            <table class="table admas-table align-middle">
+                            <table class="table admas-table table-sm align-middle">
                                 <thead>
                                     <tr>
                                         <th>Course</th>
@@ -392,7 +491,69 @@ if ($ownStudentId > 0) {
                         </div>
                     </div>
                 </div>
+
+                <div class="col-lg-6">
+                    <div class="admas-card p-2 h-100 timetable-print-card timetable-print-compact">
+                        <div class="timetable-print-header">
+                            <img src="<?= htmlspecialchars(BASE_URL . '/' . $dashboardLogoRelativePath) ?>" alt="" class="timetable-print-logo">
+                            <div class="timetable-print-header-text">
+                                <div class="timetable-print-university"><?= htmlspecialchars(mb_strtoupper((string) ($settings['university_name'] ?? 'ADMAS University'))) ?></div>
+                                <div class="timetable-print-faculty"><?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></div>
+                                <?php if ($ownRow): ?>
+                                    <div class="timetable-print-faculty">Faculty: <?= htmlspecialchars((string) $ownRow['faculty_name']) ?></div>
+                                <?php endif; ?>
+                                <?php if ($ownCurrentSemester): ?>
+                                    <div class="timetable-print-year"><?= $semesterYearNumber !== null ? 'Year ' . $semesterYearNumber . '  ' : '' ?><?= htmlspecialchars((string) $ownCurrentSemester['name']) ?></div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <div class="timetable-print-meta">
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/student/class_timetable.php" class="timetable-print-title text-decoration-none">Class Time Table</a>
+                            <?php if ($ownCurrentSemester && !empty($ownCurrentSemester['start_date'])): ?>
+                                <span>Starting Date <?= htmlspecialchars((string) $ownCurrentSemester['start_date']) ?></span>
+                            <?php endif; ?>
+                        </div>
+                        <?php if (empty($myTimetableGrid['time_slots'])): ?>
+                            <p class="text-muted small mb-0 py-2">No scheduled class times have been set for your courses yet.</p>
+                        <?php else: ?>
+                            <div class="table-responsive">
+                                <?php render_class_timetable_grid_table($myTimetableGrid, $printDayOrder, 'course_name', 'timetable-print-table'); ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="col-lg-6">
+                    <div class="admas-card p-2 h-100">
+                        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                            <h6 class="fw-bold mb-0 small text-uppercase text-muted">My Last Documents</h6>
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/student/course_documents.php" class="small">View all &rarr;</a>
+                        </div>
+                        <?php if (empty($lastDocuments)): ?>
+                            <p class="text-muted small mb-0">No documents have been shared yet.</p>
+                        <?php else: ?>
+                            <div class="last-doc-list">
+                                <?php foreach ($lastDocuments as $ld): ?>
+                                    <div class="last-doc-row">
+                                        <div class="last-doc-icon"><i class="bi <?= COURSE_DOCUMENT_TYPE_ICONS[$ld['document_type']] ?? 'bi-file-earmark-fill' ?>"></i></div>
+                                        <div class="last-doc-main">
+                                            <div class="last-doc-title">
+                                                <?= htmlspecialchars($ld['title']) ?>
+                                                <span class="badge-pill badge-neutral"><?= htmlspecialchars(COURSE_DOCUMENT_TYPES[$ld['document_type']] ?? ucfirst($ld['document_type'])) ?><?= ($ld['document_type'] === 'chapter' && $ld['chapter_number']) ? ' ' . (int) $ld['chapter_number'] : '' ?></span>
+                                            </div>
+                                            <div class="last-doc-sub"><?= htmlspecialchars($ld['course_code'] . ' — ' . $ld['course_name']) ?></div>
+                                        </div>
+                                        <div class="last-doc-by">
+                                            <?php render_person_avatar_cell($ld['lecturer_photo_path'] ?? null, (string) $ld['lecturer_name'], date('M j', strtotime((string) $ld['created_at'])), true); ?>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
             </div>
+
         </div>
     </div>
 

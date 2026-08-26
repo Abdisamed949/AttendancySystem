@@ -7,11 +7,18 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
 
 require_role(['registration']);
 
 $conn = db();
 $currentUser = current_user();
+
+const SHIFT_LABELS = [
+    'morning' => 'Morning Shift',
+    'afternoon' => 'Afternoon Shift',
+    'weekend' => 'Weekend',
+];
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -40,13 +47,57 @@ $studentsAddedThisMonth = (int) ($addedThisMonthStmt->get_result()->fetch_assoc(
 $addedThisMonthStmt->close();
 
 // ---------------------------------------------------------------------
+// Enrollment stats charts — students per faculty, students per shift, and
+// the registration trend over the last 6 months. Reuses the exact same
+// query shapes already established on admin/dashboard.php's own oversight
+// charts, scoped down to what's actually relevant/visible to Registration
+// Office (no lecturer/attendance data — this role has none of that access).
+// ---------------------------------------------------------------------
+$studentsPerFacultyResult = $conn->query(
+    "SELECT f.name, COUNT(s.id) AS c
+     FROM faculties f
+     LEFT JOIN students s ON s.faculty_id = f.id AND s.status = 'active'
+     GROUP BY f.id, f.name
+     ORDER BY f.name"
+)->fetch_all(MYSQLI_ASSOC);
+$studentsPerFacultyLabels = array_map(static fn ($r) => $r['name'], $studentsPerFacultyResult);
+$studentsPerFacultyData = array_map(static fn ($r) => (int) $r['c'], $studentsPerFacultyResult);
+
+$studentsByShiftResult = $conn->query(
+    "SELECT shift, COUNT(*) AS c FROM students WHERE status = 'active' GROUP BY shift"
+)->fetch_all(MYSQLI_ASSOC);
+$studentsByShiftLabels = array_map(static fn ($r) => SHIFT_LABELS[$r['shift']] ?? $r['shift'], $studentsByShiftResult);
+$studentsByShiftData = array_map(static fn ($r) => (int) $r['c'], $studentsByShiftResult);
+
+$registrationTrendLabels = [];
+$registrationTrendData = [];
+$regByMonth = [];
+$regResult = $conn->query(
+    "SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS c
+     FROM students
+     WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+     GROUP BY ym"
+);
+if ($regResult) {
+    while ($row = $regResult->fetch_assoc()) {
+        $regByMonth[$row['ym']] = (int) $row['c'];
+    }
+}
+for ($i = 5; $i >= 0; $i--) {
+    $ym = date('Y-m', strtotime("-{$i} months"));
+    $registrationTrendLabels[] = date('M Y', strtotime($ym . '-01'));
+    $registrationTrendData[] = $regByMonth[$ym] ?? 0;
+}
+
+// ---------------------------------------------------------------------
 // Recent Student Registrations (last 10, across all faculties)
 // ---------------------------------------------------------------------
 $recentStudents = $conn->query(
-    "SELECT s.student_no, s.full_name, s.created_at, f.name AS faculty_name, d.name AS department_name
+    "SELECT s.student_no, s.full_name, s.created_at, f.name AS faculty_name, d.name AS department_name, u.photo_path
      FROM students s
      JOIN faculties f ON f.id = s.faculty_id
      JOIN departments d ON d.id = s.department_id
+     JOIN users u ON u.id = s.user_id
      ORDER BY s.created_at DESC, s.id DESC
      LIMIT 10"
 )->fetch_all(MYSQLI_ASSOC);
@@ -60,6 +111,16 @@ $recentStudents = $conn->query(
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        /* Fixed-height chart boxes, same convention as admin/dashboard.php's
+           own oversight charts (paired with Chart.js's maintainAspectRatio:
+           false below) so the three enrollment charts sit at a consistent
+           height instead of each growing to its own aspect ratio. */
+        .dash-chart-box {
+            position: relative;
+            height: 160px;
+        }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -120,6 +181,42 @@ $recentStudents = $conn->query(
                 </div>
             </div>
 
+            <!-- Enrollment Stats -->
+            <div class="row g-3 mb-4">
+                <div class="col-xl-4 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Students per Faculty</h6>
+                        <?php if (empty($studentsPerFacultyLabels)): ?>
+                            <p class="text-muted small mb-0">No faculties exist yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="studentsPerFacultyChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-4 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Students per Shift</h6>
+                        <?php if (empty($studentsByShiftLabels)): ?>
+                            <p class="text-muted small mb-0">No students registered yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="studentsByShiftChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-4 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Registrations (6mo)</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="registrationTrendChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="admas-card p-4">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Recent Student Registrations</h6>
@@ -153,7 +250,7 @@ $recentStudents = $conn->query(
                                 <?php foreach ($recentStudents as $s): ?>
                                     <tr>
                                         <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
+                                        <td><?php render_person_avatar_cell($s['photo_path'] ?? null, (string) $s['full_name'], (string) $s['student_no']); ?></td>
                                         <td><?= htmlspecialchars($s['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($s['department_name']) ?></td>
                                         <td><?= htmlspecialchars(date('M j, Y', strtotime((string) $s['created_at']))) ?></td>
@@ -168,5 +265,97 @@ $recentStudents = $conn->query(
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+        // Read the current theme's own colors so charts stay readable in both
+        // light and dark mode instead of baking in fixed light-mode hex values
+        // — same approach already used on admin/dashboard.php's own charts.
+        const cssVar = (name, fallback) => {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+            return v || fallback;
+        };
+        const chartSky = cssVar('--admas-sky', '#0ea5e9');
+        const chartTextMuted = cssVar('--admas-text-muted', '#64748b');
+        const chartGrid = cssVar('--admas-border', '#e2e8f0');
+        const chartSurface = cssVar('--admas-surface', '#ffffff');
+        const pieColors = ['#0ea5e9', '#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#14b8a6', '#a855f7', '#ef4444', '#84cc16', '#0891b2'];
+
+        <?php if (!empty($studentsPerFacultyLabels)): ?>
+        new Chart(document.getElementById('studentsPerFacultyChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?= json_encode($studentsPerFacultyLabels) ?>,
+                datasets: [{
+                    label: 'Students',
+                    data: <?= json_encode($studentsPerFacultyData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } },
+                    },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        <?php if (!empty($studentsByShiftLabels)): ?>
+        new Chart(document.getElementById('studentsByShiftChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?= json_encode($studentsByShiftLabels) ?>,
+                datasets: [{
+                    label: 'Students',
+                    data: <?= json_encode($studentsByShiftData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } },
+                    },
+                },
+            },
+        });
+        <?php endif; ?>
+
+        new Chart(document.getElementById('registrationTrendChart'), {
+            type: 'line',
+            data: {
+                labels: <?= json_encode($registrationTrendLabels) ?>,
+                datasets: [{
+                    label: 'Students Registered',
+                    data: <?= json_encode($registrationTrendData) ?>,
+                    borderColor: chartSky,
+                    backgroundColor: chartSky,
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: { ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
+                },
+            },
+        });
+    </script>
 </body>
 </html>

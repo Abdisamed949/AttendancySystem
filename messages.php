@@ -199,8 +199,8 @@ function chat_initials(string $fullName): string
                         </div>
                     <?php else: ?>
                         <div class="chat-panel-header">
-                            <a href="<?= htmlspecialchars(BASE_URL) ?>/messages.php" class="btn-icon d-md-none" title="Back">
-                                <i class="bi bi-arrow-left"></i>
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/messages.php" class="btn-icon-label d-md-none" title="Back">
+                                <i class="bi bi-arrow-left"></i> Back
                             </a>
                             <?php if (!empty($activeContact['photo_path'])): ?>
                                 <img class="chat-contact-photo" src="<?= htmlspecialchars(BASE_URL) ?>/uploads/profile_photos/<?= htmlspecialchars((string) $activeContact['photo_path']) ?>" alt="">

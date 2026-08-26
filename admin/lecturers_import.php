@@ -268,7 +268,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $staffNo = $row['staff_no'];
                 $username = generate_lecturer_username($conn, $row['full_name'], $staffNo);
-                $tempPassword = $staffNo;
+                $tempPassword = $username;
                 $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
                 $emailParam = $row['email'] !== '' ? $row['email'] : null;
 

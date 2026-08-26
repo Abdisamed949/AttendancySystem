@@ -16,13 +16,20 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['university_rector', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// University Rector is a supervisory, read-only Viewer everywhere. Dean
+// has full CRUD again within their own faculty (restored per explicit
+// request, after an earlier session's temporary Viewer conversion) — the
+// existing $role === 'dean' scoping below still narrows the list to
+// their own faculty only.
+$isReadOnly = $role === 'university_rector';
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -175,6 +182,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $fullName = trim((string) ($_POST['full_name'] ?? ''));
         $email = trim((string) ($_POST['email'] ?? ''));
         $departmentId = (int) ($_POST['department_id'] ?? 0);
+        $newPassword = (string) ($_POST['password'] ?? '');
+        $newPasswordConfirm = (string) ($_POST['password_confirm'] ?? '');
 
         $formMode = $action === 'update' ? 'edit' : 'create';
         $existingStaffNo = '';
@@ -204,6 +213,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Please enter a valid email address.';
         } elseif ($action === 'update' && $lecturerId <= 0) {
             $validationError = 'Invalid lecturer selected for editing.';
+        } elseif ($action === 'create' && $newPassword === '') {
+            $validationError = 'Please enter a password for this lecturer.';
+        } elseif ($action === 'create' && strlen($newPassword) < 8) {
+            $validationError = 'Password must be at least 8 characters.';
+        } elseif ($action === 'create' && $newPassword !== $newPasswordConfirm) {
+            $validationError = 'Password and confirmation do not match.';
         }
 
         if ($validationError === '') {
@@ -278,8 +293,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($action === 'create') {
                 $conn->begin_transaction();
                 try {
-                    $username = generate_lecturer_username($conn, $fullName, $staffNo);
-                    $tempPassword = $staffNo;
+                    // Username is now just the Full Name as typed (same
+                    // exact-name + collision-suffix scheme as Dean/Head of
+                    // Academic Affairs/Registration Office accounts), and
+                    // the password is what the admin typed above — no
+                    // longer derived from the Staff No.
+                    $username = generate_admin_username($conn, $fullName);
+                    $tempPassword = $newPassword;
                     $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
                     $insertUserStmt = $conn->prepare(
@@ -300,8 +320,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $conn->commit();
                     $_SESSION['flash_success'] = 'Lecturer added successfully. Staff No: ' . $staffNo
                         . ' — Username: ' . $username
-                        . ' — Temporary Password: ' . $tempPassword
-                        . ' — share these credentials with the lecturer now; the password will not be shown again.';
+                        . ' — share this with the lecturer along with the password you just set.';
                 } catch (Throwable $e) {
                     $conn->rollback();
                     $_SESSION['flash_error'] = 'Could not save the lecturer. Please try again.';
@@ -335,6 +354,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $lecturerId = (int) ($_POST['lecturer_id'] ?? 0);
         $result = delete_lecturer_row($conn, $lecturerId, $role, $deanFacultyId);
         if ($result['ok']) {
+            audit_log($conn, 'delete_lecturer', 'lecturer', $lecturerId, preg_replace('/ deleted\.?$/', '', $result['message']));
             $_SESSION['flash_success'] = 'Lecturer deleted successfully. Their login account has been deactivated.';
             redirect_to('admin/lecturers.php');
         } else {
@@ -365,6 +385,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
             }
             if ($deletedCount > 0) {
+                audit_log($conn, 'bulk_delete', 'lecturer', null, null, $summary);
                 $_SESSION['flash_success'] = $summary;
             } else {
                 $_SESSION['flash_error'] = $summary;
@@ -376,7 +397,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($role === 'dean') {
             $lecturerStmt = $conn->prepare(
-                'SELECT l.user_id, l.staff_no, u.username FROM lecturers l
+                'SELECT l.user_id, l.staff_no, l.full_name, u.username FROM lecturers l
                  JOIN users u ON u.id = l.user_id
                  JOIN departments d ON d.id = l.department_id
                  WHERE l.id = ? AND d.faculty_id = ?'
@@ -384,7 +405,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $lecturerStmt->bind_param('ii', $lecturerId, $deanFacultyId);
         } else {
             $lecturerStmt = $conn->prepare(
-                'SELECT l.user_id, l.staff_no, u.username FROM lecturers l JOIN users u ON u.id = l.user_id WHERE l.id = ?'
+                'SELECT l.user_id, l.staff_no, l.full_name, u.username FROM lecturers l JOIN users u ON u.id = l.user_id WHERE l.id = ?'
             );
             $lecturerStmt->bind_param('i', $lecturerId);
         }
@@ -395,16 +416,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$lecturerRow) {
             $errorMessage = 'Lecturer not found.';
         } else {
-            $newPassword = $lecturerRow['staff_no'];
+            // Normalizes the username to the current exact-Full-Name scheme
+            // (e.g. an account created under the old name+staff-no scheme
+            // converges onto it the moment it's reset, same fix already
+            // applied to students' own Reset Password) — but the password
+            // itself can't be manually re-typed from a one-click table
+            // action, so it falls back to a random generated one here, same
+            // as the Dean/Head of Academic Affairs/Registration Office
+            // Reset Password action.
+            $newUsername = generate_admin_username($conn, (string) $lecturerRow['full_name'], (int) $lecturerRow['user_id']);
+            $newPassword = generate_temp_password();
             $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
 
-            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?');
-            $updatePassStmt->bind_param('si', $newHash, $lecturerRow['user_id']);
+            $updatePassStmt = $conn->prepare('UPDATE users SET username = ?, password_hash = ?, must_change_password = 1 WHERE id = ?');
+            $updatePassStmt->bind_param('ssi', $newUsername, $newHash, $lecturerRow['user_id']);
             $updatePassStmt->execute();
             $updatePassStmt->close();
 
-            $_SESSION['flash_success'] = 'Password reset for ' . $lecturerRow['username']
-                . '. New temporary password: ' . $newPassword
+            audit_log($conn, 'reset_password', 'lecturer', $lecturerId, (string) $lecturerRow['staff_no']);
+            $_SESSION['flash_success'] = 'New username and password for ' . $lecturerRow['full_name'] . ' — Username: ' . $newUsername
+                . ' — Password: ' . $newPassword
                 . ' — share this with the lecturer now; it will not be shown again.';
             redirect_to('admin/lecturers.php');
         }
@@ -471,7 +502,7 @@ if ($role === 'dean') {
     $lecStmt = $conn->prepare(
         "SELECT l.id, l.staff_no, l.full_name, l.department_id,
                 d.name AS department_name, f.name AS faculty_name,
-                u.username, u.status AS user_status,
+                u.username, u.status AS user_status, u.photo_path,
                 (SELECT COUNT(DISTINCT co.course_id) FROM course_offerings co WHERE co.lecturer_id = l.id) AS course_count
          FROM lecturers l
          JOIN departments d ON d.id = l.department_id
@@ -495,7 +526,7 @@ if ($role === 'dean') {
     $lecturers = $conn->query(
         "SELECT l.id, l.staff_no, l.full_name, l.department_id,
                 d.name AS department_name, f.name AS faculty_name,
-                u.username, u.status AS user_status,
+                u.username, u.status AS user_status, u.photo_path,
                 (SELECT COUNT(DISTINCT co.course_id) FROM course_offerings co WHERE co.lecturer_id = l.id) AS course_count
          FROM lecturers l
          JOIN departments d ON d.id = l.department_id
@@ -668,7 +699,7 @@ foreach ($lecturerIds as $lid) {
                                                 </td>
                                                 <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($l['staff_no']) ?></span></td>
-                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($l['full_name']) ?></td>
+                                                <td><?php render_person_avatar_cell($l['photo_path'] ?? null, (string) $l['full_name'], (string) $l['staff_no']); ?></td>
                                                 <td><?= htmlspecialchars($l['department_name']) ?></td>
                                                 <td><?= htmlspecialchars($l['faculty_name']) ?></td>
                                                 <td><?= number_format((int) $l['course_count']) ?></td>
@@ -693,26 +724,26 @@ foreach ($lecturerIds as $lid) {
                                                             <i class="bi bi-eye"></i> View Profile
                                                         </a>
                                                     <?php else: ?>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon" title="Assign Courses">
-                                                        <i class="bi bi-journal-plus"></i>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php?lecturer_id=<?= (int) $l['id'] ?>" class="btn-icon-label" title="Assign Courses">
+                                                        <i class="bi bi-journal-plus"></i> Assign
                                                     </a>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php?edit=<?= (int) $l['id'] ?>" class="btn-icon" title="Edit">
-                                                        <i class="bi bi-pencil"></i>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php?edit=<?= (int) $l['id'] ?>" class="btn-icon-label" title="Edit">
+                                                        <i class="bi bi-pencil"></i> Edit
                                                     </a>
                                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" style="display:inline;"
                                                           onsubmit="return confirm('Reset this lecturer\'s password? A new temporary password will be generated.');">
                                                         <input type="hidden" name="action" value="reset_password">
                                                         <input type="hidden" name="lecturer_id" value="<?= (int) $l['id'] ?>">
-                                                        <button type="submit" class="btn-icon" title="Reset Password">
-                                                            <i class="bi bi-key"></i>
+                                                        <button type="submit" class="btn-icon-label" title="Reset Password">
+                                                            <i class="bi bi-key"></i> Reset
                                                         </button>
                                                     </form>
                                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/lecturers.php" style="display:inline;"
                                                           onsubmit="return confirm('Delete this lecturer? This cannot be undone.');">
                                                         <input type="hidden" name="action" value="delete">
                                                         <input type="hidden" name="lecturer_id" value="<?= (int) $l['id'] ?>">
-                                                        <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                            <i class="bi bi-trash"></i>
+                                                        <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                            <i class="bi bi-trash"></i> Delete
                                                         </button>
                                                     </form>
                                                     <?php endif; ?>
@@ -746,7 +777,7 @@ foreach ($lecturerIds as $lid) {
                                 <?php else: ?>
                                     <input type="text" class="form-control text-uppercase" id="lecturerStaffNoInput" name="staff_no" maxlength="20"
                                            value="<?= htmlspecialchars($formValues['staff_no']) ?>" required>
-                                    <div class="form-text">The lecturer's existing staff/employee number. This becomes their login username base and initial password.</div>
+                                    <div class="form-text">The lecturer's existing staff/employee number.</div>
                                 <?php endif; ?>
                             </div>
 
@@ -754,6 +785,9 @@ foreach ($lecturerIds as $lid) {
                                 <label for="lecturerFullNameInput" class="form-label">Full Name</label>
                                 <input type="text" class="form-control" id="lecturerFullNameInput" name="full_name" maxlength="150"
                                        value="<?= htmlspecialchars($formValues['full_name']) ?>" required>
+                                <?php if ($formMode === 'create'): ?>
+                                    <div class="form-text">This becomes the lecturer's login username, exactly as typed.</div>
+                                <?php endif; ?>
                             </div>
 
                             <div class="mb-3">
@@ -782,7 +816,25 @@ foreach ($lecturerIds as $lid) {
                             </div>
 
                             <?php if ($formMode === 'create'): ?>
-                                <div class="form-text mb-3">A username and temporary password will be generated automatically and shown once after saving.</div>
+                                <div class="mb-3">
+                                    <label for="lecturerPasswordInput" class="form-label">Password</label>
+                                    <div class="input-group">
+                                        <input type="password" class="form-control" id="lecturerPasswordInput" name="password" minlength="8" autocomplete="new-password" required>
+                                        <button class="btn btn-outline-secondary toggle-password" type="button" data-target="lecturerPasswordInput" aria-label="Show password">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                    </div>
+                                    <div class="form-text">At least 8 characters.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="lecturerPasswordConfirmInput" class="form-label">Confirm Password</label>
+                                    <div class="input-group">
+                                        <input type="password" class="form-control" id="lecturerPasswordConfirmInput" name="password_confirm" minlength="8" autocomplete="new-password" required>
+                                        <button class="btn btn-outline-secondary toggle-password" type="button" data-target="lecturerPasswordConfirmInput" aria-label="Show password">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                    </div>
+                                </div>
                             <?php endif; ?>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($departments) ? 'disabled' : '' ?>>
@@ -798,6 +850,7 @@ foreach ($lecturerIds as $lid) {
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/password-toggle.js"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
             if (document.getElementById('bulkDeleteLecturersBtn')) {

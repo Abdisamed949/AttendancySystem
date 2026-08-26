@@ -22,11 +22,13 @@ declare(strict_types=1);
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/attendance_helpers.php';
+require_once __DIR__ . '/includes/timetable_helpers.php';
 
 require_role(['university_rector', 'dean', 'head_academic']);
 
 $conn = db();
 $role = current_role();
+$currentUser = current_user();
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -75,8 +77,10 @@ if (!$lecturer) {
 
 /**
  * True if $facultyId is one this role may create/delete an offering in —
- * university_rector and head_academic may touch any faculty; dean only their
- * own. Used to gate both POST actions below.
+ * university_rector and head_academic may touch any faculty; dean has
+ * full CRUD again within their own faculty only (restored per explicit
+ * request, after an earlier session's temporary Viewer conversion). Used
+ * to gate both POST actions below.
  */
 function role_may_edit_faculty(string $role, int $deanFacultyId, int $facultyId): bool
 {
@@ -111,8 +115,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $courseId = (int) ($_POST['course_id'] ?? 0);
         $semesterId = (int) ($_POST['semester_id'] ?? 0);
         $shift = (string) ($_POST['shift'] ?? '');
+        $rosterDepartmentIdRaw = (int) ($_POST['roster_department_id'] ?? 0);
         $startDateRaw = trim((string) ($_POST['start_date'] ?? ''));
         $endDateRaw = trim((string) ($_POST['end_date'] ?? ''));
+        $dayOfWeekRaw = trim((string) ($_POST['day_of_week'] ?? ''));
+        $startTimeRaw = trim((string) ($_POST['start_time'] ?? ''));
+        $endTimeRaw = trim((string) ($_POST['end_time'] ?? ''));
+        $roomRaw = trim((string) ($_POST['room'] ?? ''));
 
         $courseStmt = $conn->prepare(
             'SELECT c.id, d.faculty_id FROM courses c JOIN departments d ON d.id = c.department_id WHERE c.id = ?'
@@ -125,23 +134,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $validationError = '';
         if (!$courseRow) {
             $validationError = 'Please select a valid course.';
-        } elseif (!role_may_edit_faculty($role, $deanFacultyId, (int) $courseRow['faculty_id'])) {
-            $validationError = 'You can only assign courses within your own faculty.';
         } elseif (!array_key_exists($shift, OFFERING_SHIFT_LABELS)) {
             $validationError = 'Please select a valid shift.';
         }
 
+        // Semester scoping: a Dean may only target their OWN faculty's
+        // semester; University Rector/Head of Academic Affairs may target
+        // ANY faculty's semester — when that differs from the course's own
+        // catalog faculty, this is a cross-faculty "guest" offering, the
+        // same concept admin/course_offerings.php already supports, and a
+        // Roster Department (from the semester's own faculty) is required
+        // so the correct students end up on this offering's roster.
         $semRow = null;
+        $isGuestOffering = false;
         if ($validationError === '') {
-            $semStmt = $conn->prepare('SELECT id, name, start_date, end_date FROM semesters WHERE id = ? AND faculty_id = ?');
-            $semStmt->bind_param('ii', $semesterId, $courseRow['faculty_id']);
+            if ($role === 'dean') {
+                $semStmt = $conn->prepare('SELECT id, name, faculty_id, start_date, end_date FROM semesters WHERE id = ? AND faculty_id = ?');
+                $semStmt->bind_param('ii', $semesterId, $deanFacultyId);
+            } else {
+                $semStmt = $conn->prepare('SELECT id, name, faculty_id, start_date, end_date FROM semesters WHERE id = ?');
+                $semStmt->bind_param('i', $semesterId);
+            }
             $semStmt->execute();
             $semRow = $semStmt->get_result()->fetch_assoc();
             $semStmt->close();
 
             if (!$semRow) {
-                $validationError = 'Please select a valid semester for that course\'s faculty.';
+                $validationError = $role === 'dean'
+                    ? 'Please select a valid semester from your own faculty.'
+                    : 'Please select a valid semester.';
+            } else {
+                $isGuestOffering = (int) $semRow['faculty_id'] !== (int) $courseRow['faculty_id'];
             }
+        }
+
+        // The real write boundary is the semester's own faculty (where the
+        // course_offerings row actually lives), not the course's catalog
+        // home faculty — matches admin/course_offerings.php's own reasoning.
+        if ($validationError === '' && !role_may_edit_faculty($role, $deanFacultyId, (int) $semRow['faculty_id'])) {
+            $validationError = 'You can only assign courses within your own faculty.';
+        }
+
+        $rosterDepartmentId = null;
+        if ($validationError === '' && $rosterDepartmentIdRaw > 0) {
+            $rdStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
+            $rdStmt->bind_param('ii', $rosterDepartmentIdRaw, $semRow['faculty_id']);
+            $rdStmt->execute();
+            $rdRow = $rdStmt->get_result()->fetch_assoc();
+            $rdStmt->close();
+            if (!$rdRow) {
+                $validationError = 'Roster Department must belong to the selected semester\'s own faculty.';
+            } else {
+                $rosterDepartmentId = $rosterDepartmentIdRaw;
+            }
+        } elseif ($validationError === '' && $isGuestOffering) {
+            $validationError = 'This course\'s catalog home is a different faculty — please select a Roster Department so the correct students are used for this offering.';
         }
 
         $startDate = null;
@@ -164,12 +211,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'End date must be on or after start date.';
         }
 
+        // Class Time Table — all optional; room is cosmetic only (no
+        // double-booking check by design, matching admin/course_offerings.php).
+        $dayOfWeek = null;
+        $startTime = null;
+        $endTime = null;
+        $room = null;
+        if ($validationError === '') {
+            if ($dayOfWeekRaw !== '' && !array_key_exists($dayOfWeekRaw, DAY_OF_WEEK_LABELS)) {
+                $validationError = 'Please select a valid day.';
+            } elseif (($startTimeRaw !== '') !== ($endTimeRaw !== '')) {
+                $validationError = 'Please provide both a start time and an end time, or leave both blank.';
+            } elseif ($startTimeRaw !== '' && $endTimeRaw !== '' && $startTimeRaw >= $endTimeRaw) {
+                $validationError = 'Class end time must be after the start time.';
+            } else {
+                $dayOfWeek = $dayOfWeekRaw !== '' ? $dayOfWeekRaw : null;
+                $startTime = $startTimeRaw !== '' ? $startTimeRaw : null;
+                $endTime = $endTimeRaw !== '' ? $endTimeRaw : null;
+                $room = $roomRaw !== '' ? mb_substr($roomRaw, 0, 50) : null;
+            }
+        }
+
         if ($validationError === '') {
             $upsertStmt = $conn->prepare(
-                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), start_date = VALUES(start_date), end_date = VALUES(end_date)'
+                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift, start_date, end_date, day_of_week, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), roster_department_id = VALUES(roster_department_id), start_date = VALUES(start_date), end_date = VALUES(end_date), day_of_week = VALUES(day_of_week), start_time = VALUES(start_time), end_time = VALUES(end_time), room = VALUES(room)'
             );
-            $upsertStmt->bind_param('iiisss', $courseId, $semesterId, $lecturerId, $shift, $startDate, $endDate);
+            $upsertStmt->bind_param('iiiisssssss', $courseId, $semesterId, $lecturerId, $rosterDepartmentId, $shift, $startDate, $endDate, $dayOfWeek, $startTime, $endTime, $room);
             $upsertStmt->execute();
             $upsertStmt->close();
 
@@ -181,11 +249,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'remove_offering') {
         $offeringId = (int) ($_POST['offering_id'] ?? 0);
 
+        // The offering's real faculty is the SEMESTER's own faculty (where
+        // it actually lives, which for a guest/cross-listed offering can
+        // differ from the course's own catalog department) — not the
+        // course's home department's faculty.
         $offStmt = $conn->prepare(
-            'SELECT co.id, d.faculty_id
+            'SELECT co.id, se.faculty_id
              FROM course_offerings co
-             JOIN courses c ON c.id = co.course_id
-             JOIN departments d ON d.id = c.department_id
+             JOIN semesters se ON se.id = co.semester_id
              WHERE co.id = ? AND co.lecturer_id = ?'
         );
         $offStmt->bind_param('ii', $offeringId, $lecturerId);
@@ -212,16 +283,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // "Everything this lecturer teaches" — every course_offerings row for
 // this lecturer, any faculty, most recent semester first.
 // ---------------------------------------------------------------------
+// "Faculty" here is the SEMESTER's own faculty — where this offering
+// actually lives — not the course's catalog home department's faculty.
+// The two differ for a cross-faculty "guest" offering, flagged below via
+// home_faculty_id vs offering_faculty_id.
 $teachingStmt = $conn->prepare(
-    'SELECT co.id AS offering_id, co.start_date, co.end_date, co.shift,
-            c.code, c.name AS course_name, d.faculty_id,
-            se.name AS semester_name, se.is_current, f.name AS faculty_name, ay.label AS academic_year_label
+    'SELECT co.id AS offering_id, co.start_date, co.end_date, co.shift, co.roster_department_id,
+            co.day_of_week, co.start_time, co.end_time, co.room,
+            c.code, c.name AS course_name, d.faculty_id AS home_faculty_id,
+            se.name AS semester_name, se.is_current, se.faculty_id AS offering_faculty_id,
+            of.name AS faculty_name, ay.label AS academic_year_label, rd.name AS roster_department_name
      FROM course_offerings co
      JOIN courses c ON c.id = co.course_id
      JOIN departments d ON d.id = c.department_id
-     JOIN faculties f ON f.id = d.faculty_id
      JOIN semesters se ON se.id = co.semester_id
+     JOIN faculties of ON of.id = se.faculty_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
+     LEFT JOIN departments rd ON rd.id = co.roster_department_id
      WHERE co.lecturer_id = ?
      ORDER BY se.start_date DESC, co.shift'
 );
@@ -342,6 +420,7 @@ foreach ($semesters as $sem) {
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($teaching as $t): ?>
+                                            <?php $isGuestRow = (int) $t['offering_faculty_id'] !== (int) $t['home_faculty_id']; ?>
                                             <tr>
                                                 <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($t['code'] . ' — ' . $t['course_name']) ?></td>
                                                 <td>
@@ -351,7 +430,15 @@ foreach ($semesters as $sem) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$t['shift']] ?? $t['shift']) ?></td>
-                                                <td><?= htmlspecialchars($t['faculty_name']) ?></td>
+                                                <td>
+                                                    <?= htmlspecialchars($t['faculty_name']) ?>
+                                                    <?php if ($isGuestRow): ?>
+                                                        <span class="badge-pill badge-warning" title="This course's catalog home is a different faculty">Guest</span>
+                                                    <?php endif; ?>
+                                                    <?php if ($t['roster_department_name']): ?>
+                                                        <div class="text-muted small">Roster: <?= htmlspecialchars($t['roster_department_name']) ?></div>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td><?= htmlspecialchars($t['academic_year_label']) ?></td>
                                                 <td>
                                                     <?php if ($t['start_date'] || $t['end_date']): ?>
@@ -359,16 +446,19 @@ foreach ($semesters as $sem) {
                                                     <?php else: ?>
                                                         <span class="text-muted fst-italic">Not set</span>
                                                     <?php endif; ?>
+                                                    <?php if ($t['day_of_week'] && $t['start_time'] && $t['end_time']): ?>
+                                                        <div class="text-muted small"><?= htmlspecialchars(DAY_OF_WEEK_LABELS[$t['day_of_week']] ?? $t['day_of_week']) ?>, <?= htmlspecialchars(format_timetable_time($t['start_time']) . ' - ' . format_timetable_time($t['end_time'])) ?><?= $t['room'] ? ' · ' . htmlspecialchars($t['room']) : '' ?></div>
+                                                    <?php endif; ?>
                                                 </td>
                                                 <td>
-                                                    <?php if (role_may_edit_faculty($role, $deanFacultyId, (int) $t['faculty_id'])): ?>
+                                                    <?php if (role_may_edit_faculty($role, $deanFacultyId, (int) $t['offering_faculty_id'])): ?>
                                                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/lecturer_courses.php"
                                                               onsubmit="return confirm('Remove this assignment?');">
                                                             <input type="hidden" name="action" value="remove_offering">
                                                             <input type="hidden" name="lecturer_id" value="<?= (int) $lecturerId ?>">
                                                             <input type="hidden" name="offering_id" value="<?= (int) $t['offering_id'] ?>">
-                                                            <button type="submit" class="btn-icon text-danger" title="Remove">
-                                                                <i class="bi bi-trash"></i>
+                                                            <button type="submit" class="btn-icon-label text-danger" title="Remove">
+                                                                <i class="bi bi-trash"></i> Remove
                                                             </button>
                                                         </form>
                                                     <?php else: ?>
@@ -425,12 +515,35 @@ foreach ($semesters as $sem) {
                                 </select>
                             </div>
 
+                            <?php if ($role !== 'dean'): ?>
+                            <div class="mb-3">
+                                <label class="form-label small mb-1">Offering Faculty</label>
+                                <select class="form-select form-select-sm" id="assignOfferingFacultySelect" onchange="admasUpdateAssignSemesters(this.value); admasUpdateAssignRosterVisibility();">
+                                    <option value="">Select faculty</option>
+                                    <?php foreach ($faculties as $f): ?>
+                                        <option value="<?= (int) $f['id'] ?>"><?= htmlspecialchars($f['name']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="form-text">Defaults to the course's own faculty. Change it to assign this lecturer into a different faculty's semester (cross-listing).</div>
+                            </div>
+                            <?php endif; ?>
+
                             <div class="mb-3">
                                 <label class="form-label small mb-1">Semester</label>
                                 <select class="form-select form-select-sm" name="semester_id" id="assignSemesterSelect">
                                     <option value="">Select faculty first</option>
                                 </select>
                             </div>
+
+                            <?php if ($role !== 'dean'): ?>
+                            <div class="mb-3 d-none" id="assignRosterDepartmentBlock">
+                                <label class="form-label small mb-1">Roster Department</label>
+                                <select class="form-select form-select-sm" name="roster_department_id" id="assignRosterDepartmentSelect">
+                                    <option value="">Select roster department</option>
+                                </select>
+                                <div class="form-text">Required for a cross-faculty offering — decides which department's students form this offering's roster.</div>
+                            </div>
+                            <?php endif; ?>
 
                             <div class="mb-3">
                                 <label class="form-label small mb-1">Shift</label>
@@ -452,6 +565,30 @@ foreach ($semesters as $sem) {
                                 </div>
                             </div>
                             <div class="form-text mb-3">Optional — this course's actual teaching period within the selected semester. End Date auto-fills 3 months after Start Date (same as a semester's 12 Xiiso sessions); you can still edit it by hand.</div>
+
+                            <div class="mb-3">
+                                <label class="form-label small mb-1">Class Time Table — Day</label>
+                                <select class="form-select form-select-sm" name="day_of_week">
+                                    <option value="">Not scheduled</option>
+                                    <?php foreach (DAY_OF_WEEK_LABELS as $dayValue => $dayLabel): ?>
+                                        <option value="<?= htmlspecialchars($dayValue) ?>"><?= htmlspecialchars($dayLabel) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="row g-2 mb-3">
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">Start Time</label>
+                                    <input type="time" class="form-control form-control-sm" name="start_time">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">End Time</label>
+                                    <input type="time" class="form-control form-control-sm" name="end_time">
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label small mb-1">Room <span class="text-muted small">(optional)</span></label>
+                                <input type="text" class="form-control form-control-sm" name="room" maxlength="50" placeholder="e.g. Room 2">
+                            </div>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-plus-lg"></i> Assign
@@ -485,7 +622,52 @@ foreach ($semesters as $sem) {
                 deptSelect.appendChild(opt);
             });
             admasUpdateAssignCourses('');
-            admasUpdateAssignSemesters(facultyId);
+
+            // Offering Faculty defaults to the course's own faculty (still
+            // independently changeable afterward for cross-listing).
+            const offeringFacultySelect = document.getElementById('assignOfferingFacultySelect');
+            if (offeringFacultySelect) {
+                offeringFacultySelect.value = facultyId;
+                admasUpdateAssignSemesters(facultyId);
+                admasUpdateAssignRosterVisibility();
+            } else {
+                admasUpdateAssignSemesters(facultyId);
+            }
+        }
+
+        function admasUpdateAssignRosterVisibility() {
+            const rosterBlock = document.getElementById('assignRosterDepartmentBlock');
+            const rosterSelect = document.getElementById('assignRosterDepartmentSelect');
+            const facultySelect = document.getElementById('assignFacultySelect');
+            const offeringFacultySelect = document.getElementById('assignOfferingFacultySelect');
+            if (!rosterBlock || !rosterSelect || !facultySelect || !offeringFacultySelect) {
+                return;
+            }
+
+            const homeFacultyId = facultySelect.value;
+            const offeringFacultyId = offeringFacultySelect.value;
+            const isGuest = offeringFacultyId !== '' && offeringFacultyId !== homeFacultyId;
+
+            if (isGuest) {
+                rosterBlock.classList.remove('d-none');
+                const depts = departmentsByFacultyId[offeringFacultyId] || [];
+                const priorValue = rosterSelect.value;
+                rosterSelect.innerHTML = '';
+                const blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = depts.length ? 'Select roster department' : 'No departments in this faculty yet';
+                rosterSelect.appendChild(blank);
+                depts.forEach((d) => {
+                    const opt = document.createElement('option');
+                    opt.value = String(d.id);
+                    opt.textContent = d.name;
+                    rosterSelect.appendChild(opt);
+                });
+                rosterSelect.value = priorValue;
+            } else {
+                rosterBlock.classList.add('d-none');
+                rosterSelect.value = '';
+            }
         }
 
         function admasUpdateAssignCourses(departmentId) {
@@ -519,14 +701,19 @@ foreach ($semesters as $sem) {
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            const hiddenFaculty = document.getElementById('assignFacultyHidden');
-            if (hiddenFaculty) {
-                admasUpdateAssignDepartments(hiddenFaculty.value);
-                document.getElementById('assignDepartmentSelect').addEventListener('change', (e) => admasUpdateAssignCourses(e.target.value));
-            } else {
-                document.getElementById('assignDepartmentSelect').addEventListener('change', (e) => admasUpdateAssignCourses(e.target.value));
+            // The whole "Assign to a New Course" form (and every element
+            // below) only exists in the DOM for non-Dean roles — Dean gets
+            // a read-only teaching list with no form at all, so every
+            // lookup here must be null-safe.
+            const assignDepartmentSelect = document.getElementById('assignDepartmentSelect');
+            if (assignDepartmentSelect) {
+                const hiddenFaculty = document.getElementById('assignFacultyHidden');
+                if (hiddenFaculty) {
+                    admasUpdateAssignDepartments(hiddenFaculty.value);
+                }
+                assignDepartmentSelect.addEventListener('change', (e) => admasUpdateAssignCourses(e.target.value));
+                admasWireOfferingDateAutoFill('assignStartDate', 'assignEndDate');
             }
-            admasWireOfferingDateAutoFill('assignStartDate', 'assignEndDate');
         });
     </script>
 </body>

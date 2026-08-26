@@ -10,6 +10,9 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/course_document_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/university_logo.php';
 
 require_role(['lecturer']);
 
@@ -85,7 +88,7 @@ $sessionsStmt->close();
 $myCoursesStmt2 = $conn->prepare(
     "SELECT c.id, c.code, c.name, offf.name AS faculty_name, COALESCE(rd.name, d.name) AS department_name,
             se.name AS semester_name, ay.label AS academic_year_label, se.id AS semester_id,
-            co.shift AS offering_shift,
+            co.shift AS offering_shift, co.day_of_week, co.start_time, co.end_time, co.room,
             MAX(a.attendance_date) AS last_session
      FROM courses c
      JOIN departments d ON d.id = c.department_id
@@ -94,13 +97,17 @@ $myCoursesStmt2 = $conn->prepare(
      LEFT JOIN departments rd ON rd.id = co.roster_department_id
      JOIN academic_years ay ON ay.id = se.academic_year_id
      LEFT JOIN attendance a ON a.course_id = c.id
-     GROUP BY c.id, c.code, c.name, offf.name, d.name, rd.name, se.name, ay.label, se.id, co.shift
+     GROUP BY c.id, c.code, c.name, offf.name, d.name, rd.name, se.name, ay.label, se.id, co.shift, co.day_of_week, co.start_time, co.end_time, co.room
      ORDER BY c.code"
 );
 $myCoursesStmt2->bind_param('i', $lecturerRecordId);
 $myCoursesStmt2->execute();
 $myCourses = $myCoursesStmt2->get_result()->fetch_all(MYSQLI_ASSOC);
 $myCoursesStmt2->close();
+
+$myTimetableGrid = build_class_timetable_grid($myCourses);
+$dashboardLogoRelativePath = get_university_logo_relative_path($settings);
+$printDayOrder = array_values(array_diff(DAY_OF_WEEK_DISPLAY_ORDER, ['friday']));
 
 // Real roster size per course — enrollment-then-department-fallback (same
 // resolution the Xiiso Grid itself uses), not a bare course_enrollments
@@ -118,6 +125,14 @@ foreach ($myCourses as &$courseRow) {
 }
 unset($courseRow);
 $totalStudentsCount = count(array_unique($allRosterStudentIds));
+
+// Uploaded Documents — every course_documents row this lecturer has
+// uploaded, across every course they manage documents for.
+$uploadedDocumentsStmt = $conn->prepare('SELECT COUNT(*) AS c FROM course_documents WHERE uploaded_by_lecturer_id = ?');
+$uploadedDocumentsStmt->bind_param('i', $lecturerRecordId);
+$uploadedDocumentsStmt->execute();
+$uploadedDocumentsCount = (int) ($uploadedDocumentsStmt->get_result()->fetch_assoc()['c'] ?? 0);
+$uploadedDocumentsStmt->close();
 
 // Attendance % per course (this course's own current-semester sessions,
 // any recorder — not just this lecturer's own clicks, since a cross-listed
@@ -207,13 +222,17 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                 <i class="bi bi-shield-check"></i>
                 Access scope: Your assigned courses only
             </div>
+            <div class="semester-scope-banner" title="You may hold offerings across more than one faculty/semester at once — each course row below shows its own.">
+                <i class="bi bi-calendar-week"></i>
+                Each course below shows its own current Semester — see the Semester column
+            </div>
 
             <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
-            <p class="text-muted mb-4">Here's a summary of your assigned courses.</p>
+            <p class="text-muted mb-2">Here's a summary of your assigned courses.</p>
 
             <!-- KPI Cards -->
-            <div class="row g-3 mb-4">
-                <div class="col-sm-6 col-xl-4">
+            <div class="row g-2 mb-3">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="admas-card kpi-card accent-sky h-100">
                         <div class="kpi-icon bg-sky"><i class="bi bi-journal-bookmark-fill"></i></div>
                         <div>
@@ -223,7 +242,7 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
-                <div class="col-sm-6 col-xl-4">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer/courses.php" class="admas-card kpi-card accent-navy h-100">
                         <div class="kpi-icon bg-navy"><i class="bi bi-people-fill"></i></div>
                         <div>
@@ -233,7 +252,7 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
-                <div class="col-sm-6 col-xl-4">
+                <div class="col-sm-6 col-xl-3">
                     <a href="<?= htmlspecialchars(BASE_URL) ?>/reports.php" class="admas-card kpi-card accent-green h-100">
                         <div class="kpi-icon bg-green"><i class="bi bi-calendar2-check-fill"></i></div>
                         <div>
@@ -243,22 +262,32 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                         <i class="bi bi-chevron-right kpi-arrow"></i>
                     </a>
                 </div>
+                <div class="col-sm-6 col-xl-3">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer/course_documents.php" class="admas-card kpi-card accent-amber h-100">
+                        <div class="kpi-icon bg-amber"><i class="bi bi-folder2-open"></i></div>
+                        <div>
+                            <div class="kpi-value"><?= number_format($uploadedDocumentsCount) ?></div>
+                            <div class="kpi-label">Uploaded Documents</div>
+                        </div>
+                        <i class="bi bi-chevron-right kpi-arrow"></i>
+                    </a>
+                </div>
             </div>
 
-            <div class="row g-3 mb-4">
+            <div class="row g-2 mb-3 dashboard-quad">
                 <?php if (!empty($courseChartLabels)): ?>
-                <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Attendance by Course</h6>
-                        <canvas id="courseAttendanceChart" height="220"></canvas>
+                <div class="col-lg-6">
+                    <div class="admas-card p-2 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">My Attendance by Course</h6>
+                        <canvas id="courseAttendanceChart" height="95"></canvas>
                     </div>
                 </div>
                 <?php endif; ?>
-                <div class="col-xl-<?= !empty($courseChartLabels) ? '8' : '12' ?>">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">My Assigned Courses</h6>
+                <div class="col-lg-<?= !empty($courseChartLabels) ? '6' : '12' ?>">
+                    <div class="admas-card p-2 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">My Assigned Courses</h6>
                         <div class="table-responsive">
-                            <table class="table admas-table align-middle">
+                            <table class="table admas-table table-sm align-middle">
                                 <thead>
                                     <tr>
                                         <th>Course</th>
@@ -329,52 +358,76 @@ usort($pendingSessions, static fn ($a, $b) => strcmp($a['session_date'], $b['ses
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <?php if (!empty($pendingSessions)): ?>
-                <div class="admas-card p-4 mb-4">
-                    <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
-                        <i class="bi bi-exclamation-triangle-fill text-warning"></i> Pending Xiiso Sessions
-                    </h6>
-                    <p class="text-muted small mb-3">These sessions have already happened but attendance hasn't been marked for every student yet.</p>
-                    <div class="table-responsive">
-                        <table class="table admas-table align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th>Course</th>
-                                    <th>Xiiso</th>
-                                    <th>Date</th>
-                                    <th>Marked</th>
-                                    <th></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($pendingSessions as $p): ?>
-                                    <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($p['course_label']) ?></td>
-                                        <td><?= htmlspecialchars($p['session_label']) ?></td>
-                                        <td><?= htmlspecialchars(date('M j, Y', strtotime($p['session_date']))) ?></td>
-                                        <td>
-                                            <span class="badge-pill badge-warning"><?= $p['marked_count'] ?> / <?= $p['enrolled_count'] ?></span>
-                                        </td>
-                                        <?php
-                                        $pendingUrlParams = ['course_id' => $p['course_id'], 'semester_id' => $p['semester_id']];
-                                        if ($p['offering_shift'] !== null) {
-                                            $pendingUrlParams['shift'] = $p['offering_shift'];
-                                        }
-                                        ?>
-                                        <td>
-                                            <a href="<?= htmlspecialchars(BASE_URL . '/attendance.php?' . http_build_query($pendingUrlParams)) ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-calendar2-check"></i> Mark Now
-                                            </a>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
+                <div class="col-lg-<?= !empty($pendingSessions) ? '6' : '12' ?>">
+                    <div class="admas-card p-2 h-100 timetable-print-card timetable-print-compact">
+                        <div class="timetable-print-header">
+                            <img src="<?= htmlspecialchars(BASE_URL . '/' . $dashboardLogoRelativePath) ?>" alt="" class="timetable-print-logo">
+                            <div class="timetable-print-header-text">
+                                <div class="timetable-print-university"><?= htmlspecialchars(mb_strtoupper((string) ($settings['university_name'] ?? 'ADMAS University'))) ?></div>
+                                <div class="timetable-print-faculty"><?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></div>
+                            </div>
+                        </div>
+                        <div class="timetable-print-meta">
+                            <span class="timetable-print-title">Class Time Table</span>
+                        </div>
+                        <?php if (empty($myTimetableGrid['time_slots'])): ?>
+                            <p class="text-muted small mb-0 py-2">No scheduled class times have been set for your courses yet.</p>
+                        <?php else: ?>
+                            <div class="table-responsive">
+                                <?php render_class_timetable_grid_table($myTimetableGrid, $printDayOrder, 'name', 'timetable-print-table'); ?>
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
-            <?php endif; ?>
+
+                <?php if (!empty($pendingSessions)): ?>
+                <div class="col-lg-6">
+                    <div class="admas-card p-2 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">
+                            <i class="bi bi-exclamation-triangle-fill text-warning"></i> Pending Xiiso Sessions
+                        </h6>
+                        <p class="text-muted small mb-2">These sessions have already happened but attendance hasn't been marked for every student yet.</p>
+                        <div class="table-responsive">
+                            <table class="table admas-table table-sm align-middle mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>Course</th>
+                                        <th>Xiiso</th>
+                                        <th>Date</th>
+                                        <th>Marked</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($pendingSessions as $p): ?>
+                                        <tr>
+                                            <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($p['course_label']) ?></td>
+                                            <td><?= htmlspecialchars($p['session_label']) ?></td>
+                                            <td><?= htmlspecialchars(date('M j, Y', strtotime($p['session_date']))) ?></td>
+                                            <td>
+                                                <span class="badge-pill badge-warning"><?= $p['marked_count'] ?> / <?= $p['enrolled_count'] ?></span>
+                                            </td>
+                                            <?php
+                                            $pendingUrlParams = ['course_id' => $p['course_id'], 'semester_id' => $p['semester_id']];
+                                            if ($p['offering_shift'] !== null) {
+                                                $pendingUrlParams['shift'] = $p['offering_shift'];
+                                            }
+                                            ?>
+                                            <td>
+                                                <a href="<?= htmlspecialchars(BASE_URL . '/attendance.php?' . http_build_query($pendingUrlParams)) ?>" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                                    <i class="bi bi-calendar2-check"></i> Mark Now
+                                                </a>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
 

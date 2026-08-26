@@ -12,13 +12,19 @@ declare(strict_types=1);
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
 require_once __DIR__ . '/includes/semester_helpers.php';
+require_once __DIR__ . '/includes/audit_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// University Rector is a supervisory, read-only Viewer everywhere. Dean
+// has full CRUD again within their own faculty (restored per explicit
+// request, after an earlier session's temporary Viewer conversion) — the
+// existing $role === 'dean' scoping throughout this file still narrows
+// everything to their own faculty only.
+$isReadOnly = $role === 'university_rector';
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -331,9 +337,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 generate_sessions_for_semester($conn, $newSemesterId);
 
                 $conn->commit();
-                $_SESSION['flash_success'] = $startDate !== null
+
+                // Closes the gap where "Semester N-1" already ended before
+                // "Semester N" existed to promote its students into — see
+                // the matching hook on the End-semester actions below.
+                $promotionFromPrevious = promote_students_from_previous_semester($conn, $newSemesterId);
+
+                $flashMsg = $startDate !== null
                     ? '"' . $name . '" created (' . $startDate . ' to ' . $endDate . ') with all 12 Xiiso dates filled in automatically.'
                     : '"' . $name . '" created with all 12 Xiiso sessions — set its status and Xiiso dates below.';
+                if ($promotionFromPrevious['promoted'] > 0) {
+                    $flashMsg .= ' ' . $promotionFromPrevious['promoted'] . ' student(s) from "' . $promotionFromPrevious['source_name'] . '" (already ended) were automatically promoted into this semester.';
+                }
+                $_SESSION['flash_success'] = $flashMsg;
                 redirect_to('semesters.php?semester_id=' . $newSemesterId);
             } catch (Throwable $e) {
                 $conn->rollback();
@@ -554,7 +570,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect_to('semesters.php?semester_id=' . $semesterId);
         }
 
-        $semStmt = $conn->prepare('SELECT name FROM semesters WHERE id = ?');
+        $semStmt = $conn->prepare('SELECT name, status FROM semesters WHERE id = ?');
         $semStmt->bind_param('i', $semesterId);
         $semStmt->execute();
         $semRow = $semStmt->get_result()->fetch_assoc();
@@ -563,6 +579,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$semRow) {
             $_SESSION['flash_error'] = 'Selected semester does not exist.';
         } else {
+            $wasEnded = $semRow['status'] === 'ended';
             $isCurrent = $newStatus === 'current' ? 1 : 0;
             $updateStmt = $conn->prepare('UPDATE semesters SET status = ?, is_current = ? WHERE id = ?');
             $updateStmt->bind_param('sii', $newStatus, $isCurrent, $semesterId);
@@ -570,7 +587,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $updateStmt->close();
 
             $statusLabel = ['waiting' => 'Waiting', 'current' => 'Current', 'ended' => 'Ended'][$newStatus];
-            $_SESSION['flash_success'] = '"' . $semRow['name'] . '" set to ' . $statusLabel . '.';
+            $flashMsg = '"' . $semRow['name'] . '" set to ' . $statusLabel . '.';
+
+            // Auto-promote students into "Semester N+1" the moment this
+            // semester genuinely transitions INTO Ended (never re-run on a
+            // redundant re-click of an already-ended semester).
+            if ($newStatus === 'ended' && !$wasEnded) {
+                $promotion = promote_students_to_next_semester($conn, $semesterId);
+                if ($promotion['promoted'] > 0) {
+                    $flashMsg .= ' ' . $promotion['promoted'] . ' student(s) automatically promoted to "' . $promotion['target_name'] . '".';
+                } elseif ($promotion['reason'] === 'no_target' && $promotion['pending'] > 0) {
+                    $flashMsg .= ' ' . $promotion['pending'] . ' student(s) are waiting to be promoted to "' . $promotion['target_name'] . '" — create that semester and they will be promoted automatically.';
+                }
+            }
+            $_SESSION['flash_success'] = $flashMsg;
         }
         redirect_to('semesters.php?semester_id=' . $semesterId);
     } elseif ($action === 'end_all_current') {
@@ -590,6 +620,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $bulkTypes = 'i';
         }
 
+        // Captured before the UPDATE so each one can be run through
+        // promote_students_to_next_semester() below — the bulk UPDATE
+        // itself doesn't return which rows it touched.
+        $bulkIdsStmt = $conn->prepare("SELECT id FROM semesters WHERE {$bulkWhere}");
+        if ($bulkTypes !== '') {
+            $bulkIdsStmt->bind_param($bulkTypes, ...$bulkParams);
+        }
+        $bulkIdsStmt->execute();
+        $bulkEndingIds = array_map(static fn ($row) => (int) $row['id'], $bulkIdsStmt->get_result()->fetch_all(MYSQLI_ASSOC));
+        $bulkIdsStmt->close();
+
         $bulkUpdStmt = $conn->prepare("UPDATE semesters SET status = 'ended', is_current = 0 WHERE {$bulkWhere}");
         if ($bulkTypes !== '') {
             $bulkUpdStmt->bind_param($bulkTypes, ...$bulkParams);
@@ -598,9 +639,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $bulkAffected = $bulkUpdStmt->affected_rows;
         $bulkUpdStmt->close();
 
-        $_SESSION['flash_success'] = $bulkAffected > 0
+        $bulkTotalPromoted = 0;
+        $bulkPendingNotes = [];
+        foreach ($bulkEndingIds as $bulkEndedId) {
+            $promotion = promote_students_to_next_semester($conn, $bulkEndedId);
+            $bulkTotalPromoted += $promotion['promoted'];
+            if ($promotion['reason'] === 'no_target' && $promotion['pending'] > 0) {
+                $bulkPendingNotes[] = $promotion['pending'] . ' waiting for "' . $promotion['target_name'] . '"';
+            }
+        }
+
+        $bulkFlashMsg = $bulkAffected > 0
             ? $bulkAffected . ' current semester' . ($bulkAffected === 1 ? '' : 's') . ' ended.'
             : 'No current semesters to end.';
+        if ($bulkTotalPromoted > 0) {
+            $bulkFlashMsg .= ' ' . $bulkTotalPromoted . ' student(s) automatically promoted to their next semester.';
+        }
+        if ($bulkPendingNotes !== []) {
+            $bulkFlashMsg .= ' Some students are waiting on a not-yet-created next semester (' . implode(', ', $bulkPendingNotes) . ') — create it and they will be promoted automatically.';
+        }
+        if ($bulkAffected > 0) {
+            audit_log($conn, 'bulk_delete', 'semester', null, null, 'end_all_current: ' . $bulkFlashMsg);
+        }
+        $_SESSION['flash_success'] = $bulkFlashMsg;
         redirect_to('semesters.php');
     } elseif ($action === 'toggle_picker_visibility') {
         // Purely cosmetic — hides this semester from student/courses.php's
@@ -705,6 +766,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
             }
             if ($deletedCount > 0) {
+                audit_log($conn, 'bulk_delete', 'session', null, null, $summary);
                 $_SESSION['flash_success'] = $summary;
             } else {
                 $_SESSION['flash_error'] = $summary;
@@ -721,6 +783,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = delete_semester_row($conn, $semesterId, $role, $deanFacultyId);
 
         if ($result['ok']) {
+            audit_log($conn, 'delete_semester', 'semester', $semesterId, preg_replace('/ deleted\.?$/', '', $result['message']));
             $_SESSION['flash_success'] = $result['message'];
         } else {
             $_SESSION['flash_error'] = $result['message'];
@@ -1034,17 +1097,17 @@ if ($editMode && $_SERVER['REQUEST_METHOD'] !== 'POST' && $selectedSemester !== 
                                                 <?php if (!$isReadOnly && $role === 'dean'): ?>
                                                     <td class="text-end">
                                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/semesters.php?semester_id=<?= (int) $s['id'] ?>&edit=1"
-                                                           class="btn-icon" title="Edit semester" aria-label="Edit semester"
+                                                           class="btn-icon-label" title="Edit semester" aria-label="Edit semester"
                                                            onclick="event.stopPropagation();">
-                                                            <i class="bi bi-pencil"></i>
+                                                            <i class="bi bi-pencil"></i> Edit
                                                         </a>
                                                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/semesters.php" class="d-inline"
                                                               onclick="event.stopPropagation();"
                                                               onsubmit="event.stopPropagation(); return confirm('Delete this semester? This cannot be undone.');">
                                                             <input type="hidden" name="action" value="delete_semester">
                                                             <input type="hidden" name="semester_id" value="<?= (int) $s['id'] ?>">
-                                                            <button type="submit" class="btn-icon text-danger" title="Delete semester" aria-label="Delete semester">
-                                                                <i class="bi bi-trash"></i>
+                                                            <button type="submit" class="btn-icon-label text-danger" title="Delete semester" aria-label="Delete semester">
+                                                                <i class="bi bi-trash"></i> Delete
                                                             </button>
                                                         </form>
                                                     </td>

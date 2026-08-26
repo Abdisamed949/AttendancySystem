@@ -24,7 +24,16 @@ require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+$currentUser = current_user();
+// This page itself has no write action (pure catalog search) — these two
+// flags only drive the per-row link labels/destinations, matching
+// whatever the two linked pages (Manage Offerings, Enroll Students)
+// actually allow for this role. Dean has full Course/Offerings CRUD
+// again within their own faculty; Enroll Students stays a separate,
+// still read-only-for-Dean surface (real student data, not schedule
+// metadata).
+$isReadOnly = $role === 'university_rector';
+$enrollmentsReadOnly = in_array($role, ['university_rector', 'dean'], true);
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -82,6 +91,19 @@ if ($searchTerm !== '') {
 $coursesStmt->execute();
 $courses = $coursesStmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $coursesStmt->close();
+
+// Course codes are only unique WITHIN one department (schema:
+// uq_course_code_per_department) — the same code (e.g. "IT101") can
+// legitimately exist as several unrelated `courses` rows in different
+// departments. That's invisible in a flat code/name search unless flagged:
+// an admin cross-listing "the IT101 course" could otherwise pick the wrong
+// row and silently split what was meant to be one shared course into two
+// disconnected rosters/attendance histories. Counted here so the table can
+// warn on every row sharing a code with another result.
+$codeOccurrences = [];
+foreach ($courses as $c) {
+    $codeOccurrences[mb_strtoupper($c['code'])] = ($codeOccurrences[mb_strtoupper($c['code'])] ?? 0) + 1;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -150,9 +172,19 @@ $coursesStmt->close();
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($courses as $c): ?>
-                                    <?php $isOwnFaculty = $role === 'dean' && (int) $c['faculty_id'] === $deanFacultyId; ?>
+                                    <?php
+                                    $isOwnFaculty = $role === 'dean' && (int) $c['faculty_id'] === $deanFacultyId;
+                                    $isDuplicateCode = ($codeOccurrences[mb_strtoupper($c['code'])] ?? 0) > 1;
+                                    ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($c['code']) ?></td>
+                                        <td class="fw-semibold" style="color: var(--admas-text);">
+                                            <?= htmlspecialchars($c['code']) ?>
+                                            <?php if ($isDuplicateCode): ?>
+                                                <span class="badge-pill badge-warning" title="This code also exists as a separate course in another department — double-check Home Department/Faculty before adding an offering, so you don't cross-list the wrong one.">
+                                                    <i class="bi bi-exclamation-triangle-fill"></i> Shared code
+                                                </span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td><?= htmlspecialchars($c['name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
                                         <td>
@@ -167,7 +199,7 @@ $coursesStmt->close();
                                                 <i class="bi bi-signpost-2"></i> <?= $isReadOnly ? 'View Offerings' : 'Add Offering' ?>
                                             </a>
                                             <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                                <i class="bi bi-person-check"></i> <?= $isReadOnly ? 'View Enrollment' : 'Enroll Students' ?>
+                                                <i class="bi bi-person-check"></i> <?= $enrollmentsReadOnly ? 'View Enrollment' : 'Enroll Students' ?>
                                             </a>
                                         </td>
                                     </tr>

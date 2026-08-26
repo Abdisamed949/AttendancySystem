@@ -17,7 +17,23 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/nav_items.php';
+require_once __DIR__ . '/includes/timetable_helpers.php';
+require_once __DIR__ . '/includes/semester_helpers.php';
+require_once __DIR__ . '/includes/avatar_helpers.php';
 require_once __DIR__ . '/vendor/autoload.php';
+
+/**
+ * "8:00 AM - 9:30 AM" from the course_offerings row's own scheduled
+ * start/end time (the Class Time Table's own values), or "—" when the
+ * offering never had a Day/Time slot set at all.
+ */
+function checkin_scheduled_time_label(array $row): string
+{
+    if (empty($row['scheduled_start_time']) || empty($row['scheduled_end_time'])) {
+        return '—';
+    }
+    return format_timetable_time($row['scheduled_start_time']) . ' - ' . format_timetable_time($row['scheduled_end_time']);
+}
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
@@ -27,6 +43,7 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 
 $conn = db();
 $role = current_role();
+$currentUser = current_user();
 
 $settings = [];
 $settingsResult = $conn->query('SELECT `key`, `value` FROM settings');
@@ -57,15 +74,16 @@ if ($role === 'dean') {
 // ---------------------------------------------------------------------
 if ($role === 'dean') {
     $lecOptStmt = $conn->prepare(
-        'SELECT l.id, l.full_name FROM lecturers l
+        'SELECT l.id, l.full_name, u.photo_path FROM lecturers l
          JOIN departments d ON d.id = l.department_id
+         JOIN users u ON u.id = l.user_id
          WHERE d.faculty_id = ?
          ORDER BY l.full_name'
     );
     $lecOptStmt->bind_param('i', $deanFacultyId);
     $lecOptStmt->execute();
 } else {
-    $lecOptStmt = $conn->prepare('SELECT id, full_name FROM lecturers ORDER BY full_name');
+    $lecOptStmt = $conn->prepare('SELECT l.id, l.full_name, u.photo_path FROM lecturers l JOIN users u ON u.id = l.user_id ORDER BY l.full_name');
     $lecOptStmt->execute();
 }
 $lecturerOptions = $lecOptStmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -74,6 +92,46 @@ $lecOptStmt->close();
 $filterLecturerId = (int) ($_GET['lecturer_id'] ?? 0);
 $filterDateFrom = trim((string) ($_GET['date_from'] ?? ''));
 $filterDateTo = trim((string) ($_GET['date_to'] ?? ''));
+
+// ---------------------------------------------------------------------
+// Accountability summary — Total Xiiso Check-Ins per Lecturer, so Dean/
+// Head of Academic Affairs/University Rector can see at a glance who is
+// (and isn't) actually showing up, not just browse a raw timestamp log.
+// Uses the exact same lecturer_checkin_eligible_sessions() a lecturer's
+// own Check-In page totals itself from (includes/semester_helpers.php),
+// so the two views can never disagree on what "N of M sessions" means.
+// Scoped to the same $lecturerOptions list already built above (Dean's
+// own faculty, or every lecturer for the other two roles) — a lecturer
+// with zero current-semester offerings (nothing to be accountable for
+// yet) is skipped rather than shown as a confusing 0/0 row.
+// ---------------------------------------------------------------------
+$lecturerAccountability = [];
+foreach ($lecturerOptions as $lecOpt) {
+    if ($filterLecturerId > 0 && (int) $lecOpt['id'] !== $filterLecturerId) {
+        continue;
+    }
+    $eligible = lecturer_checkin_eligible_sessions($conn, (int) $lecOpt['id']);
+    if (empty($eligible)) {
+        continue;
+    }
+    $checkedIn = count(array_filter($eligible, static fn ($r) => $r['checkin'] !== null));
+    $total = count($eligible);
+    $lecturerAccountability[] = [
+        'lecturer_id' => (int) $lecOpt['id'],
+        'lecturer_name' => (string) $lecOpt['full_name'],
+        'photo_path' => $lecOpt['photo_path'] ?? null,
+        'total' => $total,
+        'checked_in' => $checkedIn,
+        'pct' => $total > 0 ? round(100 * $checkedIn / $total, 1) : 0.0,
+    ];
+}
+usort($lecturerAccountability, static fn ($a, $b) => $a['pct'] <=> $b['pct']);
+
+// When one specific lecturer is selected, also show their own per-course
+// breakdown (the same shape lecturer/checkin.php itself shows them).
+$selectedLecturerCourseSummary = $filterLecturerId > 0
+    ? lecturer_checkin_course_summary($conn, $filterLecturerId)
+    : [];
 
 // ---------------------------------------------------------------------
 // Records — Dean's own-faculty scoping is enforced here via the same
@@ -109,17 +167,21 @@ if ($filterDateTo !== '') {
 $whereSql = empty($conditions) ? '1 = 1' : implode(' AND ', $conditions);
 
 $sql = "SELECT lc.id, lc.check_in_at, lc.check_out_at,
-               l.full_name AS lecturer_name, l.staff_no,
+               l.full_name AS lecturer_name, l.staff_no, u.photo_path AS lecturer_photo_path,
                c.code AS course_code, c.name AS course_name,
                sess.session_number, sess.type AS session_type,
-               f.name AS faculty_name
+               f.name AS faculty_name,
+               MIN(co.start_time) AS scheduled_start_time, MIN(co.end_time) AS scheduled_end_time
         FROM lecturer_checkins lc
         JOIN lecturers l ON l.id = lc.lecturer_id
+        JOIN users u ON u.id = l.user_id
         JOIN departments d ON d.id = l.department_id
         JOIN faculties f ON f.id = d.faculty_id
         JOIN courses c ON c.id = lc.course_id
         JOIN sessions sess ON sess.id = lc.session_id
+        LEFT JOIN course_offerings co ON co.course_id = lc.course_id AND co.lecturer_id = lc.lecturer_id AND co.semester_id = sess.semester_id
         WHERE {$whereSql}
+        GROUP BY lc.id, lc.check_in_at, lc.check_out_at, l.full_name, l.staff_no, u.photo_path, c.code, c.name, sess.session_number, sess.type, f.name
         ORDER BY lc.check_in_at DESC
         LIMIT 300";
 $stmt = $conn->prepare($sql);
@@ -168,8 +230,8 @@ if (($_GET['export'] ?? '') === 'excel') {
     $sheet->getStyle('A3')->getFont()->setItalic(true)->setSize(9);
 
     $columns = $role !== 'dean'
-        ? ['Lecturer', 'Staff No', 'Faculty', 'Course', 'Xiiso', 'Date', 'Check-In', 'Check-Out']
-        : ['Lecturer', 'Staff No', 'Course', 'Xiiso', 'Date', 'Check-In', 'Check-Out'];
+        ? ['Lecturer', 'Staff No', 'Faculty', 'Course', 'Xiiso', 'Scheduled Time', 'Date', 'Check-In', 'Check-Out']
+        : ['Lecturer', 'Staff No', 'Course', 'Xiiso', 'Scheduled Time', 'Date', 'Check-In', 'Check-Out'];
     $headerRow = 5;
     $colLetter = 'A';
     foreach ($columns as $col) {
@@ -189,6 +251,7 @@ if (($_GET['export'] ?? '') === 'excel') {
         }
         $values[] = $r['course_code'] . ' — ' . $r['course_name'];
         $values[] = checkin_session_label($r);
+        $values[] = checkin_scheduled_time_label($r);
         $values[] = date('Y-m-d', strtotime($r['check_in_at']));
         $values[] = date('g:i A', strtotime($r['check_in_at']));
         $values[] = $r['check_out_at'] ? date('g:i A', strtotime($r['check_out_at'])) : 'Not checked out';
@@ -277,6 +340,79 @@ if (($_GET['export'] ?? '') === 'excel') {
                 </div>
             </div>
 
+            <?php if (!empty($lecturerAccountability)): ?>
+                <div class="admas-card p-3 mb-3">
+                    <h6 class="fw-bold mb-2 small text-uppercase text-muted">Total Xiiso Check-Ins per Lecturer</h6>
+                    <p class="text-muted small mb-2">How many class sessions each lecturer has actually checked in for, out of how many were expected so far this semester — lowest attendance first.</p>
+                    <div class="table-responsive">
+                        <table class="table admas-table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Lecturer</th>
+                                    <th>Checked In</th>
+                                    <th>Attendance</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($lecturerAccountability as $la): ?>
+                                    <tr>
+                                        <td>
+                                            <a href="<?= htmlspecialchars(BASE_URL) ?>/lecturer_checkins.php?lecturer_id=<?= $la['lecturer_id'] ?>" style="color: inherit; text-decoration: none;">
+                                                <?php render_person_avatar_cell($la['photo_path'], $la['lecturer_name']); ?>
+                                            </a>
+                                        </td>
+                                        <td><?= $la['checked_in'] ?> / <?= $la['total'] ?> Xiiso</td>
+                                        <td style="min-width: 160px;">
+                                            <div class="d-flex align-items-center gap-2">
+                                                <div class="progress flex-grow-1" style="height: 8px;">
+                                                    <div class="progress-bar" role="progressbar" style="width: <?= $la['pct'] ?>%; background-color: <?= $la['pct'] >= 90 ? '#16a34a' : ($la['pct'] >= 70 ? '#d97706' : '#dc2626') ?>;"></div>
+                                                </div>
+                                                <span class="small text-muted"><?= $la['pct'] ?>%</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($selectedLecturerCourseSummary)): ?>
+                <div class="admas-card p-3 mb-3">
+                    <h6 class="fw-bold mb-2 small text-uppercase text-muted">
+                        Per-Course Breakdown — <?= htmlspecialchars($lecturerOptions[array_search($filterLecturerId, array_column($lecturerOptions, 'id'))]['full_name'] ?? '') ?>
+                    </h6>
+                    <div class="table-responsive">
+                        <table class="table admas-table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Course</th>
+                                    <th>Checked In</th>
+                                    <th>Attendance</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($selectedLecturerCourseSummary as $cs): ?>
+                                    <tr>
+                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($cs['course_label']) ?></td>
+                                        <td><?= $cs['checked_in'] ?> / <?= $cs['total'] ?> Xiiso</td>
+                                        <td style="min-width: 160px;">
+                                            <div class="d-flex align-items-center gap-2">
+                                                <div class="progress flex-grow-1" style="height: 8px;">
+                                                    <div class="progress-bar" role="progressbar" style="width: <?= $cs['pct'] ?>%; background-color: <?= $cs['pct'] >= 90 ? '#16a34a' : ($cs['pct'] >= 70 ? '#d97706' : '#dc2626') ?>;"></div>
+                                                </div>
+                                                <span class="small text-muted"><?= $cs['pct'] ?>%</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
+
             <div class="admas-card p-4" style="border: 2px solid var(--admas-sky);">
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
@@ -286,6 +422,7 @@ if (($_GET['export'] ?? '') === 'excel') {
                                 <?php if ($role !== 'dean'): ?><th>Faculty</th><?php endif; ?>
                                 <th>Course</th>
                                 <th>Xiiso</th>
+                                <th>Scheduled Time</th>
                                 <th>Date</th>
                                 <th>Check-In</th>
                                 <th>Check-Out</th>
@@ -294,15 +431,16 @@ if (($_GET['export'] ?? '') === 'excel') {
                         <tbody>
                             <?php if (empty($records)): ?>
                                 <tr>
-                                    <td colspan="<?= $role !== 'dean' ? 7 : 6 ?>" class="text-center text-muted py-4">No check-in records match the current filters.</td>
+                                    <td colspan="<?= $role !== 'dean' ? 8 : 7 ?>" class="text-center text-muted py-4">No check-in records match the current filters.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($records as $r): ?>
                                     <tr>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($r['lecturer_name']) ?><div class="text-muted small">Staff No: <?= htmlspecialchars($r['staff_no']) ?></div></td>
+                                        <td><?php render_person_avatar_cell($r['lecturer_photo_path'], $r['lecturer_name'], 'Staff No: ' . $r['staff_no']); ?></td>
                                         <?php if ($role !== 'dean'): ?><td><?= htmlspecialchars($r['faculty_name']) ?></td><?php endif; ?>
                                         <td><?= htmlspecialchars($r['course_code'] . ' — ' . $r['course_name']) ?></td>
                                         <td><?= htmlspecialchars(checkin_session_label($r)) ?></td>
+                                        <td class="small text-muted"><?= htmlspecialchars(checkin_scheduled_time_label($r)) ?></td>
                                         <td><?= htmlspecialchars(date('M j, Y', strtotime($r['check_in_at']))) ?></td>
                                         <td><?= htmlspecialchars(date('g:i A', strtotime($r['check_in_at']))) ?></td>
                                         <td>

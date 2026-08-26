@@ -7,6 +7,9 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/university_logo.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
 
 require_role(['university_rector']);
 
@@ -188,13 +191,20 @@ foreach ($departmentsForChart as $d) {
 $allFacultiesForChart = $conn->query('SELECT id, name FROM faculties ORDER BY name')->fetch_all(MYSQLI_ASSOC);
 $facultyChartLabels = [];
 $facultyChartData = [];
+// Which semester each faculty's own KPIs/charts below reflect — shown as a
+// per-faculty banner near the top, since there's no single university-wide
+// "current semester" (each faculty runs its own independent track).
+$currentSemesterByFacultyName = [];
+$rectorTimetableSemesterIds = [];
 foreach ($allFacultiesForChart as $f) {
     $fid = (int) $f['id'];
     $fSem = get_current_semester($conn, $fid);
+    $currentSemesterByFacultyName[(string) $f['name']] = $fSem['name'] ?? null;
     $fSemesterId = (int) ($fSem['id'] ?? 0);
     if ($fSemesterId <= 0) {
         continue;
     }
+    $rectorTimetableSemesterIds[] = $fSemesterId;
     $fStmt = $conn->prepare(
         "SELECT ROUND(AVG(t.present_score), 1) AS pct
          FROM (
@@ -218,6 +228,30 @@ foreach ($allFacultiesForChart as $f) {
 }
 
 // ---------------------------------------------------------------------
+// Class Time Table — every scheduled course_offerings row across every
+// faculty's own current semester (university-wide), accumulated from
+// $rectorTimetableSemesterIds above.
+// ---------------------------------------------------------------------
+$rectorTimetableRows = [];
+if (!empty($rectorTimetableSemesterIds)) {
+    $ttPlaceholders = implode(',', array_fill(0, count($rectorTimetableSemesterIds), '?'));
+    $ttStmt = $conn->prepare(
+        "SELECT c.code, c.name AS course_name, co.day_of_week, co.start_time, co.end_time, co.room, l.full_name AS lecturer_name
+         FROM course_offerings co
+         JOIN courses c ON c.id = co.course_id
+         LEFT JOIN lecturers l ON l.id = co.lecturer_id
+         WHERE co.semester_id IN ({$ttPlaceholders}) AND co.day_of_week IS NOT NULL AND co.start_time IS NOT NULL AND co.end_time IS NOT NULL"
+    );
+    $ttStmt->bind_param(str_repeat('i', count($rectorTimetableSemesterIds)), ...$rectorTimetableSemesterIds);
+    $ttStmt->execute();
+    $rectorTimetableRows = $ttStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $ttStmt->close();
+}
+$rectorTimetableGrid = build_class_timetable_grid($rectorTimetableRows);
+$dashboardLogoRelativePath = get_university_logo_relative_path($settings);
+$printDayOrder = array_values(array_diff(DAY_OF_WEEK_DISPLAY_ORDER, ['friday']));
+
+// ---------------------------------------------------------------------
 // Students per Faculty (doughnut chart) — simple headcount, university-wide.
 // ---------------------------------------------------------------------
 $studentsPerFacultyResult = $conn->query(
@@ -237,16 +271,34 @@ $studentsPerFacultyData = array_map(static fn ($r) => (int) $r['c'], $studentsPe
 // not a lifetime historical count.
 // ---------------------------------------------------------------------
 $lecturerWorkload = $conn->query(
-    "SELECT l.full_name, COUNT(*) AS c
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
      FROM course_offerings co
      JOIN semesters se ON se.id = co.semester_id AND se.status = 'current'
      JOIN lecturers l ON l.id = co.lecturer_id
-     GROUP BY l.id, l.full_name
+     JOIN users u ON u.id = l.user_id
+     GROUP BY l.id, l.full_name, u.photo_path
      ORDER BY c DESC, l.full_name
      LIMIT 8"
 )->fetch_all(MYSQLI_ASSOC);
-$lecturerWorkloadLabels = array_map(static fn ($r) => $r['full_name'], $lecturerWorkload);
-$lecturerWorkloadData = array_map(static fn ($r) => (int) $r['c'], $lecturerWorkload);
+
+// ---------------------------------------------------------------------
+// Lecturer Check-In Ranking — top 8 lecturers by total Check-Ins this
+// current semester, most first (a recognition/quick-glance leaderboard,
+// the opposite sort direction from lecturer_checkins.php's own
+// accountability report, which sorts lowest-attendance-first to surface
+// who needs follow-up instead of who's most active).
+// ---------------------------------------------------------------------
+$lecturerCheckinRanking = $conn->query(
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
+     FROM lecturer_checkins lc
+     JOIN lecturers l ON l.id = lc.lecturer_id
+     JOIN users u ON u.id = l.user_id
+     JOIN sessions sess ON sess.id = lc.session_id
+     JOIN semesters se ON se.id = sess.semester_id AND se.status = 'current'
+     GROUP BY l.id, l.full_name, u.photo_path
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+)->fetch_all(MYSQLI_ASSOC);
 
 // ---------------------------------------------------------------------
 // Student registration trend — students added per month, last 6 months
@@ -312,6 +364,17 @@ for ($i = 5; $i >= 0; $i--) {
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 Access scope: Full system — all faculties, departments, and courses
+            </div>
+            <div class="semester-scope-banner" title="Each faculty runs its own independent semester track — there is no single university-wide current semester.">
+                <i class="bi bi-calendar-week"></i>
+                Showing each faculty's own current semester:
+                <?php
+                $semesterBannerParts = [];
+                foreach ($currentSemesterByFacultyName as $facName => $semName) {
+                    $semesterBannerParts[] = htmlspecialchars($facName) . ' (' . ($semName !== null ? htmlspecialchars((string) $semName) : 'none set') . ')';
+                }
+                echo implode(', ', $semesterBannerParts);
+                ?>
             </div>
 
             <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
@@ -415,11 +478,29 @@ for ($i = 5; $i >= 0; $i--) {
                 <div class="col-xl-3 col-md-6">
                     <div class="admas-card p-3 h-100">
                         <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Lecturer Workload</h6>
-                        <?php if (empty($lecturerWorkloadLabels)): ?>
+                        <?php if (empty($lecturerWorkload)): ?>
                             <p class="text-muted small mb-0">No lecturers currently have an assigned offering this semester.</p>
                         <?php else: ?>
-                            <div class="dash-chart-box">
-                                <canvas id="lecturerWorkloadChart"></canvas>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerWorkload as $lw): ?>
+                                    <?php render_dash_rank_row($lw['photo_path'], $lw['full_name'], (int) $lw['c'], 'var(--admas-sky)'); ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">
+                            <i class="bi bi-door-open-fill"></i> Lecturer Check-In Ranking
+                        </h6>
+                        <?php if (empty($lecturerCheckinRanking)): ?>
+                            <p class="text-muted small mb-0">No lecturers have checked in yet this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerCheckinRanking as $lr): ?>
+                                    <?php render_dash_rank_row($lr['photo_path'], $lr['full_name'], (int) $lr['c'], '#16a34a'); ?>
+                                <?php endforeach; ?>
                             </div>
                         <?php endif; ?>
                     </div>
@@ -455,6 +536,26 @@ for ($i = 5; $i >= 0; $i--) {
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <div class="admas-card p-2 timetable-print-card timetable-print-compact mt-3">
+                <div class="timetable-print-header">
+                    <img src="<?= htmlspecialchars(BASE_URL . '/' . $dashboardLogoRelativePath) ?>" alt="" class="timetable-print-logo">
+                    <div class="timetable-print-header-text">
+                        <div class="timetable-print-university"><?= htmlspecialchars(mb_strtoupper((string) ($settings['university_name'] ?? 'ADMAS University'))) ?></div>
+                        <div class="timetable-print-faculty">All Faculties</div>
+                    </div>
+                </div>
+                <div class="timetable-print-meta">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/class_timetable.php" class="timetable-print-title text-decoration-none">Class Time Table</a>
+                </div>
+                <?php if (empty($rectorTimetableGrid['time_slots'])): ?>
+                    <p class="text-muted small mb-0 py-2">No scheduled class times have been set yet.</p>
+                <?php else: ?>
+                    <div class="table-responsive">
+                        <?php render_class_timetable_grid_table($rectorTimetableGrid, $printDayOrder, 'course_name', 'timetable-print-table'); ?>
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -582,32 +683,6 @@ for ($i = 5; $i >= 0; $i--) {
                         position: 'bottom',
                         labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } },
                     },
-                },
-            },
-        });
-        <?php endif; ?>
-
-        <?php if (!empty($lecturerWorkloadLabels)): ?>
-        new Chart(document.getElementById('lecturerWorkloadChart'), {
-            type: 'bar',
-            data: {
-                labels: <?= json_encode($lecturerWorkloadLabels) ?>,
-                datasets: [{
-                    label: 'Current Course Offerings',
-                    data: <?= json_encode($lecturerWorkloadData) ?>,
-                    backgroundColor: chartSky,
-                    borderRadius: 6,
-                    maxBarThickness: 28,
-                }],
-            },
-            options: {
-                indexAxis: 'y',
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                    x: { ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
-                    y: { ticks: { color: chartTextMuted }, grid: { display: false } },
                 },
             },
         });

@@ -10,6 +10,7 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/factory_reset.php';
 require_once __DIR__ . '/../includes/university_logo.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['university_rector']);
 
@@ -103,6 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             save_setting($conn, 'contact_email', $contactEmail);
             save_setting($conn, 'contact_phone', $contactPhone);
 
+            audit_log($conn, 'settings_update', 'settings', null, 'University Information', $universityName . ' / ' . $contactEmail);
             $_SESSION['flash_success'] = 'University information updated successfully.';
             redirect_to('admin/settings.php');
         }
@@ -167,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             save_setting($conn, 'default_department_id', (string) $defaultDepartmentIdInput);
             save_setting($conn, 'min_attendance_pct', $minPctFormatted);
 
+            audit_log($conn, 'settings_update', 'settings', null, 'Default Scope & Threshold', 'min_attendance_pct=' . $minPctFormatted);
             $_SESSION['flash_success'] = 'Default scope and attendance threshold updated successfully.';
             redirect_to('admin/settings.php');
         }
@@ -204,6 +207,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'counts' => $resetResult['counts'],
                         'remaining_admins' => $resetResult['remaining_admins'],
                     ];
+                    // audit_log is deliberately NOT one of the tables
+                    // factory_reset_execute() wipes (see includes/factory_reset.php),
+                    // so this row survives the reset it's describing —
+                    // proof a factory reset happened, by whom, and where
+                    // its backup lives, even after everything else is gone.
+                    audit_log($conn, 'factory_reset', null, null, null, 'Backup: ' . $backup['path']);
                 } catch (Throwable $e) {
                     $validationError = 'Factory reset failed and was rolled back — no data was deleted. ' . $e->getMessage();
                 }

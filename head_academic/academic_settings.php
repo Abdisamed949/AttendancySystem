@@ -11,6 +11,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/attendance_helpers.php';
 
 require_role(['head_academic']);
 
@@ -62,7 +63,6 @@ $addYearFormValues = ['label' => ''];
 $thresholdFormValues = [
     'min_attendance_pct' => (string) ($settings['min_attendance_pct'] ?? '75'),
 ];
-
 // ---------------------------------------------------------------------
 // Handle POST actions
 // ---------------------------------------------------------------------
@@ -237,7 +237,7 @@ $faculties = $conn->query('SELECT id, name, semesters_per_year FROM faculties OR
                         <h6 class="small text-uppercase text-muted mb-2">Add New Academic Year</h6>
                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/academic_settings.php" class="d-flex gap-2">
                             <input type="hidden" name="action" value="add_academic_year">
-                            <input type="text" class="form-control" name="label" maxlength="20" placeholder="e.g. 2026/2027" required
+                            <input type="text" class="form-control" name="label" maxlength="20" placeholder="e.g. 2026" required
                                    value="<?= htmlspecialchars($addYearFormValues['label']) ?>">
                             <button type="submit" class="btn btn-primary text-nowrap" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
                                 <i class="bi bi-plus-lg"></i> Add

@@ -11,6 +11,9 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/university_logo.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
 
 require_role(['head_academic']);
 
@@ -88,13 +91,20 @@ $avgAttendanceByDeptChart = [];
 // query shape as admin/dashboard.php's own alerts widget and
 // notifications.php, accumulated in this same per-faculty loop.
 $alerts = [];
+// Which semester each faculty's own KPIs/charts below reflect — shown as a
+// per-faculty banner near the top, since there's no single university-wide
+// "current semester" (each faculty runs its own independent track).
+$currentSemesterByFacultyName = [];
+$hoaaTimetableSemesterIds = [];
 foreach ($faculties as $f) {
     $facultyId = (int) $f['id'];
     $facultyCurrentSemester = get_current_semester($conn, $facultyId);
+    $currentSemesterByFacultyName[(string) $f['name']] = $facultyCurrentSemester['name'] ?? null;
     $facultySemesterId = (int) ($facultyCurrentSemester['id'] ?? 0);
     if ($facultySemesterId <= 0) {
         continue;
     }
+    $hoaaTimetableSemesterIds[] = $facultySemesterId;
 
     // Average of each (student, course) pair's own out-of-10 score — not a
     // pooled ratio — same "average of capped scores" semantics used by
@@ -173,6 +183,96 @@ $fscRes = $conn->query("SELECT faculty_id, COUNT(*) AS c FROM students WHERE sta
 while ($row = $fscRes->fetch_assoc()) {
     $studentCountByFaculty[(int) $row['faculty_id']] = (int) $row['c'];
 }
+
+// ---------------------------------------------------------------------
+// Class Time Table — every scheduled course_offerings row across every
+// faculty's own current semester (university-wide, matching this
+// dashboard's own scope) — accumulated from $hoaaTimetableSemesterIds
+// above, so a course scheduled under any faculty's current semester shows
+// up, not just one faculty's.
+// ---------------------------------------------------------------------
+$hoaaTimetableRows = [];
+if (!empty($hoaaTimetableSemesterIds)) {
+    $ttPlaceholders = implode(',', array_fill(0, count($hoaaTimetableSemesterIds), '?'));
+    $ttStmt = $conn->prepare(
+        "SELECT c.code, c.name AS course_name, co.day_of_week, co.start_time, co.end_time, co.room, l.full_name AS lecturer_name
+         FROM course_offerings co
+         JOIN courses c ON c.id = co.course_id
+         LEFT JOIN lecturers l ON l.id = co.lecturer_id
+         WHERE co.semester_id IN ({$ttPlaceholders}) AND co.day_of_week IS NOT NULL AND co.start_time IS NOT NULL AND co.end_time IS NOT NULL"
+    );
+    $ttStmt->bind_param(str_repeat('i', count($hoaaTimetableSemesterIds)), ...$hoaaTimetableSemesterIds);
+    $ttStmt->execute();
+    $hoaaTimetableRows = $ttStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $ttStmt->close();
+}
+$hoaaTimetableGrid = build_class_timetable_grid($hoaaTimetableRows);
+$dashboardLogoRelativePath = get_university_logo_relative_path($settings);
+$printDayOrder = array_values(array_diff(DAY_OF_WEEK_DISPLAY_ORDER, ['friday']));
+
+// ---------------------------------------------------------------------
+// Students per Faculty (doughnut) — reuses $studentCountByFaculty above,
+// same chart type/shape as admin/dashboard.php's own University Rector
+// oversight chart, since this role's scope is equally university-wide.
+// ---------------------------------------------------------------------
+$studentsPerFacultyLabels = [];
+$studentsPerFacultyData = [];
+foreach ($faculties as $f) {
+    $studentsPerFacultyLabels[] = $f['name'];
+    $studentsPerFacultyData[] = $studentCountByFaculty[(int) $f['id']] ?? 0;
+}
+
+// ---------------------------------------------------------------------
+// Lecturer Workload (Current Semester, university-wide) — top 8 lecturers
+// by number of CURRENT course_offerings, same query as admin/dashboard.php.
+// ---------------------------------------------------------------------
+$lecturerWorkload = $conn->query(
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
+     FROM course_offerings co
+     JOIN semesters se ON se.id = co.semester_id AND se.status = 'current'
+     JOIN lecturers l ON l.id = co.lecturer_id
+     JOIN users u ON u.id = l.user_id
+     GROUP BY l.id, l.full_name, u.photo_path
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+)->fetch_all(MYSQLI_ASSOC);
+// Lecturer Check-In Ranking — top 8 lecturers by total Check-Ins this
+// current semester, most first (same shape as admin/dashboard.php's own).
+$lecturerCheckinRanking = $conn->query(
+    "SELECT l.full_name, u.photo_path, COUNT(*) AS c
+     FROM lecturer_checkins lc
+     JOIN lecturers l ON l.id = lc.lecturer_id
+     JOIN users u ON u.id = l.user_id
+     JOIN sessions sess ON sess.id = lc.session_id
+     JOIN semesters se ON se.id = sess.semester_id AND se.status = 'current'
+     GROUP BY l.id, l.full_name, u.photo_path
+     ORDER BY c DESC, l.full_name
+     LIMIT 8"
+)->fetch_all(MYSQLI_ASSOC);
+
+// ---------------------------------------------------------------------
+// Student registration trend — last 6 months, university-wide, same query
+// as admin/dashboard.php.
+// ---------------------------------------------------------------------
+$registrationTrendLabels = [];
+$registrationTrendData = [];
+$regByMonth = [];
+$regResult = $conn->query(
+    "SELECT DATE_FORMAT(created_at, '%Y-%m') AS ym, COUNT(*) AS c
+     FROM students
+     WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+     GROUP BY ym"
+);
+if ($regResult) {
+    while ($row = $regResult->fetch_assoc()) {
+        $regByMonth[$row['ym']] = (int) $row['c'];
+    }
+}
+for ($i = 5; $i >= 0; $i--) {
+    $ym = date('Y-m', strtotime("-{$i} months"));
+    $registrationTrendLabels[] = date('M Y', strtotime($ym . '-01'));
+    $registrationTrendData[] = $regByMonth[$ym] ?? 0;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -200,6 +300,17 @@ while ($row = $fscRes->fetch_assoc()) {
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 Access scope: All faculties (cross-faculty)
+            </div>
+            <div class="semester-scope-banner" title="Each faculty runs its own independent semester track — there is no single university-wide current semester.">
+                <i class="bi bi-calendar-week"></i>
+                Showing each faculty's own current semester:
+                <?php
+                $semesterBannerParts = [];
+                foreach ($currentSemesterByFacultyName as $facName => $semName) {
+                    $semesterBannerParts[] = htmlspecialchars($facName) . ' (' . ($semName !== null ? htmlspecialchars((string) $semName) : 'none set') . ')';
+                }
+                echo implode(', ', $semesterBannerParts);
+                ?>
             </div>
 
             <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Welcome back, <?= htmlspecialchars((string) ($currentUser['full_name'] ?? '')) ?></h4>
@@ -249,12 +360,71 @@ while ($row = $fscRes->fetch_assoc()) {
                 </div>
             </div>
 
+            <!-- Same additional oversight charts as University Rector's own
+                 dashboard (Students per Faculty, Lecturer Workload, Student
+                 Registrations) — this role's scope is equally
+                 university-wide, so the same per-faculty breakdowns apply.
+                 Placed above the attendance charts/tables below, per
+                 explicit request. -->
+            <div class="row g-3 mb-3">
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Students per Faculty</h6>
+                        <?php if (empty($studentsPerFacultyLabels)): ?>
+                            <p class="text-muted small mb-0">No faculties exist yet.</p>
+                        <?php else: ?>
+                            <div class="dash-chart-box">
+                                <canvas id="studentsPerFacultyChart"></canvas>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Lecturer Workload</h6>
+                        <?php if (empty($lecturerWorkload)): ?>
+                            <p class="text-muted small mb-0">No lecturers currently have an assigned offering this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerWorkload as $lw): ?>
+                                    <?php render_dash_rank_row($lw['photo_path'], $lw['full_name'], (int) $lw['c'], 'var(--admas-sky)'); ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">
+                            <i class="bi bi-door-open-fill"></i> Lecturer Check-In Ranking
+                        </h6>
+                        <?php if (empty($lecturerCheckinRanking)): ?>
+                            <p class="text-muted small mb-0">No lecturers have checked in yet this semester.</p>
+                        <?php else: ?>
+                            <div class="dash-rank-list">
+                                <?php foreach ($lecturerCheckinRanking as $lr): ?>
+                                    <?php render_dash_rank_row($lr['photo_path'], $lr['full_name'], (int) $lr['c'], '#16a34a'); ?>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Registrations (6mo)</h6>
+                        <div class="dash-chart-box">
+                            <canvas id="registrationTrendChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Charts — fixed-height boxes (see .dash-chart-box) paired
                  with Chart.js's maintainAspectRatio: false, so charts stay
                  compact and fit alongside everything else on one screen
                  without scrolling, per explicit request. -->
-            <div class="row g-3 mb-3">
-                <div class="col-xl-8">
+            <div class="row g-3">
+                <div class="col-xl-3 col-md-6">
                     <div class="admas-card p-3 h-100">
                         <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Weekly Attendance</h6>
                         <div class="dash-chart-box">
@@ -262,7 +432,7 @@ while ($row = $fscRes->fetch_assoc()) {
                         </div>
                     </div>
                 </div>
-                <div class="col-xl-4">
+                <div class="col-xl-3 col-md-6">
                     <div class="admas-card p-3 h-100">
                         <h6 class="fw-bold mb-2 small text-uppercase" style="color: var(--admas-text);">Attendance by Department</h6>
                         <?php if (empty($deptChartLabels)): ?>
@@ -274,19 +444,16 @@ while ($row = $fscRes->fetch_assoc()) {
                         <?php endif; ?>
                     </div>
                 </div>
-            </div>
-
-            <div class="row g-3">
-                <div class="col-xl-8">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">Attendance by Faculty</h6>
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">Attendance by Faculty</h6>
                         <div class="table-responsive">
-                            <table class="table admas-table align-middle">
+                            <table class="table admas-table table-sm align-middle">
                                 <thead>
                                     <tr>
                                         <th>Faculty</th>
                                         <th>Students</th>
-                                        <th>Avg Attendance</th>
+                                        <th>Avg</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -315,9 +482,9 @@ while ($row = $fscRes->fetch_assoc()) {
                         </div>
                     </div>
                 </div>
-                <div class="col-xl-4">
-                    <div class="admas-card p-4 h-100">
-                        <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
+                <div class="col-xl-3 col-md-6">
+                    <div class="admas-card p-3 h-100">
+                        <h6 class="fw-bold mb-2 small text-uppercase text-muted">
                             <i class="bi bi-exclamation-triangle-fill text-warning"></i>
                             Attendance Alerts
                         </h6>
@@ -336,6 +503,26 @@ while ($row = $fscRes->fetch_assoc()) {
                         <?php endif; ?>
                     </div>
                 </div>
+            </div>
+
+            <div class="admas-card p-2 timetable-print-card timetable-print-compact mt-3">
+                <div class="timetable-print-header">
+                    <img src="<?= htmlspecialchars(BASE_URL . '/' . $dashboardLogoRelativePath) ?>" alt="" class="timetable-print-logo">
+                    <div class="timetable-print-header-text">
+                        <div class="timetable-print-university"><?= htmlspecialchars(mb_strtoupper((string) ($settings['university_name'] ?? 'ADMAS University'))) ?></div>
+                        <div class="timetable-print-faculty">All Faculties</div>
+                    </div>
+                </div>
+                <div class="timetable-print-meta">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/class_timetable.php" class="timetable-print-title text-decoration-none">Class Time Table</a>
+                </div>
+                <?php if (empty($hoaaTimetableGrid['time_slots'])): ?>
+                    <p class="text-muted small mb-0 py-2">No scheduled class times have been set yet.</p>
+                <?php else: ?>
+                    <div class="table-responsive">
+                        <?php render_class_timetable_grid_table($hoaaTimetableGrid, $printDayOrder, 'course_name', 'timetable-print-table'); ?>
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -404,6 +591,55 @@ while ($row = $fscRes->fetch_assoc()) {
             },
         });
         <?php endif; ?>
+
+        <?php if (!empty($studentsPerFacultyLabels)): ?>
+        new Chart(document.getElementById('studentsPerFacultyChart'), {
+            type: 'doughnut',
+            data: {
+                labels: <?= json_encode($studentsPerFacultyLabels) ?>,
+                datasets: [{
+                    label: 'Students',
+                    data: <?= json_encode($studentsPerFacultyData) ?>,
+                    backgroundColor: pieColors,
+                    borderColor: chartSurface,
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom', labels: { color: chartTextMuted, boxWidth: 12, font: { size: 11 } } },
+                },
+            },
+        });
+        <?php endif; ?>
+
+
+        new Chart(document.getElementById('registrationTrendChart'), {
+            type: 'line',
+            data: {
+                labels: <?= json_encode($registrationTrendLabels) ?>,
+                datasets: [{
+                    label: 'Students Registered',
+                    data: <?= json_encode($registrationTrendData) ?>,
+                    borderColor: chartSky,
+                    backgroundColor: chartSky,
+                    tension: 0.3,
+                    fill: false,
+                    pointRadius: 4,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: chartTextMuted }, grid: { display: false } },
+                    y: { ticks: { color: chartTextMuted, precision: 0 }, grid: { color: chartGrid } },
+                },
+            },
+        });
     </script>
 </body>
 </html>

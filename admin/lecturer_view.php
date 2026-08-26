@@ -1,9 +1,10 @@
 <?php
 /**
  * Read-only lecturer detail page for University Rector's supervisory/
- * oversight role. Reachable only via the "View" (eye icon) link on
- * admin/lecturers.php's Actions column for this one role — no other role
- * is granted access here.
+ * oversight role, and Dean's own faculty-scoped Viewer access (own
+ * faculty only — a crafted lecturer_id belonging to another faculty is
+ * rejected server-side below, not just hidden from the list). Reachable
+ * via the "View Profile" link on admin/lecturers.php's Actions column.
  *
  * Course-offering list below is a direct adaptation of
  * lecturer/courses.php's own query shape (full teaching history — current,
@@ -19,10 +20,17 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/semester_helpers.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
 
-require_role(['university_rector']);
+require_role(['university_rector', 'dean']);
 
 $currentUser = current_user();
+$role = current_role();
+
+$deanFacultyId = 0;
+if ($role === 'dean') {
+    $deanFacultyId = (int) ($_SESSION['faculty_id'] ?? 0);
+}
 
 const VIEW_LECTURER_SHIFT_LABELS = [
     'morning' => 'Morning Shift',
@@ -50,7 +58,7 @@ $lecturerId = (int) ($_GET['lecturer_id'] ?? 0);
 
 $lecturerStmt = $conn->prepare(
     'SELECT l.id, l.staff_no, l.full_name, l.department_id,
-            d.name AS department_name, f.name AS faculty_name,
+            d.name AS department_name, d.faculty_id, f.name AS faculty_name,
             u.email, u.status AS user_status, u.photo_path
      FROM lecturers l
      JOIN departments d ON d.id = l.department_id
@@ -68,6 +76,13 @@ if (!$lecturer) {
     redirect_to('admin/lecturers.php');
 }
 
+// A Dean may only ever view their own faculty's lecturers — never trusted
+// from the lecturer_id alone.
+if ($role === 'dean' && (int) $lecturer['faculty_id'] !== $deanFacultyId) {
+    $_SESSION['flash_error'] = 'Lecturer not found.';
+    redirect_to('admin/lecturers.php');
+}
+
 // ---------------------------------------------------------------------
 // Full teaching history — one row per (course, offering) pair, same shape
 // as lecturer/courses.php's own unfiltered query.
@@ -76,6 +91,7 @@ $coursesStmt = $conn->prepare(
     "SELECT c.id AS course_id, c.code, c.name, c.credit_hours,
             COALESCE(rd.id, d.id) AS department_id, se.faculty_id, COALESCE(rd.name, d.name) AS department_name, offf.name AS faculty_name,
             se.id AS semester_id, se.name AS semester_name, se.status AS semester_status,
+            se.start_date, se.end_date,
             ay.label AS academic_year_label,
             co.shift AS offering_shift
      FROM courses c
@@ -136,6 +152,29 @@ foreach ($courseOfferingRows as $row) {
     $courses[] = $row;
 }
 
+// ---------------------------------------------------------------------
+// Group into one card per semester — same visual pattern as
+// lecturer/teaching_history.php / lecturer/courses.php — preserving
+// $courses' own ordering (current first, then waiting, then ended) via
+// first-appearance insertion order.
+// ---------------------------------------------------------------------
+$coursesBySemesterId = [];
+$semesterMetaById = [];
+foreach ($courses as $c) {
+    $sid = (int) $c['semester_id'];
+    if (!isset($semesterMetaById[$sid])) {
+        $semesterMetaById[$sid] = [
+            'id' => $sid,
+            'name' => $c['semester_name'],
+            'status' => $c['semester_status'],
+            'academic_year_label' => $c['academic_year_label'],
+            'start_date' => $c['start_date'],
+            'end_date' => $c['end_date'],
+        ];
+    }
+    $coursesBySemesterId[$sid][] = $c;
+}
+
 function chat_lecturer_initials(string $fullName): string
 {
     $initials = '';
@@ -156,11 +195,14 @@ function chat_lecturer_initials(string $fullName): string
 // ---------------------------------------------------------------------
 $checkinStmt = $conn->prepare(
     "SELECT lc.check_in_at, lc.check_out_at, c.code AS course_code, c.name AS course_name,
-            sess.session_number, sess.type AS session_type
+            sess.session_number, sess.type AS session_type,
+            MIN(co.start_time) AS scheduled_start_time, MIN(co.end_time) AS scheduled_end_time
      FROM lecturer_checkins lc
      JOIN courses c ON c.id = lc.course_id
      JOIN sessions sess ON sess.id = lc.session_id
+     LEFT JOIN course_offerings co ON co.course_id = lc.course_id AND co.lecturer_id = lc.lecturer_id AND co.semester_id = sess.semester_id
      WHERE lc.lecturer_id = ?
+     GROUP BY lc.id, lc.check_in_at, lc.check_out_at, c.code, c.name, sess.session_number, sess.type
      ORDER BY lc.check_in_at DESC
      LIMIT 100"
 );
@@ -185,6 +227,14 @@ function checkin_view_session_label(array $row): string
         default => 'Xiiso ' . (int) $row['session_number'],
     };
 }
+
+function checkin_view_scheduled_time_label(array $row): string
+{
+    if (empty($row['scheduled_start_time']) || empty($row['scheduled_end_time'])) {
+        return '—';
+    }
+    return format_timetable_time($row['scheduled_start_time']) . ' - ' . format_timetable_time($row['scheduled_end_time']);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -195,6 +245,35 @@ function checkin_view_session_label(array $row): string
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        /* Same semester-card visual pattern as lecturer/teaching_history.php
+           and lecturer/courses.php — applied here so a Rector/Dean sees an
+           identical presentation of a lecturer's teaching record. */
+        .semester-card {
+            border-left: 5px solid var(--admas-border);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .semester-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px var(--admas-shadow);
+        }
+
+        .semester-card.semester-current { border-left-color: #16a34a; }
+        .semester-card.semester-accent-sky { border-left-color: var(--admas-sky); }
+        .semester-card.semester-accent-navy { border-left-color: var(--admas-navy-start); }
+        .semester-card.semester-accent-amber { border-left-color: #d97706; }
+
+        /* Side-by-side semester cards (at least 3 across on a wide screen)
+           instead of one full-width card per row, so more of a lecturer's
+           teaching record shows at once. */
+        .semester-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -202,10 +281,14 @@ function checkin_view_session_label(array $row): string
     <div class="main-content">
         <?php include __DIR__ . '/../includes/topbar.php'; ?>
 
-        <div class="page-body">
+        <div class="page-body view-profile-page">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
-                Access scope: Full system — view only (oversight)
+                <?php if ($role === 'dean'): ?>
+                    Access scope: Own faculty only — view only
+                <?php else: ?>
+                    Access scope: Full system — view only (oversight)
+                <?php endif; ?>
             </div>
 
             <div class="mb-3">
@@ -276,46 +359,66 @@ function checkin_view_session_label(array $row): string
                 </div>
             </div>
 
-            <div class="admas-card p-4">
-                <div class="section-heading"><i class="bi bi-journal-bookmark-fill"></i> Assigned Courses (current + past)</div>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Course</th>
-                                <th>Semester</th>
-                                <th>Status</th>
-                                <th>Faculty</th>
-                                <th>Department</th>
-                                <th>Academic Year</th>
-                                <th>Shift</th>
-                                <th>Students</th>
-                                <th>Sessions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($courses)): ?>
+            <div class="section-heading"><i class="bi bi-journal-bookmark-fill"></i> Assigned Courses (current + past)</div>
+
+            <?php if (empty($courses)): ?>
+                <div class="admas-card p-4 text-center text-muted py-5 mb-4">
+                    No course offerings recorded for this lecturer.
+                </div>
+            <?php endif; ?>
+
+            <?php
+            $semAccents = ['semester-accent-sky', 'semester-accent-navy', 'semester-accent-amber'];
+            $semIndex = 0;
+            ?>
+            <div class="semester-grid">
+            <?php foreach ($semesterMetaById as $sem): ?>
+                <?php
+                $semCourses = $coursesBySemesterId[$sem['id']] ?? [];
+                $accentClass = $sem['status'] === 'current' ? 'semester-current' : $semAccents[$semIndex % count($semAccents)];
+                $semIndex++;
+                $statusLabel = ['current' => 'Current', 'waiting' => 'Waiting', 'ended' => 'Ended'][$sem['status']] ?? ucfirst((string) $sem['status']);
+                $statusBadge = ['current' => 'badge-present', 'waiting' => 'badge-warning', 'ended' => 'badge-inactive'][$sem['status']] ?? 'badge-inactive';
+                ?>
+                <div class="admas-card semester-card <?= $accentClass ?> p-4">
+                    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                        <div>
+                            <h5 class="fw-bold mb-1" style="color: var(--admas-text);">
+                                <?= htmlspecialchars($sem['name']) ?>
+                                <span class="badge-pill <?= $statusBadge ?> ms-2"><?= htmlspecialchars($statusLabel) ?></span>
+                            </h5>
+                            <p class="text-muted small mb-0">
+                                <i class="bi bi-calendar3"></i>
+                                <?= htmlspecialchars($sem['academic_year_label']) ?>
+                                <?php if ($sem['start_date'] || $sem['end_date']): ?>
+                                    &middot; <?= htmlspecialchars(($sem['start_date'] ?? '?') . ' to ' . ($sem['end_date'] ?? '?')) ?>
+                                <?php endif; ?>
+                            </p>
+                        </div>
+                        <span class="text-muted small"><?= count($semCourses) ?> course<?= count($semCourses) === 1 ? '' : 's' ?></span>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="table admas-table align-middle mb-0">
+                            <thead>
                                 <tr>
-                                    <td colspan="9" class="text-center text-muted py-4">No course offerings recorded for this lecturer.</td>
+                                    <th>Course</th>
+                                    <th>Faculty</th>
+                                    <th>Department</th>
+                                    <th>Shift</th>
+                                    <th>Students</th>
+                                    <th>Sessions</th>
                                 </tr>
-                            <?php else: ?>
-                                <?php foreach ($courses as $c): ?>
-                                    <?php
-                                    $statusBadgeClass = [
-                                        'current' => 'badge-present',
-                                        'waiting' => 'badge-warning',
-                                        'ended' => 'badge-inactive',
-                                    ][$c['semester_status']] ?? 'badge-inactive';
-                                    ?>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($semCourses as $c): ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);">
-                                            <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
+                                            <span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span>
+                                            <span class="ms-1"><?= htmlspecialchars($c['name']) ?></span>
                                         </td>
-                                        <td><?= htmlspecialchars($c['semester_name']) ?></td>
-                                        <td><span class="badge-pill <?= $statusBadgeClass ?>"><?= htmlspecialchars(ucfirst((string) $c['semester_status'])) ?></span></td>
                                         <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
-                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
                                         <td>
                                             <?php if ($c['offering_shift'] !== null && isset(VIEW_LECTURER_SHIFT_LABELS[$c['offering_shift']])): ?>
                                                 <?= htmlspecialchars(VIEW_LECTURER_SHIFT_LABELS[$c['offering_shift']]) ?>
@@ -334,10 +437,11 @@ function checkin_view_session_label(array $row): string
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
+            <?php endforeach; ?>
             </div>
 
             <div class="admas-card p-4 mt-3">
@@ -357,6 +461,7 @@ function checkin_view_session_label(array $row): string
                             <tr>
                                 <th>Course</th>
                                 <th>Xiiso</th>
+                                <th>Scheduled Time</th>
                                 <th>Date</th>
                                 <th>Check-In</th>
                                 <th>Check-Out</th>
@@ -365,13 +470,14 @@ function checkin_view_session_label(array $row): string
                         <tbody>
                             <?php if (empty($checkins)): ?>
                                 <tr>
-                                    <td colspan="5" class="text-center text-muted py-4">No check-in records for this lecturer yet.</td>
+                                    <td colspan="6" class="text-center text-muted py-4">No check-in records for this lecturer yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($checkins as $ci): ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($ci['course_code'] . ' — ' . $ci['course_name']) ?></td>
                                         <td><?= htmlspecialchars(checkin_view_session_label($ci)) ?></td>
+                                        <td class="small text-muted"><?= htmlspecialchars(checkin_view_scheduled_time_label($ci)) ?></td>
                                         <td><?= htmlspecialchars(date('M j, Y', strtotime($ci['check_in_at']))) ?></td>
                                         <td><?= htmlspecialchars(date('g:i A', strtotime($ci['check_in_at']))) ?></td>
                                         <td>

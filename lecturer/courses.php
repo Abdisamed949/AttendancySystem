@@ -177,6 +177,7 @@ $coursesStmt = $conn->prepare(
     "SELECT c.id AS course_id, c.code, c.name, c.credit_hours,
             COALESCE(rd.id, d.id) AS department_id, se.faculty_id, COALESCE(rd.name, d.name) AS department_name, offf.name AS faculty_name,
             se.id AS semester_id, se.name AS semester_name, se.status AS semester_status,
+            se.start_date, se.end_date,
             ay.id AS academic_year_id, ay.label AS academic_year_label,
             co.shift AS offering_shift
      FROM courses c
@@ -261,6 +262,29 @@ foreach ($academicYears as $ay) {
         break;
     }
 }
+
+// ---------------------------------------------------------------------
+// Group into one card per semester — same visual pattern as
+// lecturer/teaching_history.php — preserving $courses' own ordering
+// (current semesters first, then waiting, then ended) via first-appearance
+// insertion order.
+// ---------------------------------------------------------------------
+$coursesBySemesterId = [];
+$semesterMetaById = [];
+foreach ($courses as $c) {
+    $sid = (int) $c['semester_id'];
+    if (!isset($semesterMetaById[$sid])) {
+        $semesterMetaById[$sid] = [
+            'id' => $sid,
+            'name' => $c['semester_name'],
+            'status' => $c['semester_status'],
+            'academic_year_label' => $c['academic_year_label'],
+            'start_date' => $c['start_date'],
+            'end_date' => $c['end_date'],
+        ];
+    }
+    $coursesBySemesterId[$sid][] = $c;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -271,6 +295,30 @@ foreach ($academicYears as $ay) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        /* Same content width as lecturer/teaching_history.php — a centered,
+           narrower column reads better for a stack of semester cards than
+           stretching them across the full page-body width. */
+        .history-wrap { max-width: 900px; margin: 0 auto; }
+
+        /* Same semester-card visual pattern as lecturer/teaching_history.php
+           (colored left-accent, hover lift) — applied here to the live
+           management view instead of the read-only history one. */
+        .semester-card {
+            border-left: 5px solid var(--admas-border);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .semester-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px var(--admas-shadow);
+        }
+
+        .semester-card.semester-current { border-left-color: #16a34a; }
+        .semester-card.semester-accent-sky { border-left-color: var(--admas-sky); }
+        .semester-card.semester-accent-navy { border-left-color: var(--admas-navy-start); }
+        .semester-card.semester-accent-amber { border-left-color: #d97706; }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -279,6 +327,7 @@ foreach ($academicYears as $ay) {
         <?php include __DIR__ . '/../includes/topbar.php'; ?>
 
         <div class="page-body">
+            <div class="history-wrap">
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 Access scope: Your assigned courses only
@@ -333,37 +382,62 @@ foreach ($academicYears as $ay) {
                 </form>
             </div>
 
-            <div class="admas-card p-4" style="border: 2px solid var(--admas-sky);">
-                <h6 class="fw-bold mb-3" style="color: var(--admas-text);">
-                    Courses
-                    <?php if ($currentAcademicYearLabel !== ''): ?>
-                        <span class="text-muted fw-normal">(sessions shown for <?= htmlspecialchars($currentAcademicYearLabel) ?>)</span>
-                    <?php endif; ?>
-                </h6>
-                <div class="table-responsive">
-                    <table class="table admas-table align-middle">
-                        <thead>
-                            <tr>
-                                <th>Course</th>
-                                <th>Semester</th>
-                                <th>Status</th>
-                                <th>Faculty</th>
-                                <th>Department</th>
-                                <th>Academic Year</th>
-                                <th>Shift</th>
-                                <th>Students</th>
-                                <th>Sessions</th>
-                                <th>Pending Xiiso</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php if (empty($courses)): ?>
+            <?php if ($currentAcademicYearLabel !== ''): ?>
+                <p class="text-muted small mb-2">Sessions shown for <?= htmlspecialchars($currentAcademicYearLabel) ?>.</p>
+            <?php endif; ?>
+
+            <?php if (empty($courses)): ?>
+                <div class="admas-card p-4 text-center text-muted py-5">
+                    No courses match the current filters.
+                </div>
+            <?php endif; ?>
+
+            <?php
+            $semAccents = ['semester-accent-sky', 'semester-accent-navy', 'semester-accent-amber'];
+            $semIndex = 0;
+            ?>
+            <?php foreach ($semesterMetaById as $sem): ?>
+                <?php
+                $semCourses = $coursesBySemesterId[$sem['id']] ?? [];
+                $accentClass = $sem['status'] === 'current' ? 'semester-current' : $semAccents[$semIndex % count($semAccents)];
+                $semIndex++;
+                $statusLabel = ['current' => 'Current', 'waiting' => 'Waiting', 'ended' => 'Ended'][$sem['status']] ?? ucfirst((string) $sem['status']);
+                $statusBadge = ['current' => 'badge-present', 'waiting' => 'badge-warning', 'ended' => 'badge-inactive'][$sem['status']] ?? 'badge-inactive';
+                ?>
+                <div class="admas-card semester-card <?= $accentClass ?> p-4 mb-3">
+                    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                        <div>
+                            <h5 class="fw-bold mb-1" style="color: var(--admas-text);">
+                                <?= htmlspecialchars($sem['name']) ?>
+                                <span class="badge-pill <?= $statusBadge ?> ms-2"><?= htmlspecialchars($statusLabel) ?></span>
+                            </h5>
+                            <p class="text-muted small mb-0">
+                                <i class="bi bi-calendar3"></i>
+                                <?= htmlspecialchars($sem['academic_year_label']) ?>
+                                <?php if ($sem['start_date'] || $sem['end_date']): ?>
+                                    &middot; <?= htmlspecialchars(($sem['start_date'] ?? '?') . ' to ' . ($sem['end_date'] ?? '?')) ?>
+                                <?php endif; ?>
+                            </p>
+                        </div>
+                        <span class="text-muted small"><?= count($semCourses) ?> course<?= count($semCourses) === 1 ? '' : 's' ?></span>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="table admas-table align-middle mb-0">
+                            <thead>
                                 <tr>
-                                    <td colspan="11" class="text-center text-muted py-4">No courses match the current filters.</td>
+                                    <th>Course</th>
+                                    <th>Faculty</th>
+                                    <th>Department</th>
+                                    <th>Shift</th>
+                                    <th>Students</th>
+                                    <th>Sessions</th>
+                                    <th>Pending Xiiso</th>
+                                    <th></th>
                                 </tr>
-                            <?php else: ?>
-                                <?php foreach ($courses as $c): ?>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($semCourses as $c): ?>
                                     <?php
                                     $pendingCount = (int) $c['pending_count'];
                                     $nextPending = $c['next_pending_session'];
@@ -394,22 +468,11 @@ foreach ($academicYears as $ay) {
                                     ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);">
-                                            <?= htmlspecialchars($c['code'] . ' — ' . $c['name']) ?>
-                                        </td>
-                                        <td><?= htmlspecialchars($c['semester_name']) ?></td>
-                                        <td>
-                                            <?php
-                                            $statusBadgeClass = [
-                                                'current' => 'badge-present',
-                                                'waiting' => 'badge-warning',
-                                                'ended' => 'badge-inactive',
-                                            ][$c['semester_status']] ?? 'badge-inactive';
-                                            ?>
-                                            <span class="badge-pill <?= $statusBadgeClass ?>"><?= htmlspecialchars(ucfirst((string) $c['semester_status'])) ?></span>
+                                            <span class="badge-pill badge-active"><?= htmlspecialchars($c['code']) ?></span>
+                                            <span class="ms-1"><?= htmlspecialchars($c['name']) ?></span>
                                         </td>
                                         <td><?= htmlspecialchars($c['faculty_name']) ?></td>
                                         <td><?= htmlspecialchars($c['department_name']) ?></td>
-                                        <td><?= htmlspecialchars($c['academic_year_label']) ?></td>
                                         <td>
                                             <?php if ($c['offering_shift'] !== null && isset(SHIFT_LABELS[$c['offering_shift']])): ?>
                                                 <?= htmlspecialchars(SHIFT_LABELS[$c['offering_shift']]) ?>
@@ -441,10 +504,11 @@ foreach ($academicYears as $ay) {
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
+            <?php endforeach; ?>
             </div>
         </div>
     </div>

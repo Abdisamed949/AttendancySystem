@@ -19,6 +19,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['head_academic']);
 
@@ -97,7 +99,14 @@ $assignFormValues = [
  */
 function load_manageable_user(mysqli $conn, int $userId, int $systemAdminRoleId): array
 {
-    $stmt = $conn->prepare('SELECT username, status, role_id FROM users WHERE id = ?');
+    $stmt = $conn->prepare(
+        "SELECT u.username, u.status, u.role_id, r.name AS role_name, s.student_no, d.code AS department_code
+         FROM users u
+         JOIN roles r ON r.id = u.role_id
+         LEFT JOIN students s ON s.user_id = u.id
+         LEFT JOIN departments d ON d.id = s.department_id
+         WHERE u.id = ?"
+    );
     $stmt->bind_param('i', $userId);
     $stmt->execute();
     $row = $stmt->get_result()->fetch_assoc();
@@ -110,7 +119,14 @@ function load_manageable_user(mysqli $conn, int $userId, int $systemAdminRoleId)
         return ['ok' => false, 'message' => 'University Rector accounts cannot be managed from here.'];
     }
 
-    return ['ok' => true, 'username' => (string) $row['username'], 'status' => (string) $row['status']];
+    return [
+        'ok' => true,
+        'username' => (string) $row['username'],
+        'status' => (string) $row['status'],
+        'role_name' => (string) $row['role_name'],
+        'student_no' => $row['student_no'] !== null ? (string) $row['student_no'] : null,
+        'department_code' => $row['department_code'] !== null ? (string) $row['department_code'] : null,
+    ];
 }
 
 // ---------------------------------------------------------------------
@@ -125,6 +141,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $facultyId = (int) ($_POST['faculty_id'] ?? 0);
         $newFullName = trim((string) ($_POST['new_full_name'] ?? ''));
         $newEmail = trim((string) ($_POST['new_email'] ?? ''));
+        $newPassword = (string) ($_POST['new_password'] ?? '');
+        $newPasswordConfirm = (string) ($_POST['new_password_confirm'] ?? '');
         $isNewUser = $selectedUserId === 'new';
 
         $assignFormValues = [
@@ -149,6 +167,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $validationError = 'Full name is required for a new user.';
             } elseif ($newEmail !== '' && !filter_var($newEmail, FILTER_VALIDATE_EMAIL)) {
                 $validationError = 'Please enter a valid email address.';
+            } elseif ($newPassword === '') {
+                $validationError = 'Please enter a password for the new account.';
+            } elseif (strlen($newPassword) < 8) {
+                $validationError = 'Password must be at least 8 characters.';
+            } elseif ($newPassword !== $newPasswordConfirm) {
+                $validationError = 'Password and confirmation do not match.';
             }
 
             if ($validationError === '' && $newEmail !== '') {
@@ -167,7 +191,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 // Never trust the dropdown alone — re-verify server-side that
                 // this user isn't already elevated (and isn't System Admin).
-                $userCheckStmt = $conn->prepare('SELECT role_id FROM users WHERE id = ?');
+                $userCheckStmt = $conn->prepare('SELECT role_id, username FROM users WHERE id = ?');
                 $userCheckStmt->bind_param('i', $targetUserId);
                 $userCheckStmt->execute();
                 $userCheckRow = $userCheckStmt->get_result()->fetch_assoc();
@@ -212,7 +236,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($isNewUser) {
                     $generatedUsername = generate_admin_username($conn, $newFullName);
-                    $generatedPassword = generate_temp_password();
+                    $generatedPassword = $newPassword;
                     $passwordHash = password_hash($generatedPassword, PASSWORD_DEFAULT);
                     $emailParam = $newEmail !== '' ? $newEmail : null;
 
@@ -251,9 +275,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = 'Appointed successfully as ' . $roleLabelText . '.';
                 if ($isNewUser) {
                     $message = 'New user created and appointed as ' . $roleLabelText . '. Username: '
-                        . $generatedUsername . ' — Temporary Password: ' . $generatedPassword
-                        . ' — share these credentials now; the password will not be shown again.';
+                        . $generatedUsername . ' — share this with the account holder along with the '
+                        . 'password you just set.';
                 }
+                audit_log($conn, 'role_assignment', 'user', $targetUserId, $isNewUser ? $generatedUsername : ($userCheckRow['username'] ?? null), 'Appointed as ' . $roleLabelText);
                 $_SESSION['flash_success'] = $message;
             } catch (Throwable $e) {
                 $conn->rollback();
@@ -270,16 +295,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$target['ok']) {
             $errorMessage = $target['message'];
         } else {
-            $newPassword = generate_temp_password();
+            // Normalizes BOTH username and password to the same
+            // deterministic "DepartmentCode-StudentNo" value
+            // admin/students.php's own Reset Password uses for a student —
+            // a pre-existing student created under the old name-based (or
+            // faculty-code-based) username scheme would otherwise end up
+            // with a mismatched pair (old username, new-format password)
+            // after a reset. Every other role keeps the existing random
+            // generated password only.
+            $isStudentReset = $target['role_name'] === 'student' && $target['student_no'] !== null;
+            $newPassword = $isStudentReset
+                ? student_credential_value($conn, (string) $target['department_code'], $target['student_no'], $userId)
+                : generate_temp_password();
             $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
 
-            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
-            $updatePassStmt->bind_param('si', $newHash, $userId);
+            if ($isStudentReset) {
+                $updatePassStmt = $conn->prepare('UPDATE users SET username = ?, password_hash = ? WHERE id = ?');
+                $updatePassStmt->bind_param('ssi', $newPassword, $newHash, $userId);
+            } else {
+                $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+                $updatePassStmt->bind_param('si', $newHash, $userId);
+            }
             $updatePassStmt->execute();
             $updatePassStmt->close();
 
+            audit_log($conn, 'reset_password', 'user', $userId, $target['username']);
             $_SESSION['flash_success'] = 'Password reset for ' . $target['username']
-                . '. New temporary password: ' . $newPassword
+                . '. New ' . ($isStudentReset ? 'username and temporary password' : 'temporary password') . ': ' . $newPassword
                 . ' — share this with them now; it will not be shown again.';
             redirect_to('head_academic/users.php');
         }
@@ -298,6 +340,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $updateStmt->execute();
                 $updateStmt->close();
 
+                audit_log($conn, 'toggle_status', 'user', $userId, $target['username'], 'Set to ' . $newStatus);
                 $_SESSION['flash_success'] = $target['username'] . ' is now ' . $newStatus . '.';
                 redirect_to('head_academic/users.php');
             }
@@ -327,14 +370,45 @@ if (!empty($elevatedRoleIds)) {
     $stmt->close();
 }
 
-// Every account except University Rector.
-$allUsers = $conn->query(
-    "SELECT u.id, u.username, u.full_name, u.status, u.last_login_at,
-            r.name AS role_name, f.name AS faculty_name
+// ---------------------------------------------------------------------
+// Filter bar: real SQL WHERE filters via GET (role, status, search by
+// username/full name/student no) — same pattern as admin/users.php.
+// ---------------------------------------------------------------------
+$filterRole = trim((string) ($_GET['role'] ?? ''));
+$filterStatus = trim((string) ($_GET['status'] ?? ''));
+$filterSearch = trim((string) ($_GET['search'] ?? ''));
+
+// Every account except University Rector — the WHERE below always keeps
+// this base restriction regardless of what's filtered further.
+$userWhere = ["r.name != 'university_rector'"];
+$userParams = [];
+$userTypes = '';
+if ($filterRole !== '' && $filterRole !== 'university_rector') {
+    $userWhere[] = 'r.name = ?';
+    $userParams[] = $filterRole;
+    $userTypes .= 's';
+}
+if ($filterStatus !== '') {
+    $userWhere[] = 'u.status = ?';
+    $userParams[] = $filterStatus;
+    $userTypes .= 's';
+}
+if ($filterSearch !== '') {
+    $userWhere[] = '(u.username LIKE ? OR u.full_name LIKE ? OR s.student_no LIKE ?)';
+    $likeParam = '%' . $filterSearch . '%';
+    $userParams[] = $likeParam;
+    $userParams[] = $likeParam;
+    $userParams[] = $likeParam;
+    $userTypes .= 'sss';
+}
+$userWhereSql = ' WHERE ' . implode(' AND ', $userWhere);
+
+$allUsersSql = "SELECT u.id, u.username, u.full_name, u.status, u.last_login_at, u.photo_path,
+            r.name AS role_name, f.name AS faculty_name, s.student_no
      FROM users u
      JOIN roles r ON r.id = u.role_id
      LEFT JOIN faculties f ON f.id = u.faculty_id
-     WHERE r.name != 'university_rector'
+     LEFT JOIN students s ON s.user_id = u.id{$userWhereSql}
      ORDER BY CASE r.name
                 WHEN 'head_academic' THEN 1
                 WHEN 'registration' THEN 2
@@ -343,8 +417,16 @@ $allUsers = $conn->query(
                 WHEN 'student' THEN 5
                 ELSE 6
               END,
-              u.full_name"
-)->fetch_all(MYSQLI_ASSOC);
+              u.full_name";
+if ($userTypes !== '') {
+    $allUsersStmt = $conn->prepare($allUsersSql);
+    $allUsersStmt->bind_param($userTypes, ...$userParams);
+    $allUsersStmt->execute();
+    $allUsers = $allUsersStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $allUsersStmt->close();
+} else {
+    $allUsers = $conn->query($allUsersSql)->fetch_all(MYSQLI_ASSOC);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -366,6 +448,17 @@ $allUsers = $conn->query(
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 Access scope: All faculties — every account except University Rector. Appointment limited to Dean and Registration Office.
+            </div>
+
+            <div class="export-card">
+                <div>
+                    <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export System Users</p>
+                    <p class="export-card-sub">Download the full user list (every account except University Rector).</p>
+                </div>
+                <div class="d-flex gap-2">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=users&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=users&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                </div>
             </div>
 
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
@@ -414,11 +507,29 @@ $allUsers = $conn->query(
                             <input type="text" class="form-control" id="newFullNameInput" name="new_full_name" maxlength="150"
                                    value="<?= htmlspecialchars($assignFormValues['new_full_name']) ?>">
                         </div>
-                        <div class="mb-0">
+                        <div class="mb-3">
                             <label for="newEmailInput" class="form-label">Email</label>
                             <input type="email" class="form-control" id="newEmailInput" name="new_email" maxlength="150"
                                    value="<?= htmlspecialchars($assignFormValues['new_email']) ?>">
-                            <div class="form-text">A username and temporary password will be generated automatically.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="newPasswordInput" class="form-label">Password</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="newPasswordInput" name="new_password" minlength="8" autocomplete="new-password">
+                                <button class="btn btn-outline-secondary toggle-password" type="button" data-target="newPasswordInput" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
+                            <div class="form-text">At least 8 characters. The username will be the Full Name above.</div>
+                        </div>
+                        <div class="mb-0">
+                            <label for="newPasswordConfirmInput" class="form-label">Confirm Password</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="newPasswordConfirmInput" name="new_password_confirm" minlength="8" autocomplete="new-password">
+                                <button class="btn btn-outline-secondary toggle-password" type="button" data-target="newPasswordConfirmInput" aria-label="Show password">
+                                    <i class="bi bi-eye"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -456,13 +567,45 @@ $allUsers = $conn->query(
             <div class="admas-card p-4">
                 <h6 class="fw-bold mb-3" style="color: var(--admas-text);">System Users</h6>
 
+                <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/head_academic/users.php" class="row g-2 mb-3" id="usersFilterForm">
+                    <div class="col-sm-6 col-md-3">
+                        <select class="form-select form-select-sm" name="role">
+                            <option value="">All Roles</option>
+                            <?php foreach (['head_academic', 'registration', 'dean', 'lecturer', 'student'] as $roleOption): ?>
+                                <option value="<?= htmlspecialchars($roleOption) ?>" <?= $filterRole === $roleOption ? 'selected' : '' ?>>
+                                    <?= htmlspecialchars(role_label($roleOption)) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-sm-6 col-md-3">
+                        <select class="form-select form-select-sm" name="status">
+                            <option value="">All Statuses</option>
+                            <option value="active" <?= $filterStatus === 'active' ? 'selected' : '' ?>>Active</option>
+                            <option value="inactive" <?= $filterStatus === 'inactive' ? 'selected' : '' ?>>Inactive</option>
+                        </select>
+                    </div>
+                    <div class="col-sm-12 col-md-4">
+                        <div class="input-group input-group-sm">
+                            <span class="input-group-text bg-transparent"><i class="bi bi-search"></i></span>
+                            <input type="text" class="form-control" name="search" placeholder="Search username, full name, or student ID" data-live-search
+                                   value="<?= htmlspecialchars($filterSearch) ?>">
+                        </div>
+                    </div>
+                    <?php if ($filterRole !== '' || $filterStatus !== '' || $filterSearch !== ''): ?>
+                        <div class="col-sm-6 col-md-2 d-flex align-items-center">
+                            <a href="<?= htmlspecialchars(BASE_URL) ?>/head_academic/users.php" class="small">Clear filters</a>
+                        </div>
+                    <?php endif; ?>
+                </form>
+
                 <div class="table-responsive">
                     <table class="table admas-table align-middle">
                         <thead>
                             <tr>
-                                <th>Username</th>
-                                <th>Full Name</th>
+                                <th>User</th>
                                 <th>Role</th>
+                                <th>Student ID</th>
                                 <th>Faculty</th>
                                 <th>Last Login</th>
                                 <th>Status</th>
@@ -472,14 +615,22 @@ $allUsers = $conn->query(
                         <tbody>
                             <?php if (empty($allUsers)): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-4">No users exist yet.</td>
+                                    <td colspan="7" class="text-center text-muted py-4">
+                                        <?= ($filterRole !== '' || $filterStatus !== '' || $filterSearch !== '') ? 'No users match the selected filters.' : 'No users exist yet.' ?>
+                                    </td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($allUsers as $u): ?>
                                     <tr>
-                                        <td><?= htmlspecialchars($u['username']) ?></td>
-                                        <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($u['full_name']) ?></td>
+                                        <td><?php render_person_avatar_cell($u['photo_path'] ?? null, (string) $u['full_name'], (string) $u['username']); ?></td>
                                         <td><?= htmlspecialchars(role_label($u['role_name'])) ?></td>
+                                        <td>
+                                            <?php if ($u['student_no']): ?>
+                                                <?= htmlspecialchars($u['student_no']) ?>
+                                            <?php else: ?>
+                                                <span class="text-muted">—</span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <?php if ($u['faculty_name']): ?>
                                                 <?= htmlspecialchars($u['faculty_name']) ?>
@@ -502,8 +653,8 @@ $allUsers = $conn->query(
                                                   onsubmit="return confirm('Reset the password for <?= htmlspecialchars(addslashes($u['username'])) ?>? A new temporary password will be generated.');">
                                                 <input type="hidden" name="action" value="reset_password">
                                                 <input type="hidden" name="user_id" value="<?= (int) $u['id'] ?>">
-                                                <button type="submit" class="btn-icon" title="Reset Password">
-                                                    <i class="bi bi-key"></i>
+                                                <button type="submit" class="btn-icon-label" title="Reset Password">
+                                                    <i class="bi bi-key"></i> Reset
                                                 </button>
                                             </form>
                                             <?php if ((int) $u['id'] !== (int) $currentUser['id']): ?>
@@ -511,8 +662,8 @@ $allUsers = $conn->query(
                                                       onsubmit="return confirm('<?= $u['status'] === 'active' ? 'Deactivate' : 'Activate' ?> <?= htmlspecialchars(addslashes($u['username'])) ?>?');">
                                                     <input type="hidden" name="action" value="toggle_status">
                                                     <input type="hidden" name="user_id" value="<?= (int) $u['id'] ?>">
-                                                    <button type="submit" class="btn-icon" title="<?= $u['status'] === 'active' ? 'Deactivate' : 'Activate' ?>">
-                                                        <i class="bi <?= $u['status'] === 'active' ? 'bi-person-x' : 'bi-person-check' ?>"></i>
+                                                    <button type="submit" class="btn-icon-label<?= $u['status'] === 'active' ? ' text-danger' : '' ?>" title="<?= $u['status'] === 'active' ? 'Deactivate' : 'Activate' ?>">
+                                                        <i class="bi <?= $u['status'] === 'active' ? 'bi-person-x' : 'bi-person-check' ?>"></i> <?= $u['status'] === 'active' ? 'Deactivate' : 'Activate' ?>
                                                     </button>
                                                 </form>
                                             <?php endif; ?>
@@ -528,12 +679,16 @@ $allUsers = $conn->query(
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/password-toggle.js"></script>
     <script>
         function toggleNewUserFields() {
             const sel = document.getElementById('selectedUserSelect').value;
             const isNew = sel === 'new';
             document.getElementById('newUserFields').style.display = isNew ? '' : 'none';
             document.getElementById('newFullNameInput').required = isNew;
+            document.getElementById('newPasswordInput').required = isNew;
+            document.getElementById('newPasswordConfirmInput').required = isNew;
         }
 
         function toggleFacultyField() {
@@ -546,6 +701,7 @@ $allUsers = $conn->query(
         window.addEventListener('DOMContentLoaded', () => {
             toggleNewUserFields();
             toggleFacultyField();
+            admasInitLiveFilter('#usersFilterForm');
         });
     </script>
 </body>

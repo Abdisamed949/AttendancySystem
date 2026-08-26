@@ -15,13 +15,27 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// University Rector is a supervisory, read-only Viewer everywhere. Dean
+// has full CRUD again within their own faculty (restored per explicit
+// request, after an earlier session's temporary Viewer conversion) — the
+// existing $role === 'dean' scoping throughout this file still narrows
+// everything to their own faculty only.
+$isReadOnly = $role === 'university_rector';
+// admin/course_enrollments.php (Enroll Students) is a separate, still
+// read-only-for-Dean surface — this session's Course/Lecturer/Semester
+// CRUD grant deliberately did not extend to roster enrollment, which
+// stays real student data, not schedule metadata. Computed separately so
+// this page's own "Enroll" vs "Enrolled" label always matches what that
+// linked page will actually allow.
+$enrollmentsReadOnly = in_array($role, ['university_rector', 'dean'], true);
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -80,6 +94,10 @@ $formValues = [
     'offering_shift' => '',
     'offering_lecturer_id' => 0,
     'roster_department_id' => 0,
+    'offering_day_of_week' => '',
+    'offering_start_time' => '',
+    'offering_end_time' => '',
+    'offering_room' => '',
 ];
 
 /**
@@ -163,6 +181,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $offeringShift = $action === 'create' ? (string) ($_POST['offering_shift'] ?? '') : '';
         $offeringLecturerId = $action === 'create' ? (int) ($_POST['offering_lecturer_id'] ?? 0) : 0;
         $rosterDepartmentIdRaw = $action === 'create' ? (int) ($_POST['roster_department_id'] ?? 0) : 0;
+        // Class Time Table — optional, same as admin/course_offerings.php's
+        // own Day/Start Time/End Time/Room fields (all-or-nothing only for
+        // the time pair; Room is cosmetic, no validation beyond length).
+        $offeringDayOfWeekRaw = $action === 'create' ? trim((string) ($_POST['offering_day_of_week'] ?? '')) : '';
+        $offeringStartTimeRaw = $action === 'create' ? trim((string) ($_POST['offering_start_time'] ?? '')) : '';
+        $offeringEndTimeRaw = $action === 'create' ? trim((string) ($_POST['offering_end_time'] ?? '')) : '';
+        $offeringRoomRaw = $action === 'create' ? trim((string) ($_POST['offering_room'] ?? '')) : '';
 
         $formMode = $action === 'update' ? 'edit' : 'create';
         $formValues = [
@@ -175,6 +200,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'offering_shift' => $offeringShift,
             'offering_lecturer_id' => $offeringLecturerId,
             'roster_department_id' => $rosterDepartmentIdRaw,
+            'offering_day_of_week' => $offeringDayOfWeekRaw,
+            'offering_start_time' => $offeringStartTimeRaw,
+            'offering_end_time' => $offeringEndTimeRaw,
+            'offering_room' => $offeringRoomRaw,
         ];
 
         $validationError = '';
@@ -304,6 +333,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        // Class Time Table for the first offering — optional, resolved only
+        // once every other offering check has passed.
+        $offeringDayOfWeek = null;
+        $offeringStartTime = null;
+        $offeringEndTime = null;
+        $offeringRoom = null;
+        if ($validationError === '' && $action === 'create' && $offeringSemesterId > 0) {
+            if ($offeringDayOfWeekRaw !== '' && !array_key_exists($offeringDayOfWeekRaw, DAY_OF_WEEK_LABELS)) {
+                $validationError = 'Please select a valid day for the Class Time Table.';
+            } elseif (($offeringStartTimeRaw !== '') !== ($offeringEndTimeRaw !== '')) {
+                $validationError = 'Please provide both a start time and an end time for the Class Time Table, or leave both blank.';
+            } elseif ($offeringStartTimeRaw !== '' && $offeringEndTimeRaw !== '' && $offeringStartTimeRaw >= $offeringEndTimeRaw) {
+                $validationError = 'Class Time Table end time must be after the start time.';
+            } else {
+                $offeringDayOfWeek = $offeringDayOfWeekRaw !== '' ? $offeringDayOfWeekRaw : null;
+                $offeringStartTime = $offeringStartTimeRaw !== '' ? $offeringStartTimeRaw : null;
+                $offeringEndTime = $offeringEndTimeRaw !== '' ? $offeringEndTimeRaw : null;
+                $offeringRoom = $offeringRoomRaw !== '' ? mb_substr($offeringRoomRaw, 0, 50) : null;
+            }
+        }
+
         if ($validationError === '') {
             if ($action === 'create') {
                 $conn->begin_transaction();
@@ -318,9 +368,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($offeringSemesterId > 0) {
                         $offeringLecturerParam = $offeringLecturerId > 0 ? $offeringLecturerId : null;
                         $offerStmt = $conn->prepare(
-                            'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift) VALUES (?, ?, ?, ?, ?)'
+                            'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift, day_of_week, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
                         );
-                        $offerStmt->bind_param('iiiis', $newCourseId, $offeringSemesterId, $offeringLecturerParam, $rosterDepartmentId, $offeringShift);
+                        $offerStmt->bind_param(
+                            'iiiisssss',
+                            $newCourseId,
+                            $offeringSemesterId,
+                            $offeringLecturerParam,
+                            $rosterDepartmentId,
+                            $offeringShift,
+                            $offeringDayOfWeek,
+                            $offeringStartTime,
+                            $offeringEndTime,
+                            $offeringRoom
+                        );
                         $offerStmt->execute();
                         $offerStmt->close();
                         $offeringCreated = true;
@@ -350,6 +411,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $courseId = (int) ($_POST['course_id'] ?? 0);
         $result = delete_course_row($conn, $courseId, $role, $deanFacultyId);
         if ($result['ok']) {
+            audit_log($conn, 'delete_course', 'course', $courseId, isset($result['message']) ? preg_replace('/ deleted\.?$/', '', $result['message']) : null);
             $_SESSION['flash_success'] = 'Course deleted successfully.';
             redirect_to('admin/courses.php');
         } else {
@@ -380,6 +442,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
             }
             if ($deletedCount > 0) {
+                audit_log($conn, 'bulk_delete', 'course', null, null, $summary);
                 $_SESSION['flash_success'] = $summary;
             } else {
                 $_SESSION['flash_error'] = $summary;
@@ -427,6 +490,19 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
 // to the Dean's own faculty (never trusted from request input).
 // ---------------------------------------------------------------------
 $filterSearch = trim((string) ($_GET['search'] ?? ''));
+// Faculty/Department filter — narrows the course list the same way
+// admin/students.php's own Faculty->Department cascade already does, so a
+// real university with many faculties/departments/courses doesn't force
+// every visit to load and scroll through the entire catalog. Dean's own
+// faculty is always locked server-side (never trusted from the request),
+// same as every other write/read boundary in this file.
+$filterFacultyId = $role === 'dean' ? $deanFacultyId : (int) ($_GET['faculty_id'] ?? 0);
+$filterDepartmentId = (int) ($_GET['department_id'] ?? 0);
+
+// Pagination — a real course catalog can run into the hundreds; loading
+// and rendering every row unconditionally doesn't scale.
+const COURSES_PER_PAGE = 20;
+$filterPage = max(1, (int) ($_GET['page'] ?? 1));
 
 if ($role === 'dean') {
     $deptStmt = $conn->prepare(
@@ -440,34 +516,6 @@ if ($role === 'dean') {
     $deptStmt->execute();
     $departments = $deptStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $deptStmt->close();
-
-    // Course list only — no offering/semester columns. "Current Offering"
-    // is resolved separately below (see the 3-query note further down):
-    // a faculty can have more than one concurrently-current semester, and
-    // a course can now have more than one shift-offering per semester, so
-    // a single flat LEFT JOIN here would fan out into duplicate course
-    // rows once either of those is true.
-    $courseSql = "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
-                d.name AS department_name, f.name AS faculty_name, d.faculty_id
-         FROM courses c
-         JOIN departments d ON d.id = c.department_id
-         JOIN faculties f ON f.id = d.faculty_id
-         WHERE d.faculty_id = ?";
-    $courseParams = [$deanFacultyId];
-    $courseTypes = 'i';
-    if ($filterSearch !== '') {
-        $courseSql .= ' AND (c.code LIKE ? OR c.name LIKE ?)';
-        $likeParam = '%' . $filterSearch . '%';
-        $courseParams[] = $likeParam;
-        $courseParams[] = $likeParam;
-        $courseTypes .= 'ss';
-    }
-    $courseSql .= ' ORDER BY d.name, c.code';
-    $courseStmt = $conn->prepare($courseSql);
-    $courseStmt->bind_param($courseTypes, ...$courseParams);
-    $courseStmt->execute();
-    $courses = $courseStmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $courseStmt->close();
 } else {
     $departments = $conn->query(
         "SELECT d.id, d.code, d.name, d.faculty_id, f.name AS faculty_name
@@ -475,31 +523,84 @@ if ($role === 'dean') {
          JOIN faculties f ON f.id = d.faculty_id
          ORDER BY f.name, d.name"
     )->fetch_all(MYSQLI_ASSOC);
+}
 
-    $courseSql = "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
-                d.name AS department_name, f.name AS faculty_name, d.faculty_id
-         FROM courses c
-         JOIN departments d ON d.id = c.department_id
-         JOIN faculties f ON f.id = d.faculty_id";
-    $courseParams = [];
-    $courseTypes = '';
-    if ($filterSearch !== '') {
-        $courseSql .= ' WHERE (c.code LIKE ? OR c.name LIKE ?)';
-        $likeParam = '%' . $filterSearch . '%';
-        $courseParams = [$likeParam, $likeParam];
-        $courseTypes = 'ss';
+// A submitted department_id only applies if it actually belongs to the
+// (possibly locked) faculty filter — otherwise it's silently dropped
+// rather than either erroring or accidentally scoping across faculties.
+if ($filterDepartmentId > 0) {
+    $deptValid = false;
+    foreach ($departments as $dept) {
+        if ((int) $dept['id'] === $filterDepartmentId
+            && ($filterFacultyId <= 0 || (int) $dept['faculty_id'] === $filterFacultyId)) {
+            $deptValid = true;
+            break;
+        }
     }
-    $courseSql .= ' ORDER BY f.name, d.name, c.code';
-    if ($courseTypes !== '') {
-        $courseStmt = $conn->prepare($courseSql);
-        $courseStmt->bind_param($courseTypes, ...$courseParams);
-        $courseStmt->execute();
-        $courses = $courseStmt->get_result()->fetch_all(MYSQLI_ASSOC);
-        $courseStmt->close();
-    } else {
-        $courses = $conn->query($courseSql)->fetch_all(MYSQLI_ASSOC);
+    if (!$deptValid) {
+        $filterDepartmentId = 0;
     }
 }
+
+// Course list only — no offering/semester columns. "Current Offering" is
+// resolved separately below (see the 3-query note further down): a
+// faculty can have more than one concurrently-current semester, and a
+// course can now have more than one shift-offering per semester, so a
+// single flat LEFT JOIN here would fan out into duplicate course rows once
+// either of those is true.
+$courseWhere = [];
+$courseParams = [];
+$courseTypes = '';
+if ($role === 'dean') {
+    $courseWhere[] = 'd.faculty_id = ?';
+    $courseParams[] = $deanFacultyId;
+    $courseTypes .= 'i';
+} elseif ($filterFacultyId > 0) {
+    $courseWhere[] = 'd.faculty_id = ?';
+    $courseParams[] = $filterFacultyId;
+    $courseTypes .= 'i';
+}
+if ($filterDepartmentId > 0) {
+    $courseWhere[] = 'c.department_id = ?';
+    $courseParams[] = $filterDepartmentId;
+    $courseTypes .= 'i';
+}
+if ($filterSearch !== '') {
+    $courseWhere[] = '(c.code LIKE ? OR c.name LIKE ?)';
+    $likeParam = '%' . $filterSearch . '%';
+    $courseParams[] = $likeParam;
+    $courseParams[] = $likeParam;
+    $courseTypes .= 'ss';
+}
+$whereSql = $courseWhere !== [] ? ' WHERE ' . implode(' AND ', $courseWhere) : '';
+
+$countSql = "SELECT COUNT(*) AS c FROM courses c JOIN departments d ON d.id = c.department_id{$whereSql}";
+if ($courseTypes !== '') {
+    $countStmt = $conn->prepare($countSql);
+    $countStmt->bind_param($courseTypes, ...$courseParams);
+    $countStmt->execute();
+    $totalCourses = (int) ($countStmt->get_result()->fetch_assoc()['c'] ?? 0);
+    $countStmt->close();
+} else {
+    $totalCourses = (int) ($conn->query($countSql)->fetch_assoc()['c'] ?? 0);
+}
+$totalCoursePages = max(1, (int) ceil($totalCourses / COURSES_PER_PAGE));
+$filterPage = min($filterPage, $totalCoursePages);
+$courseOffset = ($filterPage - 1) * COURSES_PER_PAGE;
+
+$courseSql = "SELECT c.id, c.code, c.name, c.credit_hours, c.department_id,
+            d.name AS department_name, f.name AS faculty_name, d.faculty_id
+     FROM courses c
+     JOIN departments d ON d.id = c.department_id
+     JOIN faculties f ON f.id = d.faculty_id{$whereSql}
+     ORDER BY f.name, d.name, c.code
+     LIMIT ? OFFSET ?";
+$courseStmt = $conn->prepare($courseSql);
+$pagedParams = array_merge($courseParams, [COURSES_PER_PAGE, $courseOffset]);
+$courseStmt->bind_param($courseTypes . 'ii', ...$pagedParams);
+$courseStmt->execute();
+$courses = $courseStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$courseStmt->close();
 
 $departmentsByFaculty = [];
 foreach ($departments as $dept) {
@@ -731,15 +832,40 @@ foreach ($offeringLecturers as $lec) {
                         </form>
                         <?php endif; ?>
 
-                        <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" id="coursesFilterForm" class="mb-3">
-                            <div class="input-group input-group-sm" style="max-width: 340px;">
-                                <span class="input-group-text bg-transparent"><i class="bi bi-search"></i></span>
-                                <input type="text" class="form-control" name="search" placeholder="Search by course code or name" data-live-search
-                                       value="<?= htmlspecialchars($filterSearch) ?>">
-                                <?php if ($filterSearch !== ''): ?>
-                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="btn btn-outline-secondary" title="Clear search"><i class="bi bi-x-lg"></i></a>
+                        <form method="get" action="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="row g-2 mb-3" id="coursesFilterForm">
+                            <div class="col-sm-6 col-md-3">
+                                <?php if ($role === 'dean'): ?>
+                                    <select class="form-select form-select-sm" id="coursesFilterFacultySelect" disabled onchange="updateCoursesFilterDepartmentOptions(this.value, 0)">
+                                        <option value="<?= (int) $deanFacultyId ?>" selected><?= htmlspecialchars($deanFacultyName) ?></option>
+                                    </select>
+                                <?php else: ?>
+                                    <select class="form-select form-select-sm" name="faculty_id" id="coursesFilterFacultySelect" onchange="updateCoursesFilterDepartmentOptions(this.value, 0)">
+                                        <option value="0">All Faculties</option>
+                                        <?php foreach ($offeringFacultiesForForm as $f): ?>
+                                            <option value="<?= (int) $f['id'] ?>" <?= $filterFacultyId === (int) $f['id'] ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars($f['name']) ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
                                 <?php endif; ?>
                             </div>
+                            <div class="col-sm-6 col-md-3">
+                                <select class="form-select form-select-sm" name="department_id" id="coursesFilterDepartmentSelect">
+                                    <option value="0">All Departments</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-12 col-md-4">
+                                <div class="input-group input-group-sm">
+                                    <span class="input-group-text bg-transparent"><i class="bi bi-search"></i></span>
+                                    <input type="text" class="form-control" name="search" placeholder="Search by course code or name" data-live-search
+                                           value="<?= htmlspecialchars($filterSearch) ?>">
+                                </div>
+                            </div>
+                            <?php if ($filterFacultyId > 0 || $filterDepartmentId > 0 || $filterSearch !== ''): ?>
+                                <div class="col-sm-6 col-md-2 d-flex align-items-center">
+                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php" class="small">Clear filters</a>
+                                </div>
+                            <?php endif; ?>
                         </form>
 
                         <div class="table-responsive">
@@ -759,7 +885,11 @@ foreach ($offeringLecturers as $lec) {
                                 <tbody>
                                     <?php if (empty($courses)): ?>
                                         <tr>
-                                            <td colspan="8" class="text-center text-muted py-4"><?= $filterSearch !== '' ? 'No courses match "' . htmlspecialchars($filterSearch) . '".' : 'No courses have been created yet.' ?></td>
+                                            <td colspan="8" class="text-center text-muted py-4">
+                                                <?= ($filterSearch !== '' || $filterFacultyId > 0 || $filterDepartmentId > 0)
+                                                    ? 'No courses match the selected filters.'
+                                                    : 'No courses have been created yet.' ?>
+                                            </td>
                                         </tr>
                                     <?php else: ?>
                                         <?php foreach ($courses as $c): ?>
@@ -785,11 +915,16 @@ foreach ($offeringLecturers as $lec) {
                                                     <?php if (empty($courseOfferingsBySem)): ?>
                                                         <span class="text-muted fst-italic">No offering yet</span>
                                                     <?php else: ?>
+                                                        <?php $offeringSemIndex = 0; $offeringSemCount = count($courseOfferingsBySem); ?>
                                                         <?php foreach ($courseOfferingsBySem as $semOfferings): ?>
                                                             <?php
                                                             $semMeta = $semOfferings[0];
                                                             $isGuestFacultySem = (int) $semMeta['semester_faculty_id'] !== (int) $c['faculty_id'];
+                                                            $offeringSemIndex++;
                                                             ?>
+                                                            <?php if ($offeringSemIndex === 2): ?>
+                                                                <div class="offering-extra d-none" id="offeringExtra<?= (int) $c['id'] ?>">
+                                                            <?php endif; ?>
                                                             <div class="mb-1">
                                                                 <?php if ($isGuestFacultySem): ?>
                                                                     <span class="badge-pill badge-warning">Guest: <?= htmlspecialchars($semMeta['semester_faculty_name']) ?></span>
@@ -845,6 +980,13 @@ foreach ($offeringLecturers as $lec) {
                                                                 </div>
                                                             </div>
                                                         <?php endforeach; ?>
+                                                        <?php if ($offeringSemCount > 1): ?>
+                                                            </div>
+                                                            <a href="#" class="small fw-semibold text-decoration-none" style="color: var(--admas-sky);"
+                                                               onclick="event.preventDefault(); this.classList.add('d-none'); document.getElementById('offeringExtra<?= (int) $c['id'] ?>').classList.remove('d-none');">
+                                                                +<?= $offeringSemCount - 1 ?> more offering<?= $offeringSemCount - 1 === 1 ? '' : 's' ?>
+                                                            </a>
+                                                        <?php endif; ?>
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= (int) $c['credit_hours'] ?></td>
@@ -853,8 +995,8 @@ foreach ($offeringLecturers as $lec) {
                                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="<?= $isReadOnly ? 'View Offerings' : 'Manage Offerings' ?>">
                                                             <i class="bi bi-calendar2-week"></i> Offerings
                                                         </a>
-                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="<?= $isReadOnly ? 'View Enrolled Students' : 'Enroll Students' ?>">
-                                                            <i class="bi bi-person-check"></i> <?= $isReadOnly ? 'Enrolled' : 'Enroll' ?>
+                                                        <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_enrollments.php?course_id=<?= (int) $c['id'] ?>" class="btn-icon-label text-sky" title="<?= $enrollmentsReadOnly ? 'View Enrolled Students' : 'Enroll Students' ?>">
+                                                            <i class="bi bi-person-check"></i> <?= $enrollmentsReadOnly ? 'Enrolled' : 'Enroll' ?>
                                                         </a>
                                                         <?php if (!$isReadOnly): ?>
                                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/courses.php?edit=<?= (int) $c['id'] ?>" class="btn-icon-label" title="Edit">
@@ -876,6 +1018,50 @@ foreach ($offeringLecturers as $lec) {
                                     <?php endif; ?>
                                 </tbody>
                             </table>
+                        </div>
+
+                        <?php
+                        $coursesPageQuery = static function (int $page) use ($filterFacultyId, $filterDepartmentId, $filterSearch): string {
+                            $params = ['page' => $page];
+                            if ($filterFacultyId > 0) {
+                                $params['faculty_id'] = $filterFacultyId;
+                            }
+                            if ($filterDepartmentId > 0) {
+                                $params['department_id'] = $filterDepartmentId;
+                            }
+                            if ($filterSearch !== '') {
+                                $params['search'] = $filterSearch;
+                            }
+
+                            return BASE_URL . '/admin/courses.php?' . http_build_query($params);
+                        };
+                        ?>
+                        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mt-3">
+                            <span class="text-muted small">
+                                <?php if ($totalCourses > 0): ?>
+                                    Showing <?= number_format(min($courseOffset + 1, $totalCourses)) ?>&ndash;<?= number_format(min($courseOffset + COURSES_PER_PAGE, $totalCourses)) ?>
+                                    of <?= number_format($totalCourses) ?> course<?= $totalCourses === 1 ? '' : 's' ?>
+                                <?php else: ?>
+                                    0 courses
+                                <?php endif; ?>
+                            </span>
+                            <?php if ($totalCoursePages > 1): ?>
+                                <nav aria-label="Course list pages">
+                                    <ul class="pagination pagination-sm mb-0">
+                                        <li class="page-item <?= $filterPage <= 1 ? 'disabled' : '' ?>">
+                                            <a class="page-link" href="<?= htmlspecialchars($coursesPageQuery(max(1, $filterPage - 1))) ?>">&lsaquo;</a>
+                                        </li>
+                                        <?php for ($p = 1; $p <= $totalCoursePages; $p++): ?>
+                                            <li class="page-item <?= $p === $filterPage ? 'active' : '' ?>">
+                                                <a class="page-link" href="<?= htmlspecialchars($coursesPageQuery($p)) ?>"><?= $p ?></a>
+                                            </li>
+                                        <?php endfor; ?>
+                                        <li class="page-item <?= $filterPage >= $totalCoursePages ? 'disabled' : '' ?>">
+                                            <a class="page-link" href="<?= htmlspecialchars($coursesPageQuery(min($totalCoursePages, $filterPage + 1))) ?>">&rsaquo;</a>
+                                        </li>
+                                    </ul>
+                                </nav>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
@@ -1000,6 +1186,33 @@ foreach ($offeringLecturers as $lec) {
                                         </select>
                                         <div class="form-text">Only lecturers in the selected department are shown.</div>
                                     </div>
+
+                                    <div class="mb-3">
+                                        <label class="form-label">Class Time Table — Day <span class="text-muted small">(optional)</span></label>
+                                        <select class="form-select" name="offering_day_of_week">
+                                            <option value="">Not scheduled</option>
+                                            <?php foreach (DAY_OF_WEEK_LABELS as $dayValue => $dayLabel): ?>
+                                                <option value="<?= htmlspecialchars($dayValue) ?>" <?= $formValues['offering_day_of_week'] === $dayValue ? 'selected' : '' ?>>
+                                                    <?= htmlspecialchars($dayLabel) ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Start Time</label>
+                                            <input type="time" class="form-control" name="offering_start_time" value="<?= htmlspecialchars($formValues['offering_start_time']) ?>">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">End Time</label>
+                                            <input type="time" class="form-control" name="offering_end_time" value="<?= htmlspecialchars($formValues['offering_end_time']) ?>">
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label small mb-1">Room <span class="text-muted small">(optional)</span></label>
+                                        <input type="text" class="form-control" name="offering_room" maxlength="50" placeholder="e.g. Room 3" value="<?= htmlspecialchars($formValues['offering_room']) ?>">
+                                        <div class="form-text">Leave Day/Time blank if this offering isn't scheduled into a weekly slot yet — you can always set it later from Manage Offerings.</div>
+                                    </div>
                                 </div>
                             <?php endif; ?>
 
@@ -1032,6 +1245,8 @@ foreach ($offeringLecturers as $lec) {
                     entityLabelPlural: 'courses',
                 });
             }
+            const coursesFilterFacultyId = document.getElementById('coursesFilterFacultySelect').value;
+            updateCoursesFilterDepartmentOptions(coursesFilterFacultyId, <?= (int) $filterDepartmentId ?>);
             admasInitLiveFilter('#coursesFilterForm');
         });
 
@@ -1051,6 +1266,35 @@ foreach ($offeringLecturers as $lec) {
         const departmentsByFacultyId = <?= json_encode($departmentsByFacultyId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const lecturersByDepartmentId = <?= json_encode($lecturersByDepartmentId, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
         const allActiveLecturers = <?= json_encode($allActiveLecturers, JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+
+        // Faculty -> Department filter bar cascade (list view), separate
+        // from the Add Course form's own Department cascade below — reuses
+        // the same departmentsByFacultyId map, just a different <select>.
+        function updateCoursesFilterDepartmentOptions(facultyId, selectedDepartmentId) {
+            const select = document.getElementById('coursesFilterDepartmentSelect');
+            let departments = departmentsByFacultyId[facultyId] || [];
+            if (departments.length === 0 && (!facultyId || facultyId === '0')) {
+                departments = Object.values(departmentsByFacultyId).flat();
+            }
+            select.innerHTML = '';
+
+            const allOption = document.createElement('option');
+            allOption.value = '0';
+            allOption.textContent = 'All Departments';
+            select.appendChild(allOption);
+
+            departments.forEach((dept) => {
+                const opt = document.createElement('option');
+                opt.value = String(dept.id);
+                opt.textContent = dept.name;
+                select.appendChild(opt);
+            });
+
+            select.value = String(selectedDepartmentId || 0);
+            if (select.value !== String(selectedDepartmentId || 0)) {
+                select.value = '0';
+            }
+        }
 
         function admasCurrentOfferingFacultyId() {
             const facultySelect = document.getElementById('offeringFacultySelect');

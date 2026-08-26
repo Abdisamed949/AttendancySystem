@@ -2,6 +2,10 @@
 composer.phar
 .env
 
+# Real SMTP credentials — never commit these. Copy
+# includes/mail_config.example.php to includes/mail_config.php locally.
+includes/mail_config.php
+
 # OS / editor
 .DS_Store
 Thumbs.db

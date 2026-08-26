@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 require_role(['university_rector', 'head_academic']);
 
@@ -57,6 +58,7 @@ $reopenModal = false;
 $reopenMode = 'create';
 $reopenId = 0;
 $reopenName = '';
+$reopenCode = '';
 $reopenDeanId = 0;
 $reopenSemestersPerYear = 3;
 $reopenTotalSemesters = 8;
@@ -75,6 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'create' || $action === 'update') {
         $facultyId = $action === 'update' ? (int) ($_POST['faculty_id'] ?? 0) : 0;
         $name = trim((string) ($_POST['name'] ?? ''));
+        $code = strtoupper(trim((string) ($_POST['code'] ?? '')));
         $deanUserId = (int) ($_POST['dean_user_id'] ?? 0);
         $semestersPerYear = (int) ($_POST['semesters_per_year'] ?? 0);
         $totalSemesters = (int) ($_POST['total_semesters'] ?? 0);
@@ -83,6 +86,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($name === '') {
             $validationError = 'Faculty name is required.';
+        } elseif ($code === '') {
+            $validationError = 'Faculty Code is required.';
+        } elseif (!preg_match('/^[A-Z0-9]+$/', $code)) {
+            $validationError = 'Faculty Code may only contain letters and numbers (no spaces or symbols).';
         } elseif ($action === 'update' && $facultyId <= 0) {
             $validationError = 'Invalid faculty selected for editing.';
         } elseif ($semestersPerYear < 1 || $semestersPerYear > 6) {
@@ -99,6 +106,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $validationError = 'A faculty with this name already exists.';
             }
             $dupStmt->close();
+        }
+
+        if ($validationError === '') {
+            $dupCodeStmt = $conn->prepare('SELECT id FROM faculties WHERE code = ? AND id != ?');
+            $dupCodeStmt->bind_param('si', $code, $facultyId);
+            $dupCodeStmt->execute();
+            if ($dupCodeStmt->get_result()->fetch_assoc()) {
+                $validationError = 'A faculty with this Code already exists.';
+            }
+            $dupCodeStmt->close();
         }
 
         if ($validationError === '' && $deanUserId > 0) {
@@ -138,8 +155,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $deanParam = $deanUserId > 0 ? $deanUserId : null;
 
                 if ($action === 'create') {
-                    $insertStmt = $conn->prepare('INSERT INTO faculties (name, semesters_per_year, total_semesters, dean_user_id) VALUES (?, ?, ?, ?)');
-                    $insertStmt->bind_param('siii', $name, $semestersPerYear, $totalSemesters, $deanParam);
+                    $insertStmt = $conn->prepare('INSERT INTO faculties (name, code, semesters_per_year, total_semesters, dean_user_id) VALUES (?, ?, ?, ?, ?)');
+                    $insertStmt->bind_param('ssiii', $name, $code, $semestersPerYear, $totalSemesters, $deanParam);
                     $insertStmt->execute();
                     $facultyId = (int) $conn->insert_id;
                     $insertStmt->close();
@@ -150,8 +167,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $releaseStmt->execute();
                     $releaseStmt->close();
 
-                    $updateStmt = $conn->prepare('UPDATE faculties SET name = ?, semesters_per_year = ?, total_semesters = ?, dean_user_id = ? WHERE id = ?');
-                    $updateStmt->bind_param('siiii', $name, $semestersPerYear, $totalSemesters, $deanParam, $facultyId);
+                    $updateStmt = $conn->prepare('UPDATE faculties SET name = ?, code = ?, semesters_per_year = ?, total_semesters = ?, dean_user_id = ? WHERE id = ?');
+                    $updateStmt->bind_param('ssiiii', $name, $code, $semestersPerYear, $totalSemesters, $deanParam, $facultyId);
                     $updateStmt->execute();
                     $updateStmt->close();
                 }
@@ -178,6 +195,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $reopenMode = $action === 'update' ? 'edit' : 'create';
         $reopenId = $facultyId;
         $reopenName = $name;
+        $reopenCode = $code;
         $reopenDeanId = $deanUserId;
         $reopenSemestersPerYear = $semestersPerYear > 0 ? $semestersPerYear : 3;
         $reopenTotalSemesters = $totalSemesters > 0 ? $totalSemesters : 8;
@@ -193,11 +211,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($deptCount > 0) {
             $errorMessage = "Cannot delete this faculty: it still has {$deptCount} department(s) linked to it. Reassign or remove them first.";
         } else {
+            $facultyNameStmt = $conn->prepare('SELECT name FROM faculties WHERE id = ?');
+            $facultyNameStmt->bind_param('i', $facultyId);
+            $facultyNameStmt->execute();
+            $facultyNameRow = $facultyNameStmt->get_result()->fetch_assoc();
+            $facultyNameStmt->close();
+
             $deleteStmt = $conn->prepare('DELETE FROM faculties WHERE id = ?');
             $deleteStmt->bind_param('i', $facultyId);
             $deleteStmt->execute();
             $deleteStmt->close();
 
+            audit_log($conn, 'delete_faculty', 'faculty', $facultyId, $facultyNameRow['name'] ?? null);
             $_SESSION['flash_success'] = 'Faculty deleted successfully.';
             redirect_to('admin/faculties.php');
         }
@@ -216,7 +241,7 @@ $deanListStmt->close();
 
 $faculties = [];
 $listStmt = $conn->prepare(
-    "SELECT f.id, f.name, f.semesters_per_year, f.total_semesters,
+    "SELECT f.id, f.name, f.code, f.semesters_per_year, f.total_semesters,
             (SELECT du.id FROM users du WHERE du.faculty_id = f.id AND du.role_id = ? LIMIT 1) AS dean_id,
             (SELECT du.full_name FROM users du WHERE du.faculty_id = f.id AND du.role_id = ? LIMIT 1) AS dean_name,
             (SELECT COUNT(*) FROM departments d WHERE d.faculty_id = f.id) AS dept_count,
@@ -271,6 +296,17 @@ $listStmt->close();
                 <?php endif; ?>
             </div>
 
+            <div class="export-card">
+                <div>
+                    <p class="export-card-title"><i class="bi bi-cloud-arrow-down-fill"></i> Export Faculties</p>
+                    <p class="export-card-sub">Download the full, university-wide faculty list.</p>
+                </div>
+                <div class="d-flex gap-2">
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=faculties&format=excel" class="btn btn-sm"><i class="bi bi-file-earmark-excel"></i> Excel</a>
+                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=faculties&format=pdf" class="btn btn-sm"><i class="bi bi-file-earmark-pdf"></i> PDF</a>
+                </div>
+            </div>
+
             <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-4">
                 <div>
                     <h4 class="fw-bold mb-1" style="color: var(--admas-text);">Faculty Management</h4>
@@ -313,7 +349,7 @@ $listStmt->close();
                     <h6 class="fw-bold mb-0" style="color: var(--admas-text);">All Faculties</h6>
                     <?php if (!$isReadOnly): ?>
                     <button type="button" class="btn btn-primary btn-sm" style="background-color: var(--admas-sky); border-color: var(--admas-sky);"
-                            onclick='openFacultyModal("create", 0, "", 0, 3, 8)'>
+                            onclick='openFacultyModal("create", 0, "", "", 0, 3, 8)'>
                         <i class="bi bi-plus-lg"></i> Add Faculty
                     </button>
                     <?php endif; ?>
@@ -324,6 +360,7 @@ $listStmt->close();
                         <thead>
                             <tr>
                                 <th>Faculty Name</th>
+                                <th>Code</th>
                                 <th>Dean</th>
                                 <th>Semesters/Year</th>
                                 <th>Total Semesters</th>
@@ -335,12 +372,13 @@ $listStmt->close();
                         <tbody>
                             <?php if (empty($faculties)): ?>
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-4">No faculties have been created yet.</td>
+                                    <td colspan="8" class="text-center text-muted py-4">No faculties have been created yet.</td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($faculties as $f): ?>
                                     <tr>
                                         <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($f['name']) ?></td>
+                                        <td><span class="badge" style="background-color: var(--admas-sky);"><?= htmlspecialchars($f['code']) ?></span></td>
                                         <td>
                                             <?php if ($f['dean_name']): ?>
                                                 <?= htmlspecialchars($f['dean_name']) ?>
@@ -356,16 +394,16 @@ $listStmt->close();
                                             <?php if ($isReadOnly): ?>
                                                 <span class="text-muted">&mdash;</span>
                                             <?php else: ?>
-                                            <button type="button" class="btn-icon" title="Edit"
-                                                    onclick='openFacultyModal("edit", <?= (int) $f['id'] ?>, <?= json_encode($f['name'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= (int) ($f['dean_id'] ?? 0) ?>, <?= (int) $f['semesters_per_year'] ?>, <?= (int) $f['total_semesters'] ?>)'>
-                                                <i class="bi bi-pencil"></i>
+                                            <button type="button" class="btn-icon-label" title="Edit"
+                                                    onclick='openFacultyModal("edit", <?= (int) $f['id'] ?>, <?= json_encode($f['name'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= json_encode($f['code'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>, <?= (int) ($f['dean_id'] ?? 0) ?>, <?= (int) $f['semesters_per_year'] ?>, <?= (int) $f['total_semesters'] ?>)'>
+                                                <i class="bi bi-pencil"></i> Edit
                                             </button>
                                             <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/faculties.php" style="display:inline;"
                                                   onsubmit="return confirm('Delete this faculty? This cannot be undone.');">
                                                 <input type="hidden" name="action" value="delete">
                                                 <input type="hidden" name="faculty_id" value="<?= (int) $f['id'] ?>">
-                                                <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                    <i class="bi bi-trash"></i>
+                                                <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                    <i class="bi bi-trash"></i> Delete
                                                 </button>
                                             </form>
                                             <?php endif; ?>
@@ -397,6 +435,12 @@ $listStmt->close();
                         <div class="mb-3">
                             <label for="facultyNameInput" class="form-label">Faculty Name</label>
                             <input type="text" class="form-control" id="facultyNameInput" name="name" required maxlength="150">
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="facultyCodeInput" class="form-label">Faculty Code</label>
+                            <input type="text" class="form-control text-uppercase" id="facultyCodeInput" name="code" required maxlength="20" style="letter-spacing: 0.05em;">
+                            <div class="form-text">A short code (e.g. "INF" for Informatics).</div>
                         </div>
 
                         <div class="mb-3">
@@ -437,11 +481,12 @@ $listStmt->close();
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <?php if (!$isReadOnly): ?>
     <script>
-        function openFacultyModal(mode, facultyId, name, deanId, semestersPerYear, totalSemesters) {
+        function openFacultyModal(mode, facultyId, name, code, deanId, semestersPerYear, totalSemesters) {
             document.getElementById('facultyModalLabel').textContent = mode === 'edit' ? 'Edit Faculty' : 'Add Faculty';
             document.getElementById('facultyFormAction').value = mode === 'edit' ? 'update' : 'create';
             document.getElementById('facultyFormId').value = facultyId || 0;
             document.getElementById('facultyNameInput').value = name || '';
+            document.getElementById('facultyCodeInput').value = code || '';
             document.getElementById('facultySemestersPerYearInput').value = semestersPerYear || 3;
             document.getElementById('facultyTotalSemestersInput').value = totalSemesters || 8;
 
@@ -463,6 +508,7 @@ $listStmt->close();
                 <?= json_encode($reopenMode) ?>,
                 <?= (int) $reopenId ?>,
                 <?= json_encode($reopenName) ?>,
+                <?= json_encode($reopenCode) ?>,
                 <?= (int) $reopenDeanId ?>,
                 <?= (int) $reopenSemestersPerYear ?>,
                 <?= (int) $reopenTotalSemesters ?>

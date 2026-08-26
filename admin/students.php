@@ -12,6 +12,8 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/lecturer_accounts.php';
+require_once __DIR__ . '/../includes/avatar_helpers.php';
+require_once __DIR__ . '/../includes/audit_helpers.php';
 
 // Registration Office also has "Add/edit students, bulk Excel import of
 // students" per CLAUDE.md §4 — its scope is already university-wide
@@ -28,15 +30,19 @@ $currentUser = current_user();
 $role = current_role();
 // University Rector + Head of Academic Affairs: full VIEW access to this
 // page (all faculties/students), but no create/edit/delete/import/
-// bulk-delete — supervisory/oversight role only. Enforced both by hiding
-// write UI below and by a single dispatch guard at the top of the POST
-// handler further down.
-$isReadOnly = in_array($role, ['university_rector', 'head_academic'], true);
-// Head of Academic Affairs is read-only for CRUD here but still gets
-// select-all/individual checkboxes for its own "Export Students" button
-// (a non-destructive action) — every write-capable role already shows
-// these same checkboxes via !$isReadOnly for bulk delete.
-$showSelectCheckboxes = !$isReadOnly || $role === 'head_academic';
+// bulk-delete — supervisory/oversight role only. Dean is also read-only
+// here now (converted from full CRUD to a faculty-scoped Viewer, per
+// explicit request) — the existing $role === 'dean' scoping blocks below
+// still narrow the list/queries to their own faculty only, this flag just
+// additionally removes their write ability within that scope. Enforced
+// both by hiding write UI below and by a single dispatch guard at the top
+// of the POST handler further down.
+$isReadOnly = in_array($role, ['university_rector', 'head_academic', 'dean'], true);
+// Head of Academic Affairs and Dean are read-only for CRUD here but still
+// get select-all/individual checkboxes for their own "Export Students"
+// button (a non-destructive action) — every write-capable role already
+// shows these same checkboxes via !$isReadOnly for bulk delete.
+$showSelectCheckboxes = !$isReadOnly || $role === 'head_academic' || $role === 'dean';
 
 $deanFacultyId = 0;
 $deanFacultyName = '';
@@ -91,22 +97,47 @@ if (!empty($_SESSION['flash_error'])) {
     $errorMessage = (string) $_SESSION['flash_error'];
     unset($_SESSION['flash_error']);
 }
+$bulkResetResults = [];
+if (!empty($_SESSION['bulk_reset_results'])) {
+    $bulkResetResults = $_SESSION['bulk_reset_results'];
+    unset($_SESSION['bulk_reset_results']);
+}
 
 // ---------------------------------------------------------------------
 // Add / Edit side-panel form state
 // ---------------------------------------------------------------------
 $formMode = 'create';
+// The Enrollment template's real-world field set (Downloads/"Enrollment
+// (2).xlsx", the actual paper/Excel form ADMAS uses to enroll a student) —
+// 'full_name' is one combined field here (not the 3 separate First/
+// Father's/Grandfather's inputs this form used before), split server-side
+// via split_student_full_name() into the same first_name/father_name/
+// grandfather_name columns students already stores. Every new field below
+// is optional (nullable in the DB) except where noted, since not every
+// enrollment record will have all of them filled in at once.
 $formValues = [
     'id' => 0,
     'student_no' => '',
-    'first_name' => '',
-    'father_name' => '',
-    'grandfather_name' => '',
+    'full_name' => '',
+    'mother_name' => '',
+    'sex' => '',
+    'birth_date' => '',
+    'street_address' => '',
+    'phone' => '',
     'email' => '',
+    'emergency_contact_name' => '',
+    'emergency_contact_phone' => '',
+    'nationality' => '',
+    'enrollment_date' => '',
+    'certificate_type' => '',
+    'school_roll_number' => '',
+    'degree' => '',
     'academic_year_id' => 0,
     'faculty_id' => $deanFacultyId,
     'department_id' => 0,
+    'program' => '',
     'semester_id' => 0,
+    'class_year' => '',
     'shift' => 'morning',
 ];
 
@@ -178,6 +209,62 @@ function delete_student_row(mysqli $conn, int $studentId, string $role, int $dea
     }
 }
 
+/**
+ * Shared reset-password logic — used by both the single-row "Reset" action
+ * and the "Reset Selected" bulk action, so the two can never drift on
+ * scoping/validation logic. Reuses the exact same "DepartmentCode-StudentNo"
+ * normalization the rest of this app's Reset Password actions already use
+ * (see admin/users.php / head_academic/users.php), so a pre-existing
+ * name-based or department-code-based username also converges onto the
+ * current scheme the moment it's reset here.
+ */
+function reset_student_password_row(mysqli $conn, int $studentId, string $role, int $deanFacultyId): array
+{
+    if ($role === 'dean') {
+        $studentStmt = $conn->prepare(
+            'SELECT s.user_id, s.student_no, s.full_name, u.username, d.code AS department_code
+             FROM students s
+             JOIN users u ON u.id = s.user_id
+             JOIN departments d ON d.id = s.department_id
+             WHERE s.id = ? AND s.faculty_id = ?'
+        );
+        $studentStmt->bind_param('ii', $studentId, $deanFacultyId);
+    } else {
+        $studentStmt = $conn->prepare(
+            'SELECT s.user_id, s.student_no, s.full_name, u.username, d.code AS department_code
+             FROM students s
+             JOIN users u ON u.id = s.user_id
+             JOIN departments d ON d.id = s.department_id
+             WHERE s.id = ?'
+        );
+        $studentStmt->bind_param('i', $studentId);
+    }
+    $studentStmt->execute();
+    $studentRow = $studentStmt->get_result()->fetch_assoc();
+    $studentStmt->close();
+
+    if (!$studentRow) {
+        return ['ok' => false, 'message' => 'Student not found.'];
+    }
+
+    $newCredential = student_credential_value($conn, (string) $studentRow['department_code'], (string) $studentRow['student_no'], (int) $studentRow['user_id']);
+    $newHash = password_hash($newCredential, PASSWORD_DEFAULT);
+
+    $updatePassStmt = $conn->prepare('UPDATE users SET username = ?, password_hash = ?, must_change_password = 1 WHERE id = ?');
+    $updatePassStmt->bind_param('ssi', $newCredential, $newHash, $studentRow['user_id']);
+    $updatePassStmt->execute();
+    $updatePassStmt->close();
+
+    return [
+        'ok' => true,
+        'message' => 'Password reset for ' . $studentRow['username'] . '.',
+        'student_no' => (string) $studentRow['student_no'],
+        'full_name' => (string) $studentRow['full_name'],
+        'old_username' => (string) $studentRow['username'],
+        'new_credential' => $newCredential,
+    ];
+}
+
 // ---------------------------------------------------------------------
 // Handle POST actions: create, update, delete, bulk_delete, reset_password
 // ---------------------------------------------------------------------
@@ -192,11 +279,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'create' || $action === 'update') {
         $studentId = $action === 'update' ? (int) ($_POST['student_id'] ?? 0) : 0;
         $studentNo = strtoupper(trim((string) ($_POST['student_no'] ?? '')));
-        $firstName = trim((string) ($_POST['first_name'] ?? ''));
-        $fatherName = trim((string) ($_POST['father_name'] ?? ''));
-        $grandfatherName = trim((string) ($_POST['grandfather_name'] ?? ''));
+        $fullNameInput = trim((string) ($_POST['full_name'] ?? ''));
+        $nameParts = split_student_full_name($fullNameInput);
+        $firstName = $nameParts['first_name'];
+        $fatherName = $nameParts['father_name'];
+        $grandfatherName = $nameParts['grandfather_name'] ?? '';
         $fullName = trim($firstName . ' ' . $fatherName . ' ' . $grandfatherName);
+        $motherName = trim((string) ($_POST['mother_name'] ?? ''));
+        $sex = (string) ($_POST['sex'] ?? '');
+        $birthDate = trim((string) ($_POST['birth_date'] ?? ''));
+        $streetAddress = trim((string) ($_POST['street_address'] ?? ''));
+        $phone = trim((string) ($_POST['phone'] ?? ''));
         $email = trim((string) ($_POST['email'] ?? ''));
+        $emergencyContactName = trim((string) ($_POST['emergency_contact_name'] ?? ''));
+        $emergencyContactPhone = trim((string) ($_POST['emergency_contact_phone'] ?? ''));
+        $nationality = trim((string) ($_POST['nationality'] ?? ''));
+        $enrollmentDate = trim((string) ($_POST['enrollment_date'] ?? ''));
+        $certificateType = trim((string) ($_POST['certificate_type'] ?? ''));
+        $schoolRollNumber = trim((string) ($_POST['school_roll_number'] ?? ''));
+        $degree = trim((string) ($_POST['degree'] ?? ''));
+        $program = trim((string) ($_POST['program'] ?? ''));
+        $classYear = trim((string) ($_POST['class_year'] ?? ''));
         $academicYearId = (int) ($_POST['academic_year_id'] ?? 0);
         // A Dean's faculty is always the session's own faculty_id — never the
         // posted value — so a crafted faculty_id cannot move/create a student
@@ -218,20 +321,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $formValues = [
             'id' => $studentId,
             'student_no' => $formMode === 'edit' ? $existingStudentNo : $studentNo,
-            'first_name' => $firstName,
-            'father_name' => $fatherName,
-            'grandfather_name' => $grandfatherName,
+            'full_name' => $fullNameInput,
+            'mother_name' => $motherName,
+            'sex' => $sex,
+            'birth_date' => $birthDate,
+            'street_address' => $streetAddress,
+            'phone' => $phone,
             'email' => $email,
+            'emergency_contact_name' => $emergencyContactName,
+            'emergency_contact_phone' => $emergencyContactPhone,
+            'nationality' => $nationality,
+            'enrollment_date' => $enrollmentDate,
+            'certificate_type' => $certificateType,
+            'school_roll_number' => $schoolRollNumber,
+            'degree' => $degree,
             'academic_year_id' => $academicYearId,
             'faculty_id' => $facultyId,
             'department_id' => $departmentId,
+            'program' => $program,
             'semester_id' => $semesterId,
+            'class_year' => $classYear,
             'shift' => $shift,
         ];
 
         $validationError = '';
         if ($firstName === '' || $fatherName === '') {
-            $validationError = 'First Name and Father\'s Name are required.';
+            $validationError = 'Please enter the student\'s full name (at least a first name and father\'s name).';
+        } elseif ($motherName === '') {
+            $validationError = 'Mother\'s Name is required.';
+        } elseif ($sex === '' || !in_array($sex, ['male', 'female'], true)) {
+            $validationError = 'Please select a value for Sex.';
+        } elseif ($birthDate === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $birthDate)) {
+            $validationError = 'Please enter a valid Birth Date.';
+        } elseif ($streetAddress === '') {
+            $validationError = 'Street Address is required.';
+        } elseif ($phone === '') {
+            $validationError = 'Student Phone is required.';
+        } elseif ($email === '') {
+            $validationError = 'Student Email is required.';
+        } elseif ($emergencyContactName === '') {
+            $validationError = 'Emergency Contact Name is required.';
+        } elseif ($emergencyContactPhone === '') {
+            $validationError = 'Emergency Contact Phone is required.';
+        } elseif ($nationality === '') {
+            $validationError = 'Nationality is required.';
+        } elseif ($enrollmentDate === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $enrollmentDate)) {
+            $validationError = 'Please enter a valid Enrollment Date.';
+        } elseif ($certificateType === '') {
+            $validationError = 'Certificate Type is required.';
+        } elseif ($schoolRollNumber === '') {
+            $validationError = 'School Roll Number is required.';
+        } elseif ($degree === '') {
+            $validationError = 'Degree is required.';
+        } elseif ($program === '') {
+            $validationError = 'Program is required.';
+        } elseif ($classYear === '') {
+            $validationError = 'Class Year is required.';
         } elseif ($action === 'create' && $studentNo === '') {
             $validationError = 'Student No is required.';
         } elseif ($academicYearId <= 0) {
@@ -244,7 +389,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'Please select a semester.';
         } elseif (!array_key_exists($shift, SHIFT_LABELS)) {
             $validationError = 'Please select a valid shift.';
-        } elseif ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $validationError = 'Please enter a valid email address.';
         } elseif ($action === 'update' && $studentId <= 0) {
             $validationError = 'Invalid student selected for editing.';
@@ -260,12 +405,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $yearCheckStmt->close();
         }
 
+        $departmentCode = '';
         if ($validationError === '') {
-            $deptCheckStmt = $conn->prepare('SELECT id FROM departments WHERE id = ? AND faculty_id = ?');
+            $deptCheckStmt = $conn->prepare(
+                'SELECT d.id, d.code AS department_code FROM departments d WHERE d.id = ? AND d.faculty_id = ?'
+            );
             $deptCheckStmt->bind_param('ii', $departmentId, $facultyId);
             $deptCheckStmt->execute();
-            if (!$deptCheckStmt->get_result()->fetch_assoc()) {
+            $deptCheckRow = $deptCheckStmt->get_result()->fetch_assoc();
+            if (!$deptCheckRow) {
                 $validationError = 'Selected department does not belong to the selected faculty.';
+            } else {
+                $departmentCode = (string) $deptCheckRow['department_code'];
             }
             $deptCheckStmt->close();
         }
@@ -325,12 +476,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($validationError === '') {
             $emailParam = $email !== '' ? $email : null;
+            $grandfatherParam = $grandfatherName !== '' ? $grandfatherName : null;
+            $motherNameParam = $motherName !== '' ? $motherName : null;
+            $sexParam = $sex !== '' ? $sex : null;
+            $birthDateParam = $birthDate !== '' ? $birthDate : null;
+            $streetAddressParam = $streetAddress !== '' ? $streetAddress : null;
+            $phoneParam = $phone !== '' ? $phone : null;
+            $emergencyContactNameParam = $emergencyContactName !== '' ? $emergencyContactName : null;
+            $emergencyContactPhoneParam = $emergencyContactPhone !== '' ? $emergencyContactPhone : null;
+            $nationalityParam = $nationality !== '' ? $nationality : null;
+            $enrollmentDateParam = $enrollmentDate !== '' ? $enrollmentDate : null;
+            $certificateTypeParam = $certificateType !== '' ? $certificateType : null;
+            $schoolRollNumberParam = $schoolRollNumber !== '' ? $schoolRollNumber : null;
+            $degreeParam = $degree !== '' ? $degree : null;
+            $programParam = $program !== '' ? $program : null;
+            $classYearParam = $classYear !== '' ? $classYear : null;
 
             if ($action === 'create') {
                 $conn->begin_transaction();
                 try {
-                    $username = generate_student_username($conn, $firstName, $studentNo);
-                    $tempPassword = $studentNo;
+                    $credentialValue = student_credential_value($conn, $departmentCode, $studentNo);
+                    $username = $credentialValue;
+                    $tempPassword = $credentialValue;
                     $passwordHash = password_hash($tempPassword, PASSWORD_DEFAULT);
 
                     $insertUserStmt = $conn->prepare(
@@ -342,16 +509,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $insertUserStmt->close();
 
                     $insertStudentStmt = $conn->prepare(
-                        'INSERT INTO students (student_no, first_name, father_name, grandfather_name, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "active")'
+                        'INSERT INTO students (
+                            student_no, first_name, father_name, grandfather_name, mother_name, sex,
+                            birth_date, street_address, phone, emergency_contact_name, emergency_contact_phone,
+                            nationality, enrollment_date, certificate_type, school_roll_number, degree, program,
+                            class_year, user_id, academic_year_id, faculty_id, department_id, semester_id, shift, status
+                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "active")'
                     );
-                    $grandfatherParam = $grandfatherName !== '' ? $grandfatherName : null;
                     $insertStudentStmt->bind_param(
-                        'ssssiiiiis',
+                        'ssssssssssssssssssiiiiis',
                         $studentNo,
                         $firstName,
                         $fatherName,
                         $grandfatherParam,
+                        $motherNameParam,
+                        $sexParam,
+                        $birthDateParam,
+                        $streetAddressParam,
+                        $phoneParam,
+                        $emergencyContactNameParam,
+                        $emergencyContactPhoneParam,
+                        $nationalityParam,
+                        $enrollmentDateParam,
+                        $certificateTypeParam,
+                        $schoolRollNumberParam,
+                        $degreeParam,
+                        $programParam,
+                        $classYearParam,
                         $newUserId,
                         $academicYearId,
                         $facultyId,
@@ -375,14 +559,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $conn->begin_transaction();
                 try {
                     $updateStudentStmt = $conn->prepare(
-                        'UPDATE students SET first_name = ?, father_name = ?, grandfather_name = ?, academic_year_id = ?, faculty_id = ?, department_id = ?, semester_id = ?, shift = ? WHERE id = ?'
+                        'UPDATE students SET
+                            first_name = ?, father_name = ?, grandfather_name = ?, mother_name = ?, sex = ?,
+                            birth_date = ?, street_address = ?, phone = ?, emergency_contact_name = ?,
+                            emergency_contact_phone = ?, nationality = ?, enrollment_date = ?, certificate_type = ?,
+                            school_roll_number = ?, degree = ?, program = ?, class_year = ?,
+                            academic_year_id = ?, faculty_id = ?, department_id = ?, semester_id = ?, shift = ?
+                         WHERE id = ?'
                     );
-                    $grandfatherParam = $grandfatherName !== '' ? $grandfatherName : null;
                     $updateStudentStmt->bind_param(
-                        'sssiiiisi',
+                        'sssssssssssssssssiiiisi',
                         $firstName,
                         $fatherName,
                         $grandfatherParam,
+                        $motherNameParam,
+                        $sexParam,
+                        $birthDateParam,
+                        $streetAddressParam,
+                        $phoneParam,
+                        $emergencyContactNameParam,
+                        $emergencyContactPhoneParam,
+                        $nationalityParam,
+                        $enrollmentDateParam,
+                        $certificateTypeParam,
+                        $schoolRollNumberParam,
+                        $degreeParam,
+                        $programParam,
+                        $classYearParam,
                         $academicYearId,
                         $facultyId,
                         $departmentId,
@@ -414,6 +617,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $studentId = (int) ($_POST['student_id'] ?? 0);
         $result = delete_student_row($conn, $studentId, $role, $deanFacultyId);
         if ($result['ok']) {
+            audit_log($conn, 'delete_student', 'student', $studentId, preg_replace('/ deleted\.?$/', '', $result['message']));
             $_SESSION['flash_success'] = 'Student deleted successfully. Their login account has been deactivated.';
             redirect_to('admin/students.php');
         } else {
@@ -444,6 +648,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
             }
             if ($deletedCount > 0) {
+                audit_log($conn, 'bulk_delete', 'student', null, null, $summary);
                 $_SESSION['flash_success'] = $summary;
             } else {
                 $_SESSION['flash_error'] = $summary;
@@ -452,38 +657,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect_to('admin/students.php');
     } elseif ($action === 'reset_password') {
         $studentId = (int) ($_POST['student_id'] ?? 0);
-
-        if ($role === 'dean') {
-            $studentStmt = $conn->prepare(
-                'SELECT s.user_id, s.student_no, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.faculty_id = ?'
-            );
-            $studentStmt->bind_param('ii', $studentId, $deanFacultyId);
-        } else {
-            $studentStmt = $conn->prepare(
-                'SELECT s.user_id, s.student_no, u.username FROM students s JOIN users u ON u.id = s.user_id WHERE s.id = ?'
-            );
-            $studentStmt->bind_param('i', $studentId);
-        }
-        $studentStmt->execute();
-        $studentRow = $studentStmt->get_result()->fetch_assoc();
-        $studentStmt->close();
-
-        if (!$studentRow) {
-            $errorMessage = 'Student not found.';
-        } else {
-            $newPassword = $studentRow['student_no'];
-            $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
-
-            $updatePassStmt = $conn->prepare('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?');
-            $updatePassStmt->bind_param('si', $newHash, $studentRow['user_id']);
-            $updatePassStmt->execute();
-            $updatePassStmt->close();
-
-            $_SESSION['flash_success'] = 'Password reset for ' . $studentRow['username']
-                . '. New temporary password: ' . $newPassword
+        $result = reset_student_password_row($conn, $studentId, $role, $deanFacultyId);
+        if ($result['ok']) {
+            audit_log($conn, 'reset_password', 'student', $studentId, $result['student_no'] ?? null);
+            $_SESSION['flash_success'] = $result['message']
+                . ' New username and temporary password: ' . $result['new_credential']
                 . ' — share this with the student now; it will not be shown again.';
             redirect_to('admin/students.php');
+        } else {
+            $errorMessage = $result['message'];
         }
+    } elseif ($action === 'bulk_reset_password') {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', (array) ($_POST['student_ids'] ?? [])),
+            static fn ($id) => $id > 0
+        )));
+
+        if (empty($ids)) {
+            $_SESSION['flash_error'] = 'No students were selected.';
+        } else {
+            $resetCount = 0;
+            $skippedMessages = [];
+            $resultRows = [];
+            foreach ($ids as $sid) {
+                $result = reset_student_password_row($conn, $sid, $role, $deanFacultyId);
+                if ($result['ok']) {
+                    $resetCount++;
+                    $resultRows[] = [
+                        'student_no' => $result['student_no'],
+                        'full_name' => $result['full_name'],
+                        'username' => $result['new_credential'],
+                        'password' => $result['new_credential'],
+                    ];
+                } else {
+                    $skippedMessages[] = $result['message'];
+                }
+            }
+
+            $summary = $resetCount . ' of ' . count($ids) . ' selected student' . (count($ids) === 1 ? '' : 's') . ' had their password reset.';
+            if (!empty($skippedMessages)) {
+                $summary .= ' Skipped: ' . implode(' | ', $skippedMessages);
+            }
+            if ($resetCount > 0) {
+                audit_log($conn, 'bulk_reset_password', 'student', null, null, $summary);
+                $_SESSION['flash_success'] = $summary;
+                // Shown once via the results table below, then cleared —
+                // same one-time-reveal convention as every other generated-
+                // credential display in this app (lecturers_import.php's
+                // own results step, single reset_password above).
+                $_SESSION['bulk_reset_results'] = $resultRows;
+            } else {
+                $_SESSION['flash_error'] = $summary;
+            }
+        }
+        redirect_to('admin/students.php');
     }
 }
 
@@ -493,21 +720,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ---------------------------------------------------------------------
 if ($formMode === 'create' && isset($_GET['edit'])) {
     $editId = (int) $_GET['edit'];
+    $editSelect = 'SELECT s.id, s.student_no, s.full_name, s.mother_name, s.sex, s.birth_date, s.street_address,
+                          s.phone, s.emergency_contact_name, s.emergency_contact_phone, s.nationality,
+                          s.enrollment_date, s.certificate_type, s.school_roll_number, s.degree, s.program,
+                          s.class_year, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
+                   FROM students s
+                   JOIN users u ON u.id = s.user_id
+                   WHERE s.id = ?';
     if ($role === 'dean') {
-        $editStmt = $conn->prepare(
-            'SELECT s.id, s.student_no, s.first_name, s.father_name, s.grandfather_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
-             FROM students s
-             JOIN users u ON u.id = s.user_id
-             WHERE s.id = ? AND s.faculty_id = ?'
-        );
+        $editStmt = $conn->prepare($editSelect . ' AND s.faculty_id = ?');
         $editStmt->bind_param('ii', $editId, $deanFacultyId);
     } else {
-        $editStmt = $conn->prepare(
-            'SELECT s.id, s.student_no, s.first_name, s.father_name, s.grandfather_name, s.academic_year_id, s.faculty_id, s.department_id, s.semester_id, s.shift, u.email
-             FROM students s
-             JOIN users u ON u.id = s.user_id
-             WHERE s.id = ?'
-        );
+        $editStmt = $conn->prepare($editSelect);
         $editStmt->bind_param('i', $editId);
     }
     $editStmt->execute();
@@ -519,14 +743,26 @@ if ($formMode === 'create' && isset($_GET['edit'])) {
         $formValues = [
             'id' => (int) $editRow['id'],
             'student_no' => (string) $editRow['student_no'],
-            'first_name' => (string) $editRow['first_name'],
-            'father_name' => (string) $editRow['father_name'],
-            'grandfather_name' => (string) ($editRow['grandfather_name'] ?? ''),
+            'full_name' => (string) $editRow['full_name'],
+            'mother_name' => (string) ($editRow['mother_name'] ?? ''),
+            'sex' => (string) ($editRow['sex'] ?? ''),
+            'birth_date' => (string) ($editRow['birth_date'] ?? ''),
+            'street_address' => (string) ($editRow['street_address'] ?? ''),
+            'phone' => (string) ($editRow['phone'] ?? ''),
             'email' => (string) ($editRow['email'] ?? ''),
+            'emergency_contact_name' => (string) ($editRow['emergency_contact_name'] ?? ''),
+            'emergency_contact_phone' => (string) ($editRow['emergency_contact_phone'] ?? ''),
+            'nationality' => (string) ($editRow['nationality'] ?? ''),
+            'enrollment_date' => (string) ($editRow['enrollment_date'] ?? ''),
+            'certificate_type' => (string) ($editRow['certificate_type'] ?? ''),
+            'school_roll_number' => (string) ($editRow['school_roll_number'] ?? ''),
+            'degree' => (string) ($editRow['degree'] ?? ''),
             'academic_year_id' => (int) $editRow['academic_year_id'],
             'faculty_id' => (int) $editRow['faculty_id'],
             'department_id' => (int) $editRow['department_id'],
+            'program' => (string) ($editRow['program'] ?? ''),
             'semester_id' => (int) ($editRow['semester_id'] ?? 0),
+            'class_year' => (string) ($editRow['class_year'] ?? ''),
             'shift' => (string) $editRow['shift'],
         ];
     }
@@ -652,7 +888,7 @@ $whereSql = empty($conditions) ? '' : ('WHERE ' . implode(' AND ', $conditions))
 $studentsSql = "SELECT s.id, s.student_no, s.full_name, s.shift,
                        ay.label AS academic_year_label, f.name AS faculty_name, d.name AS department_name,
                        sem.name AS semester_name,
-                       u.status AS user_status
+                       u.status AS user_status, u.photo_path
                 FROM students s
                 JOIN academic_years ay ON ay.id = s.academic_year_id
                 JOIN faculties f ON f.id = s.faculty_id
@@ -690,7 +926,7 @@ $studentsStmt->close();
             <div class="scope-banner">
                 <i class="bi bi-shield-check"></i>
                 <?php if ($role === 'dean'): ?>
-                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only
+                    Access scope: <?= htmlspecialchars($deanFacultyName) ?> Faculty only — view only
                 <?php elseif ($role === 'registration'): ?>
                     Access scope: All faculties — enrollment-focused
                 <?php elseif ($isReadOnly): ?>
@@ -733,21 +969,57 @@ $studentsStmt->close();
                 </div>
             <?php endif; ?>
 
+            <?php if (!empty($bulkResetResults)): ?>
+                <div class="admas-card p-3 mb-4">
+                    <div class="alert alert-warning small mb-3">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        These temporary passwords are shown only once. Copy them now and share securely with each
+                        student — they will not be shown again.
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table admas-table align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Student No</th>
+                                    <th>Full Name</th>
+                                    <th>New Username</th>
+                                    <th>New Temporary Password</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($bulkResetResults as $r): ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars($r['student_no']) ?></td>
+                                        <td><?= htmlspecialchars($r['full_name']) ?></td>
+                                        <td><code><?= htmlspecialchars($r['username']) ?></code></td>
+                                        <td><code><?= htmlspecialchars($r['password']) ?></code></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
+
             <div class="row g-3">
                 <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-8' ?>">
                     <div class="admas-card p-4">
                         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                             <h6 class="fw-bold mb-0" style="color: var(--admas-text);">Students</h6>
                             <div class="d-flex gap-2">
-                                <?php if ($role === 'head_academic'): ?>
+                                <?php if ($role === 'head_academic' || $role === 'dean' || $role === 'registration'): ?>
                                     <form id="exportStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=excel" class="d-inline">
                                         <div id="exportStudentsIds"></div>
-                                        <button type="submit" id="exportStudentsBtn" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
-                                            <i class="bi bi-cloud-arrow-down-fill"></i> <span id="exportStudentsBtnLabel">Export All Students</span>
+                                        <button type="submit" id="exportStudentsBtn" formaction="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=excel" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                            <i class="bi bi-file-earmark-excel"></i> <span id="exportStudentsBtnLabel">Export All Students</span>
+                                        </button>
+                                        <button type="submit" formaction="<?= htmlspecialchars(BASE_URL) ?>/admin/export.php?type=students&format=pdf" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
+                                            <i class="bi bi-file-earmark-pdf"></i> PDF
                                         </button>
                                     </form>
                                 <?php endif; ?>
                                 <?php if (!$isReadOnly): ?>
+                                    <button type="button" id="bulkResetPasswordStudentsBtn" class="btn btn-outline-secondary btn-sm d-none">Reset Password Selected</button>
                                     <button type="button" id="bulkDeleteStudentsBtn" class="btn btn-outline-danger btn-sm d-none">Delete Selected</button>
                                     <?php if ($role !== 'dean'): ?>
                                         <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students_import.php" class="btn btn-sm text-white" style="background-color: var(--admas-sky); border-color: var(--admas-sky);">
@@ -765,6 +1037,10 @@ $studentsStmt->close();
                         <form id="bulkDeleteStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="d-none">
                             <input type="hidden" name="action" value="bulk_delete">
                             <div id="bulkDeleteStudentsIds"></div>
+                        </form>
+                        <form id="bulkResetPasswordStudentsForm" method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" class="d-none">
+                            <input type="hidden" name="action" value="bulk_reset_password">
+                            <div id="bulkResetPasswordStudentsIds"></div>
                         </form>
                         <?php endif; ?>
 
@@ -861,7 +1137,7 @@ $studentsStmt->close();
                                                 </td>
                                                 <?php endif; ?>
                                                 <td><span class="badge-pill badge-active"><?= htmlspecialchars($s['student_no']) ?></span></td>
-                                                <td class="fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars($s['full_name']) ?></td>
+                                                <td><?php render_person_avatar_cell($s['photo_path'] ?? null, (string) $s['full_name'], (string) $s['student_no']); ?></td>
                                                 <td><?= htmlspecialchars($s['academic_year_label']) ?></td>
                                                 <td><?= htmlspecialchars($s['faculty_name']) ?></td>
                                                 <td><?= htmlspecialchars($s['department_name']) ?></td>
@@ -886,23 +1162,23 @@ $studentsStmt->close();
                                                             <i class="bi bi-eye"></i> View Profile
                                                         </a>
                                                     <?php else: ?>
-                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php?edit=<?= (int) $s['id'] ?>" class="btn-icon" title="Edit">
-                                                        <i class="bi bi-pencil"></i>
+                                                    <a href="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php?edit=<?= (int) $s['id'] ?>" class="btn-icon-label" title="Edit">
+                                                        <i class="bi bi-pencil"></i> Edit
                                                     </a>
                                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" style="display:inline;"
                                                           onsubmit="return confirm('Reset this student\'s password? A new temporary password will be generated.');">
                                                         <input type="hidden" name="action" value="reset_password">
                                                         <input type="hidden" name="student_id" value="<?= (int) $s['id'] ?>">
-                                                        <button type="submit" class="btn-icon" title="Reset Password">
-                                                            <i class="bi bi-key"></i>
+                                                        <button type="submit" class="btn-icon-label" title="Reset Password">
+                                                            <i class="bi bi-key"></i> Reset
                                                         </button>
                                                     </form>
                                                     <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/students.php" style="display:inline;"
                                                           onsubmit="return confirm('Delete this student? This cannot be undone.');">
                                                         <input type="hidden" name="action" value="delete">
                                                         <input type="hidden" name="student_id" value="<?= (int) $s['id'] ?>">
-                                                        <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                            <i class="bi bi-trash"></i>
+                                                        <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                            <i class="bi bi-trash"></i> Delete
                                                         </button>
                                                     </form>
                                                     <?php endif; ?>
@@ -936,32 +1212,96 @@ $studentsStmt->close();
                                 <?php else: ?>
                                     <input type="text" class="form-control text-uppercase" id="studentNoInput" name="student_no" maxlength="20"
                                            value="<?= htmlspecialchars($formValues['student_no']) ?>" required>
-                                    <div class="form-text">The student's existing admission/ID number. This becomes their login username base and initial password.</div>
+                                    <div class="form-text">The student's existing admission/ID number. Combined with the Faculty code, this becomes both their initial login username and password (e.g. "INF-1472/23").</div>
                                 <?php endif; ?>
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentFirstNameInput" class="form-label">First Name</label>
-                                <input type="text" class="form-control" id="studentFirstNameInput" name="first_name" maxlength="60"
-                                       value="<?= htmlspecialchars($formValues['first_name']) ?>" required>
+                                <label for="studentFullNameInput" class="form-label">Student Name</label>
+                                <input type="text" class="form-control" id="studentFullNameInput" name="full_name" maxlength="150"
+                                       value="<?= htmlspecialchars($formValues['full_name']) ?>" required>
+                                <div class="form-text">Full name (e.g. first, father's, and grandfather's name together).</div>
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentFatherNameInput" class="form-label">Father's Name</label>
-                                <input type="text" class="form-control" id="studentFatherNameInput" name="father_name" maxlength="60"
-                                       value="<?= htmlspecialchars($formValues['father_name']) ?>" required>
+                                <label for="studentMotherNameInput" class="form-label">Mother's Name</label>
+                                <input type="text" class="form-control" id="studentMotherNameInput" name="mother_name" maxlength="120"
+                                       value="<?= htmlspecialchars($formValues['mother_name']) ?>" required>
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentGrandfatherNameInput" class="form-label">Grandfather's Name <span class="text-muted fw-normal">(optional)</span></label>
-                                <input type="text" class="form-control" id="studentGrandfatherNameInput" name="grandfather_name" maxlength="60"
-                                       value="<?= htmlspecialchars($formValues['grandfather_name']) ?>">
+                                <label for="studentSexSelect" class="form-label">Sex</label>
+                                <select class="form-select" id="studentSexSelect" name="sex" required>
+                                    <option value="">Select sex</option>
+                                    <option value="male" <?= $formValues['sex'] === 'male' ? 'selected' : '' ?>>Male</option>
+                                    <option value="female" <?= $formValues['sex'] === 'female' ? 'selected' : '' ?>>Female</option>
+                                </select>
                             </div>
 
                             <div class="mb-3">
-                                <label for="studentEmailInput" class="form-label">Email</label>
+                                <label for="studentBirthDateInput" class="form-label">Birth Date</label>
+                                <input type="date" class="form-control" id="studentBirthDateInput" name="birth_date"
+                                       value="<?= htmlspecialchars($formValues['birth_date']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentStreetAddressInput" class="form-label">Street Address</label>
+                                <input type="text" class="form-control" id="studentStreetAddressInput" name="street_address" maxlength="255"
+                                       value="<?= htmlspecialchars($formValues['street_address']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentPhoneInput" class="form-label">Student Phone</label>
+                                <input type="text" class="form-control" id="studentPhoneInput" name="phone" maxlength="30"
+                                       value="<?= htmlspecialchars($formValues['phone']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentEmailInput" class="form-label">Student Email</label>
                                 <input type="email" class="form-control" id="studentEmailInput" name="email" maxlength="150"
-                                       value="<?= htmlspecialchars($formValues['email']) ?>">
+                                       value="<?= htmlspecialchars($formValues['email']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentEmergencyContactNameInput" class="form-label">Emergency Contact Name</label>
+                                <input type="text" class="form-control" id="studentEmergencyContactNameInput" name="emergency_contact_name" maxlength="120"
+                                       value="<?= htmlspecialchars($formValues['emergency_contact_name']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentEmergencyContactPhoneInput" class="form-label">Emergency Contact Phone</label>
+                                <input type="text" class="form-control" id="studentEmergencyContactPhoneInput" name="emergency_contact_phone" maxlength="30"
+                                       value="<?= htmlspecialchars($formValues['emergency_contact_phone']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentNationalityInput" class="form-label">Nationality</label>
+                                <input type="text" class="form-control" id="studentNationalityInput" name="nationality" maxlength="80"
+                                       value="<?= htmlspecialchars($formValues['nationality']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentEnrollmentDateInput" class="form-label">Enrollment Date</label>
+                                <input type="date" class="form-control" id="studentEnrollmentDateInput" name="enrollment_date"
+                                       value="<?= htmlspecialchars($formValues['enrollment_date']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentCertificateTypeInput" class="form-label">Certificate Type</label>
+                                <input type="text" class="form-control" id="studentCertificateTypeInput" name="certificate_type" maxlength="120"
+                                       value="<?= htmlspecialchars($formValues['certificate_type']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentSchoolRollNumberInput" class="form-label">School Roll Number</label>
+                                <input type="text" class="form-control" id="studentSchoolRollNumberInput" name="school_roll_number" maxlength="60"
+                                       value="<?= htmlspecialchars($formValues['school_roll_number']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentDegreeInput" class="form-label">Degree</label>
+                                <input type="text" class="form-control" id="studentDegreeInput" name="degree" maxlength="120"
+                                       value="<?= htmlspecialchars($formValues['degree']) ?>" required>
                             </div>
 
                             <div class="mb-3">
@@ -1007,11 +1347,23 @@ $studentsStmt->close();
                             </div>
 
                             <div class="mb-3">
+                                <label for="studentProgramInput" class="form-label">Program</label>
+                                <input type="text" class="form-control" id="studentProgramInput" name="program" maxlength="120"
+                                       value="<?= htmlspecialchars($formValues['program']) ?>" required>
+                            </div>
+
+                            <div class="mb-3">
                                 <label for="studentSemesterSelect" class="form-label">Semester</label>
                                 <select class="form-select" id="studentSemesterSelect" name="semester_id" required>
                                     <option value="">Select semester</option>
                                 </select>
                                 <div class="form-text">Only semesters belonging to the selected faculty are shown.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="studentClassYearInput" class="form-label">Class Year</label>
+                                <input type="text" class="form-control" id="studentClassYearInput" name="class_year" maxlength="30"
+                                       value="<?= htmlspecialchars($formValues['class_year']) ?>" placeholder="e.g. 1st Year" required>
                             </div>
 
                             <div class="mb-3">
@@ -1026,7 +1378,7 @@ $studentsStmt->close();
                             </div>
 
                             <?php if ($formMode === 'create'): ?>
-                                <div class="form-text mb-3">A student number, username, and temporary password will be generated automatically and shown once after saving.</div>
+                                <div class="form-text mb-3">A username and temporary password (both "DepartmentCode-StudentNo", e.g. "IT-1472/23") will be generated automatically and shown once after saving.</div>
                             <?php endif; ?>
 
                             <button type="submit" class="btn btn-primary w-100" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($academicYears) || empty($faculties) ? 'disabled' : '' ?>>
@@ -1042,6 +1394,7 @@ $studentsStmt->close();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_delete.js"></script>
+    <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_reset_password.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/bulk_export.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/semester_label.js"></script>
     <script src="<?= htmlspecialchars(BASE_URL) ?>/assets/js/live_filter.js"></script>
@@ -1155,6 +1508,19 @@ $studentsStmt->close();
                     buttonSelector: '#bulkDeleteStudentsBtn',
                     formSelector: '#bulkDeleteStudentsForm',
                     hiddenContainerSelector: '#bulkDeleteStudentsIds',
+                    hiddenInputName: 'student_ids[]',
+                    entityLabel: 'student',
+                    entityLabelPlural: 'students',
+                });
+            }
+
+            if (document.getElementById('bulkResetPasswordStudentsBtn')) {
+                admasInitBulkResetPassword({
+                    checkboxSelector: '.row-check-student',
+                    selectAllSelector: '#selectAllStudents',
+                    buttonSelector: '#bulkResetPasswordStudentsBtn',
+                    formSelector: '#bulkResetPasswordStudentsForm',
+                    hiddenContainerSelector: '#bulkResetPasswordStudentsIds',
                     hiddenInputName: 'student_ids[]',
                     entityLabel: 'student',
                     entityLabelPlural: 'students',

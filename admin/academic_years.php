@@ -22,6 +22,7 @@ require_once __DIR__ . '/../includes/nav_items.php';
 require_role(['university_rector']);
 
 $conn = db();
+$currentUser = current_user();
 $isReadOnly = (current_role() === 'university_rector');
 
 // ---------------------------------------------------------------------
@@ -234,16 +235,16 @@ $academicYears = $conn->query(
                                             <?php if ($isReadOnly): ?>
                                                 <span class="text-muted">&mdash;</span>
                                             <?php else: ?>
-                                            <button type="button" class="btn-icon text-sky" title="Edit"
+                                            <button type="button" class="btn-icon-label text-sky" title="Edit"
                                                     onclick='openAcademicYearModal("edit", <?= (int) $ay['id'] ?>, <?= json_encode($ay['label'], JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>
-                                                <i class="bi bi-pencil"></i>
+                                                <i class="bi bi-pencil"></i> Edit
                                             </button>
                                             <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/academic_years.php" style="display:inline;"
                                                   onsubmit="return confirm('Delete this academic year? This cannot be undone.');">
                                                 <input type="hidden" name="action" value="delete">
                                                 <input type="hidden" name="academic_year_id" value="<?= (int) $ay['id'] ?>">
-                                                <button type="submit" class="btn-icon text-danger" title="Delete">
-                                                    <i class="bi bi-trash"></i>
+                                                <button type="submit" class="btn-icon-label text-danger" title="Delete">
+                                                    <i class="bi bi-trash"></i> Delete
                                                 </button>
                                             </form>
                                             <?php endif; ?>
@@ -274,7 +275,7 @@ $academicYears = $conn->query(
 
                         <div class="mb-1">
                             <label for="academicYearLabelInput" class="form-label">Label</label>
-                            <input type="text" class="form-control" id="academicYearLabelInput" name="label" required maxlength="20" placeholder="e.g. 2026/2027">
+                            <input type="text" class="form-control" id="academicYearLabelInput" name="label" required maxlength="20" placeholder="e.g. 2026">
                         </div>
                     </div>
                     <div class="modal-footer">

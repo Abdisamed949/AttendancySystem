@@ -24,13 +24,19 @@ declare(strict_types=1);
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/nav_items.php';
 require_once __DIR__ . '/../includes/attendance_helpers.php';
+require_once __DIR__ . '/../includes/timetable_helpers.php';
 
 require_role(['university_rector', 'head_academic', 'dean']);
 
 $conn = db();
 $currentUser = current_user();
 $role = current_role();
-$isReadOnly = ($role === 'university_rector');
+// University Rector is a supervisory, read-only Viewer everywhere. Dean
+// has full CRUD again within their own faculty (restored per explicit
+// request, after an earlier session's temporary Viewer conversion) — the
+// existing $role === 'dean' scoping throughout this file still narrows
+// everything to their own faculty only.
+$isReadOnly = $role === 'university_rector';
 
 // ---------------------------------------------------------------------
 // University settings (drives the sky-blue top strip)
@@ -110,6 +116,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $shift = (string) ($_POST['shift'] ?? '');
         $startDateRaw = trim((string) ($_POST['start_date'] ?? ''));
         $endDateRaw = trim((string) ($_POST['end_date'] ?? ''));
+        $dayOfWeekRaw = trim((string) ($_POST['day_of_week'] ?? ''));
+        $startTimeRaw = trim((string) ($_POST['start_time'] ?? ''));
+        $endTimeRaw = trim((string) ($_POST['end_time'] ?? ''));
+        $roomRaw = trim((string) ($_POST['room'] ?? ''));
 
         // Semester scoping: System Admin may target any faculty's
         // semester; a Dean may only target their OWN faculty's semester —
@@ -195,6 +205,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $validationError = 'End date must be on or after start date.';
         }
 
+        // Class Time Table — all optional, all-or-nothing only for the
+        // time pair (a day picked with no time, or a time with no day,
+        // isn't a usable slot). Room is cosmetic only — no validation
+        // beyond a length cap, and no double-booking check by design.
+        $dayOfWeek = null;
+        $startTime = null;
+        $endTime = null;
+        $room = null;
+        if ($validationError === '') {
+            if ($dayOfWeekRaw !== '' && !array_key_exists($dayOfWeekRaw, DAY_OF_WEEK_LABELS)) {
+                $validationError = 'Please select a valid day.';
+            } elseif (($startTimeRaw !== '') !== ($endTimeRaw !== '')) {
+                $validationError = 'Please provide both a start time and an end time, or leave both blank.';
+            } elseif ($startTimeRaw !== '' && $endTimeRaw !== '' && $startTimeRaw >= $endTimeRaw) {
+                $validationError = 'Class end time must be after the start time.';
+            } else {
+                $dayOfWeek = $dayOfWeekRaw !== '' ? $dayOfWeekRaw : null;
+                $startTime = $startTimeRaw !== '' ? $startTimeRaw : null;
+                $endTime = $endTimeRaw !== '' ? $endTimeRaw : null;
+                $room = $roomRaw !== '' ? mb_substr($roomRaw, 0, 50) : null;
+            }
+        }
+
         // Soft check only: dates outside the semester's own range are
         // flagged to the user but do not block the save — a lecturer's
         // real teaching period can legitimately run a little short of, or
@@ -218,10 +251,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // different shift for the same course+semester is a separate
             // row entirely, not a collision.
             $upsertStmt = $conn->prepare(
-                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), roster_department_id = VALUES(roster_department_id), start_date = VALUES(start_date), end_date = VALUES(end_date)'
+                'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, roster_department_id, shift, start_date, end_date, day_of_week, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE lecturer_id = VALUES(lecturer_id), roster_department_id = VALUES(roster_department_id), start_date = VALUES(start_date), end_date = VALUES(end_date), day_of_week = VALUES(day_of_week), start_time = VALUES(start_time), end_time = VALUES(end_time), room = VALUES(room)'
             );
-            $upsertStmt->bind_param('iiiisss', $courseId, $semesterId, $lecturerParam, $rosterDepartmentParam, $shift, $startDate, $endDate);
+            $upsertStmt->bind_param('iiiisssssss', $courseId, $semesterId, $lecturerParam, $rosterDepartmentParam, $shift, $startDate, $endDate, $dayOfWeek, $startTime, $endTime, $room);
             $upsertStmt->execute();
             $upsertStmt->close();
 
@@ -338,7 +371,9 @@ $lecturersStmt->close();
 // precedent already established by lecturer_courses.php.
 $offeringsStmt = $conn->prepare(
     'SELECT co.id, co.semester_id, co.lecturer_id, co.roster_department_id, co.shift, co.start_date, co.end_date,
-            s.name AS semester_name, s.is_current, s.faculty_id AS offering_faculty_id, f.name AS offering_faculty_name,
+            co.day_of_week, co.start_time, co.end_time, co.room,
+            s.name AS semester_name, s.is_current, s.status AS semester_status, s.start_date AS semester_start_date, s.end_date AS semester_end_date,
+            s.faculty_id AS offering_faculty_id, f.name AS offering_faculty_name,
             ay.label AS academic_year_label, l.full_name AS lecturer_name, rd.name AS roster_department_name
      FROM course_offerings co
      JOIN semesters s ON s.id = co.semester_id
@@ -356,10 +391,48 @@ $offeringsStmt->close();
 
 
 // (semester_id, shift) pairs already offered — used both by the "already
-// offered" JS annotation below and, indirectly, by uniqueness itself.
+// offered" JS annotation below and, indirectly, by uniqueness itself. This
+// must always reflect EVERY offering, not just the current page, so it's
+// built from the full $offerings result before pagination is applied below.
 $offeredSemesterShiftPairs = [];
 foreach ($offerings as $o) {
     $offeredSemesterShiftPairs[(int) $o['semester_id']][$o['shift']] = $o['lecturer_name'] ?: 'Unassigned';
+}
+
+// Pagination — a course cross-listed across many faculties/semesters/
+// shifts over the years can accumulate a long offerings list. Applied
+// in-memory to the render slice only (not a second query) since the
+// "already offered" annotation above needs the full, unpaginated set
+// regardless.
+const OFFERINGS_PER_PAGE = 20;
+$totalOfferings = count($offerings);
+$totalOfferingPages = max(1, (int) ceil($totalOfferings / OFFERINGS_PER_PAGE));
+$offeringsPage = max(1, min($totalOfferingPages, (int) ($_GET['page'] ?? 1)));
+$offeringsOffset = ($offeringsPage - 1) * OFFERINGS_PER_PAGE;
+$offeringsForDisplay = array_slice($offerings, $offeringsOffset, OFFERINGS_PER_PAGE);
+
+// ---------------------------------------------------------------------
+// Group the current page's offerings into one card per semester — same
+// visual pattern as lecturer/teaching_history.php / lecturer/courses.php —
+// applied only within this page's own slice (a single course+semester can
+// hold at most a handful of shifts, so a semester being split across two
+// pagination pages in practice never happens).
+// ---------------------------------------------------------------------
+$offeringsBySemesterId = [];
+$offeringSemesterMeta = [];
+foreach ($offeringsForDisplay as $o) {
+    $sid = (int) $o['semester_id'];
+    if (!isset($offeringSemesterMeta[$sid])) {
+        $offeringSemesterMeta[$sid] = [
+            'id' => $sid,
+            'name' => $o['semester_name'],
+            'status' => $o['semester_status'],
+            'academic_year_label' => $o['academic_year_label'],
+            'start_date' => $o['semester_start_date'],
+            'end_date' => $o['semester_end_date'],
+        ];
+    }
+    $offeringsBySemesterId[$sid][] = $o;
 }
 ?>
 <!DOCTYPE html>
@@ -371,6 +444,25 @@ foreach ($offerings as $o) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
     <link href="<?= htmlspecialchars(BASE_URL) ?>/assets/css/app.css" rel="stylesheet">
+    <style>
+        /* Same semester-card visual pattern as lecturer/teaching_history.php
+           and lecturer/courses.php — applied here so a course's offerings
+           read as one card per semester instead of one long flat table. */
+        .semester-card {
+            border-left: 5px solid var(--admas-border);
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .semester-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 24px var(--admas-shadow);
+        }
+
+        .semester-card.semester-current { border-left-color: #16a34a; }
+        .semester-card.semester-accent-sky { border-left-color: var(--admas-sky); }
+        .semester-card.semester-accent-navy { border-left-color: var(--admas-navy-start); }
+        .semester-card.semester-accent-amber { border-left-color: #d97706; }
+    </style>
 </head>
 <body>
     <?php include __DIR__ . '/../includes/sidebar.php'; ?>
@@ -417,38 +509,60 @@ foreach ($offerings as $o) {
 
             <div class="row g-4">
                 <div class="<?= $isReadOnly ? 'col-lg-12' : 'col-lg-7' ?>">
-                    <div class="admas-card p-4">
-                        <h6 class="small text-uppercase text-muted mb-2">Offerings</h6>
-                        <div class="table-responsive">
-                            <table class="table admas-table align-middle mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>Semester</th>
-                                        <th>Faculty</th>
-                                        <th>Shift</th>
-                                        <th>Academic Year</th>
-                                        <th>Lecturer</th>
-                                        <th>Enrolled</th>
-                                        <th>Roster Department</th>
-                                        <th>Teaching Period</th>
-                                        <th></th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($offerings)): ?>
+                    <h6 class="small text-uppercase text-muted mb-2">Offerings</h6>
+
+                    <?php if (empty($offerings)): ?>
+                        <div class="admas-card p-4 text-center text-muted py-5">No offerings yet — add one on the right.</div>
+                    <?php endif; ?>
+
+                    <?php
+                    $semAccents = ['semester-accent-sky', 'semester-accent-navy', 'semester-accent-amber'];
+                    $semIndex = 0;
+                    ?>
+                    <?php foreach ($offeringSemesterMeta as $sem): ?>
+                        <?php
+                        $semOfferings = $offeringsBySemesterId[$sem['id']] ?? [];
+                        $accentClass = $sem['status'] === 'current' ? 'semester-current' : $semAccents[$semIndex % count($semAccents)];
+                        $semIndex++;
+                        $statusLabel = ['current' => 'Current', 'waiting' => 'Waiting', 'ended' => 'Ended'][$sem['status']] ?? ucfirst((string) $sem['status']);
+                        $statusBadge = ['current' => 'badge-present', 'waiting' => 'badge-warning', 'ended' => 'badge-inactive'][$sem['status']] ?? 'badge-inactive';
+                        ?>
+                        <div class="admas-card semester-card <?= $accentClass ?> p-4 mb-3">
+                            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+                                <div>
+                                    <h5 class="fw-bold mb-1" style="color: var(--admas-text);">
+                                        <?= htmlspecialchars($sem['name']) ?>
+                                        <span class="badge-pill <?= $statusBadge ?> ms-2"><?= htmlspecialchars($statusLabel) ?></span>
+                                    </h5>
+                                    <p class="text-muted small mb-0">
+                                        <i class="bi bi-calendar3"></i>
+                                        <?= htmlspecialchars($sem['academic_year_label']) ?>
+                                        <?php if ($sem['start_date'] || $sem['end_date']): ?>
+                                            &middot; <?= htmlspecialchars(($sem['start_date'] ?? '?') . ' to ' . ($sem['end_date'] ?? '?')) ?>
+                                        <?php endif; ?>
+                                    </p>
+                                </div>
+                                <span class="text-muted small"><?= count($semOfferings) ?> offering<?= count($semOfferings) === 1 ? '' : 's' ?></span>
+                            </div>
+
+                            <div class="table-responsive">
+                                <table class="table admas-table align-middle mb-0">
+                                    <thead>
                                         <tr>
-                                            <td colspan="9" class="text-center text-muted py-3">No offerings yet — add one on the right.</td>
+                                            <th>Faculty</th>
+                                            <th>Shift</th>
+                                            <th>Lecturer</th>
+                                            <th>Enrolled</th>
+                                            <th>Roster Department</th>
+                                            <th>Teaching Period</th>
+                                            <th>Class Time Table</th>
+                                            <th></th>
                                         </tr>
-                                    <?php else: ?>
-                                        <?php foreach ($offerings as $o): ?>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($semOfferings as $o): ?>
                                             <?php $isGuestRow = (int) $o['offering_faculty_id'] !== $courseFacultyId; ?>
                                             <tr>
-                                                <td class="fw-semibold" style="color: var(--admas-text);">
-                                                    <?= htmlspecialchars($o['semester_name']) ?>
-                                                    <?php if ((int) $o['is_current'] === 1): ?>
-                                                        <span class="badge-pill badge-active">Current</span>
-                                                    <?php endif; ?>
-                                                </td>
                                                 <td>
                                                     <?= htmlspecialchars($o['offering_faculty_name']) ?>
                                                     <?php if ($isGuestRow): ?>
@@ -456,7 +570,6 @@ foreach ($offerings as $o) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td><?= htmlspecialchars(OFFERING_SHIFT_LABELS[$o['shift']] ?? $o['shift']) ?></td>
-                                                <td><?= htmlspecialchars($o['academic_year_label']) ?></td>
                                                 <td>
                                                     <?php if ($o['lecturer_name']): ?>
                                                         <?= htmlspecialchars($o['lecturer_name']) ?>
@@ -512,8 +625,16 @@ foreach ($offerings as $o) {
                                                         <span class="text-muted fst-italic small">Not set</span>
                                                     <?php endif; ?>
                                                 </td>
+                                                <td>
+                                                    <?php if ($o['day_of_week'] && $o['start_time'] && $o['end_time']): ?>
+                                                        <span class="small fw-semibold" style="color: var(--admas-text);"><?= htmlspecialchars(DAY_OF_WEEK_LABELS[$o['day_of_week']] ?? $o['day_of_week']) ?></span><br>
+                                                        <span class="small text-muted"><?= htmlspecialchars(format_timetable_time($o['start_time']) . ' - ' . format_timetable_time($o['end_time'])) ?><?= $o['room'] ? ' · ' . htmlspecialchars($o['room']) : '' ?></span>
+                                                    <?php else: ?>
+                                                        <span class="text-muted fst-italic small">Not scheduled</span>
+                                                    <?php endif; ?>
+                                                </td>
                                                 <td class="text-end">
-                                                                    <?php if ($isReadOnly): ?>
+                                                    <?php if ($isReadOnly): ?>
                                                         <span class="text-muted small fst-italic">View only</span>
                                                     <?php elseif ($role !== 'dean' || (int) $o['offering_faculty_id'] === $deanFacultyId): ?>
                                                         <form method="post" action="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>" style="display:inline;"
@@ -531,11 +652,35 @@ foreach ($offerings as $o) {
                                                 </td>
                                             </tr>
                                         <?php endforeach; ?>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
-                    </div>
+                    <?php endforeach; ?>
+
+                    <?php if ($totalOfferingPages > 1): ?>
+                        <div class="admas-card p-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                            <span class="text-muted small">
+                                Showing <?= number_format($offeringsOffset + 1) ?>&ndash;<?= number_format(min($offeringsOffset + OFFERINGS_PER_PAGE, $totalOfferings)) ?>
+                                of <?= number_format($totalOfferings) ?> offering<?= $totalOfferings === 1 ? '' : 's' ?>
+                            </span>
+                            <nav aria-label="Offerings pages">
+                                <ul class="pagination pagination-sm mb-0">
+                                    <li class="page-item <?= $offeringsPage <= 1 ? 'disabled' : '' ?>">
+                                        <a class="page-link" href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>&page=<?= max(1, $offeringsPage - 1) ?>">&lsaquo;</a>
+                                    </li>
+                                    <?php for ($p = 1; $p <= $totalOfferingPages; $p++): ?>
+                                        <li class="page-item <?= $p === $offeringsPage ? 'active' : '' ?>">
+                                            <a class="page-link" href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>&page=<?= $p ?>"><?= $p ?></a>
+                                        </li>
+                                    <?php endfor; ?>
+                                    <li class="page-item <?= $offeringsPage >= $totalOfferingPages ? 'disabled' : '' ?>">
+                                        <a class="page-link" href="<?= htmlspecialchars(BASE_URL) ?>/admin/course_offerings.php?course_id=<?= (int) $courseId ?>&page=<?= min($totalOfferingPages, $offeringsPage + 1) ?>">&rsaquo;</a>
+                                    </li>
+                                </ul>
+                            </nav>
+                        </div>
+                    <?php endif; ?>
                 </div>
 
                 <?php if (!$isReadOnly): ?>
@@ -618,6 +763,31 @@ foreach ($offerings as $o) {
                                 </div>
                             </div>
                             <div class="form-text">Optional — this course's actual teaching period within the selected semester. End Date auto-fills 3 months after Start Date (same as a semester's 12 Xiiso sessions); you can still edit it by hand.</div>
+
+                            <div class="mt-2">
+                                <label class="form-label small mb-1">Class Time Table — Day</label>
+                                <select class="form-select form-select-sm" name="day_of_week">
+                                    <option value="">Not scheduled</option>
+                                    <?php foreach (DAY_OF_WEEK_LABELS as $dayValue => $dayLabel): ?>
+                                        <option value="<?= htmlspecialchars($dayValue) ?>"><?= htmlspecialchars($dayLabel) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">Start Time</label>
+                                    <input type="time" class="form-control form-control-sm" name="start_time">
+                                </div>
+                                <div class="col-6">
+                                    <label class="form-label small mb-1">End Time</label>
+                                    <input type="time" class="form-control form-control-sm" name="end_time">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="form-label small mb-1">Room <span class="text-muted small">(optional)</span></label>
+                                <input type="text" class="form-control form-control-sm" name="room" maxlength="50" placeholder="e.g. Room 3">
+                            </div>
+                            <div class="form-text">Optional — shown on the Class Time Table. Leave the day/time blank if this offering isn't scheduled into a weekly slot yet.</div>
 
                             <button type="submit" class="btn btn-primary text-nowrap mt-2" style="background-color: var(--admas-sky); border-color: var(--admas-sky);" <?= empty($semesters) ? 'disabled' : '' ?>>
                                 <i class="bi bi-save"></i> Save Offering

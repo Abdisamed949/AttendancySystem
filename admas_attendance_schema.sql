@@ -30,6 +30,7 @@ INSERT INTO roles (name) VALUES
 CREATE TABLE faculties (
   id                  INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   name                VARCHAR(150) NOT NULL,
+  code                VARCHAR(20)  NOT NULL UNIQUE,  -- short code (e.g. "INF"); drives student username/password generation, see migrations/2026_08_faculties_code.sql
   semesters_per_year  TINYINT UNSIGNED NOT NULL DEFAULT 3,  -- e.g. 3 for most faculties, 2 for Health; display-only (see migrations/2026_08_faculties_semesters_per_year.sql)
   total_semesters     TINYINT UNSIGNED NOT NULL DEFAULT 8,  -- whole program length in semesters (e.g. 4 years x 2/year = 8); drives the Semester dropdown options on semesters.php (see migrations/2026_08_faculties_total_semesters.sql)
   dean_user_id        INT UNSIGNED NULL,   -- FK added after users table exists
@@ -274,6 +275,10 @@ CREATE TABLE course_offerings (
   lecturer_id  INT UNSIGNED NULL,                 -- NULL = unassigned for that semester+shift
   roster_department_id INT UNSIGNED NULL,         -- which department's students form THIS offering's roster; NULL = fall back to courses.department_id (the default, unchanged behavior — only set explicitly for a guest-faculty/cross-listed offering, see migrations/2026_08_course_offerings_roster_department.sql)
   shift        ENUM('morning','afternoon','weekend','any') NOT NULL DEFAULT 'any', -- 'any' = applies to every shift; part of the unique key below, so a course can have one offering per shift within the same semester (see migrations/2026_08_course_offerings_multi_shift.sql)
+  day_of_week  ENUM('saturday','sunday','monday','tuesday','wednesday','thursday','friday') NULL, -- Class Time Table — one day/time per offering, display-only (no conflict checking), see migrations/2026_08_course_offerings_timetable.sql
+  start_time   TIME NULL,
+  end_time     TIME NULL,
+  room         VARCHAR(50) NULL,
   start_date   DATE NULL,                         -- this course's actual teaching-period start within the semester; optional
   end_date     DATE NULL,                         -- and end — both set together, whenever known
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -289,7 +294,37 @@ CREATE TABLE course_offerings (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------------
--- 7c. LECTURER_CHECKINS (Lecturer Check-In / Check-Out)
+-- 7c. COURSE_DOCUMENTS  (lecturer-uploaded learning materials, organized
+--     by Chapter 1-7 per course, with a short description — see
+--     migrations/2026_08_course_documents.sql. Tied to the catalog course,
+--     not one specific offering, since materials are normally shared
+--     across every semester/shift the same course runs.)
+-- ---------------------------------------------------------------------
+CREATE TABLE course_documents (
+  id                      INT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  course_id               INT UNSIGNED NOT NULL,
+  document_type           ENUM('chapter', 'quiz', 'assignment') NOT NULL DEFAULT 'chapter',
+  chapter_number          TINYINT UNSIGNED NULL,       -- 1 to 7, only meaningful when document_type = 'chapter'
+  title                   VARCHAR(150) NOT NULL,
+  description             VARCHAR(500) NULL,
+  stored_filename         VARCHAR(255) NOT NULL,       -- random filename on disk, under uploads/course_documents/
+  original_filename       VARCHAR(255) NOT NULL,       -- client's own filename, display-only, never used on disk
+  file_extension          VARCHAR(10)  NOT NULL,
+  file_size               INT UNSIGNED NOT NULL,
+  cover_image_path        VARCHAR(255) NULL,           -- optional cover/background image, under uploads/course_documents/
+  uploaded_by_lecturer_id INT UNSIGNED NOT NULL,
+  download_count          INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_course_documents_course
+    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_course_documents_lecturer
+    FOREIGN KEY (uploaded_by_lecturer_id) REFERENCES lecturers(id) ON DELETE CASCADE,
+  CONSTRAINT chk_course_documents_chapter CHECK (chapter_number IS NULL OR (chapter_number BETWEEN 1 AND 7)),
+  INDEX idx_course_documents_course_chapter (course_id, chapter_number)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------------------
+-- 7e. LECTURER_CHECKINS (Lecturer Check-In / Check-Out)
 -- ---------------------------------------------------------------------
 -- A lecturer's own arrival/departure log, recorded per (course, Xiiso
 -- session) they actually teach — NOT the same thing as `attendance` above
@@ -319,6 +354,23 @@ CREATE TABLE students (
   first_name        VARCHAR(60)  NOT NULL,
   father_name       VARCHAR(60)  NOT NULL,
   grandfather_name  VARCHAR(60)  NULL,              -- optional: not every real name has 3 parts
+  -- Real enrollment-record fields from the university's paper/Excel
+  -- "Enrollment" form, beyond the core identity/scope fields below — all
+  -- nullable, since existing students predate this and are filled in later.
+  mother_name             VARCHAR(120) NULL,
+  sex                     ENUM('male','female') NULL,
+  birth_date              DATE NULL,
+  street_address          VARCHAR(255) NULL,
+  phone                   VARCHAR(30)  NULL,
+  emergency_contact_name  VARCHAR(120) NULL,
+  emergency_contact_phone VARCHAR(30)  NULL,
+  nationality             VARCHAR(80)  NULL,
+  enrollment_date         DATE NULL,
+  certificate_type        VARCHAR(120) NULL,
+  school_roll_number      VARCHAR(60)  NULL,
+  degree                  VARCHAR(120) NULL,
+  program                 VARCHAR(120) NULL,
+  class_year              VARCHAR(30)  NULL,
   full_name         VARCHAR(150) GENERATED ALWAYS AS (TRIM(CONCAT_WS(' ', first_name, father_name, grandfather_name))) STORED,
   user_id           INT UNSIGNED NOT NULL UNIQUE,   -- 1:1 login account
   academic_year_id  INT UNSIGNED NOT NULL,
@@ -328,6 +380,7 @@ CREATE TABLE students (
   semester_id       INT UNSIGNED NULL,              -- which semester (of the student's own faculty's track) they're on; NULL = not yet assigned (pre-migration students, until an admin edits the record)
   shift             ENUM('morning','afternoon','weekend') NOT NULL,
   status            ENUM('active','inactive') NOT NULL DEFAULT 'active',
+  self_registered_at TIMESTAMP NULL DEFAULT NULL, -- set once the student claims their own login via register.php; NULL = not yet self-registered
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_students_user
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -434,6 +487,30 @@ CREATE TABLE role_assignments (
   CONSTRAINT fk_ra_role    FOREIGN KEY (role_id) REFERENCES roles(id),
   CONSTRAINT fk_ra_faculty FOREIGN KEY (faculty_id) REFERENCES faculties(id) ON DELETE SET NULL,
   CONSTRAINT fk_ra_admin   FOREIGN KEY (assigned_by) REFERENCES users(id)
+) ENGINE=InnoDB;
+
+-- Audit Log: University Rector-only record of every sensitive/high-blast-
+-- radius write action (deletes, reset password, bulk actions, settings
+-- changes, factory reset, role appointment) — distinct from
+-- role_assignments above, which only ever tracked role appointment.
+-- Deliberately does NOT log routine attendance marking (attendance's own
+-- recorded_by_user_id already answers "who marked this" per record).
+CREATE TABLE audit_log (
+  id            BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  user_id       INT UNSIGNED NULL,
+  target_id     INT UNSIGNED NULL,
+  username      VARCHAR(100) NOT NULL,
+  role          VARCHAR(30) NOT NULL,
+  action        VARCHAR(60) NOT NULL,
+  target_type   VARCHAR(40) NULL,
+  target_label  VARCHAR(255) NULL,
+  details       VARCHAR(500) NULL,
+  ip_address    VARCHAR(45) NULL,
+  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_log_created_at (created_at),
+  INDEX idx_audit_log_user_id (user_id),
+  INDEX idx_audit_log_action (action),
+  CONSTRAINT fk_audit_log_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- =====================================================================

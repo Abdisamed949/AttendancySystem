@@ -58,7 +58,7 @@ if (($_GET['action'] ?? '') === 'template') {
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
     $sheet->fromArray(['Code', 'Name', 'Department', 'Credit Hours', 'Academic Year', 'Semester', 'Shift', 'Lecturer'], null, 'A1');
-    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', 3, '2025/2026', 'Semester 1', 'Morning Shift', 'Ahmed Cali'], null, 'A2');
+    $sheet->fromArray(['CS101', 'Introduction to Programming', 'Computer Science', 3, '2025', 'Semester 1', 'Morning Shift', 'Ahmed Cali'], null, 'A2');
     $sheet->fromArray(['CS205', 'Databases', 'Computer Science', 3, '', '', '', ''], null, 'A3');
     $sheet->getStyle('A1:H1')->getFont()->setBold(true);
     foreach (['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as $col) {
@@ -378,19 +378,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (empty($validRows)) {
                 $_SESSION['flash_error'] = 'There were no valid rows to import.';
             } else {
-                $conn->begin_transaction();
-                try {
-                    $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
-                    $offeringStmt = $conn->prepare(
-                        'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift) VALUES (?, ?, ?, ?)'
-                    );
-                    $imported = 0;
-                    $offeringsCreated = 0;
-                    foreach ($validRows as $row) {
+                // Each row is re-validated and committed independently —
+                // the preview step's duplicate-code check ran earlier and
+                // may now be stale (another admin, or a second import, may
+                // have created a colliding course in the meantime). One
+                // row's failure only skips that row, matching this app's
+                // established skip-and-report convention for bulk actions
+                // (e.g. bulk delete) rather than discarding the entire
+                // batch — previously a single stale collision anywhere in
+                // the file would roll back and drop every valid row.
+                $insertStmt = $conn->prepare('INSERT INTO courses (code, name, department_id, credit_hours) VALUES (?, ?, ?, ?)');
+                $offeringStmt = $conn->prepare(
+                    'INSERT INTO course_offerings (course_id, semester_id, lecturer_id, shift) VALUES (?, ?, ?, ?)'
+                );
+                $dupCheckStmt = $conn->prepare('SELECT id FROM courses WHERE department_id = ? AND UPPER(code) = ?');
+
+                $imported = 0;
+                $offeringsCreated = 0;
+                $failedRows = [];
+
+                foreach ($validRows as $row) {
+                    $dupCheckStmt->bind_param('is', $row['department_id'], $row['code']);
+                    $dupCheckStmt->execute();
+                    if ($dupCheckStmt->get_result()->fetch_assoc()) {
+                        $failedRows[] = 'Row ' . $row['row'] . ' (' . $row['code'] . '): code now already exists in this department';
+                        continue;
+                    }
+
+                    $conn->begin_transaction();
+                    try {
                         $insertStmt->bind_param('ssii', $row['code'], $row['name'], $row['department_id'], $row['credit_hours']);
                         $insertStmt->execute();
                         $newCourseId = (int) $conn->insert_id;
-                        $imported++;
 
                         // Same opt-in rule as the manual Add Course form: only rows
                         // that resolved a Semester (validated in the preview step
@@ -401,18 +420,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $offeringStmt->execute();
                             $offeringsCreated++;
                         }
-                    }
-                    $insertStmt->close();
-                    $offeringStmt->close();
-                    $conn->commit();
 
-                    $skipped = count($previewRows) - $imported;
-                    $_SESSION['flash_success'] = "Imported {$imported} course(s) successfully."
-                        . ($offeringsCreated > 0 ? " Created {$offeringsCreated} semester offering(s)." : '')
-                        . ($skipped > 0 ? " Skipped {$skipped} invalid row(s)." : '');
-                } catch (\Throwable $e) {
-                    $conn->rollback();
-                    $_SESSION['flash_error'] = 'Import failed while saving to the database. No rows were added.';
+                        $conn->commit();
+                        $imported++;
+                    } catch (\Throwable $e) {
+                        $conn->rollback();
+                        $failedRows[] = 'Row ' . $row['row'] . ' (' . $row['code'] . '): could not be saved';
+                    }
+                }
+                $insertStmt->close();
+                $offeringStmt->close();
+                $dupCheckStmt->close();
+
+                $skipped = count($previewRows) - count($validRows) + count($failedRows);
+                $message = "Imported {$imported} course(s) successfully."
+                    . ($offeringsCreated > 0 ? " Created {$offeringsCreated} semester offering(s)." : '')
+                    . ($skipped > 0 ? " Skipped {$skipped} invalid row(s)." : '');
+                if (!empty($failedRows)) {
+                    $message .= ' Failed at confirm time: ' . implode(' | ', $failedRows);
+                }
+
+                if ($imported > 0) {
+                    $_SESSION['flash_success'] = $message;
+                } else {
+                    $_SESSION['flash_error'] = $message;
                 }
             }
         }
